@@ -1,0 +1,55 @@
+schema_version: '2.1'
+design_name: five_transistor_ota
+
+targets:
+  dc_gain:              {min: 45, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
+  phase_margin:         {min: 60, unit: deg, priority: 1}
+  power:                {max: 3.0e-04, unit: W, priority: 9}
+  cmrr:                 {min: 10, unit: dB, priority: 9}
+  psrr_plus:            {min: 10, unit: dB, priority: 9}
+
+design_variables:
+  - {device: M1, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
+  # M1/M2 L expanded [130nm,500nm]→[130nm,1μm]→[130nm,1.5μm] per iter_002: 44.6dB still 0.4dB short of 45dB target
+  - {device: M1, variable: L,     range: {min: 1.3e-07, max: 1.5e-06}, initial: 2e-07, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: L,     range: {min: 1.3e-07, max: 1.5e-06}, initial: 2e-07, symmetry_label: sym_M1_M2}
+  - {device: M3, variable: gm_id, range: {min: 5, max: 12}, initial: 8, symmetry_label: sym_load_M3_M4}
+  - {device: M3, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 5e-07, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: gm_id, range: {min: 5, max: 12}, initial: 8, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 5e-07, symmetry_label: sym_load_M3_M4}
+  # M5: tightened gm_id [8,20]→[5,9] per inversion diagnosis (IC=2.33<5, need strong inversion)
+  - {device: M5, variable: gm_id, range: {min: 5, max: 9}, initial: 8}
+  - {device: M5, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 2e-07}
+  - {device: "", variable: I_tail, range: {min: 1.0e-06, max: 2.5e-04}, initial: 5.0e-05, unit: A, description: "tail current"}
+
+corrections:
+  gm_factor: 0.78
+  gds_factor: 0.85
+  c_factor: 1.0
+  description: "iter_001: gm_factor=0.78 (UGBW<1%), gds_factor→0.85 (dc_gain +4.4% bias)"
+
+constraints:
+  gm_id: {min: 5, max: 25}
+  L: {min: 1.3e-07, max: 1.5e-06}
+  devices:
+    M1: {gm_id: {min: 12, max: 25}}
+    M2: {gm_id: {min: 12, max: 25}}
+    M3: {gm_id: {min: 5, max: 12}}
+    M4: {gm_id: {min: 5, max: 12}}
+    M5: {gm_id: {min: 5, max: 9}}
+
+loss_terms:
+  - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 4.0, description: "DC gain shortfall"}
+  - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 2.0, description: "BW shortfall"}
+  - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 0.5, description: "PM penalty"}
+  - {id: power_ratio,  formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.3, description: "Power ratio"}
+  - {id: cmrr_deficit, formula: "relu(targets.cmrr.min - realized.cmrr)/max(targets.cmrr.min, 1)", weight: 0.2, description: "CMRR penalty"}
+  - {id: psrr_deficit, formula: "relu(targets.psrr_plus.min - realized.psrr_plus)/max(targets.psrr_plus.min, 1)", weight: 0.2, description: "PSRR+ penalty"}
+
+evaluations:
+  - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}
+  - {name: unity_gain_bandwidth, type: ugbw, probe: vout, target_ref: unity_gain_bandwidth}
+  - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
+  - {name: total_power, type: dc_power, target_ref: power}

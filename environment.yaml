@@ -1,0 +1,56 @@
+schema_version: '1.0'
+process:
+  process_name: PTM_130nm
+  technology_node: 0.13
+  foundry: PTM
+  model_lib: ptm_130.lib
+  nmos_model: nmos
+  pmos_model: pmos
+  VTH_n: 0.3782
+  VTH_p: 0.321
+  KP_n: 0.00091
+  KP_p: 0.000123
+  COX: 0.01535
+simulation:
+  simulator: ngspice
+  temperature: 27.0
+  supply:
+    vdd: 1.2
+    vss: 0.0
+  analyses:
+  - op
+  - ac
+  ac_start: 1.0
+  ac_stop: 10000000000.0
+  ac_points: 50
+  cload: 2.0e-13
+  bias_voltage: 0.6
+tools:
+  ngspice_bin: ngspice
+  pygmid_tables_dir: tables
+  nmos_table: tables/ptm130_nmos.npz
+  pmos_table: tables/ptm130_pmos.npz
+design_rules:
+  min_L: 1.3e-07
+  max_L: 1.0e-05
+  min_W: 1.5e-07
+  max_W: 0.0002
+  W_precision: 1.0e-08
+  L_precision: 1.0e-09
+  min_area: 2.0e-14
+  max_W_L_ratio: 1000.0
+  min_W_L_ratio: 0.1
+  max_finger_width: 1.0e-05
+  max_VGS: 1.32
+  max_VDS: 1.32
+  VDS_safe_margin: 0.15
+  nominal_VDD: 1.2
+  VDD_min: 1.08
+  VDD_max: 1.32
+  gm_id_min: 3.0
+  gm_id_max: 28.0
+  VDSAT_headroom_factor: 1.3
+  n_sub_nmos: 1.4
+  n_sub_pmos: 1.4
+  mu_n: 0.04
+  mu_p: 0.01
