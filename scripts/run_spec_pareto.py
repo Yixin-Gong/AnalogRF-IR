@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import (  # noqa: E402
+    _existing_project_path,
     _resolve_project_path,
     backfill_state_from_ngspice,
     balance_two_stage_output,
@@ -245,6 +246,7 @@ def plot_front(out_dir: Path, est_rows: List[Dict[str, Any]], meas_rows: List[Di
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run spec-level Pareto search")
+    parser.add_argument("--env", default="environment.yaml")
     parser.add_argument("--schema", default="ir/schema_two_stage.yaml")
     parser.add_argument("--topology", choices=("auto", "five", "two_stage"), default="auto")
     parser.add_argument("--pop-size", type=int, default=180)
@@ -254,17 +256,19 @@ def main(argv=None) -> int:
     parser.add_argument("--ngspice-bin", default=None)
     args = parser.parse_args(argv)
 
-    env = load_environment()
+    env_path = _resolve_project_path(args.env)
+    env = load_environment(env_path)
     schema_path = _resolve_project_path(args.schema)
     state = build_design_state(env, schema_path, args.topology)
 
     tables_dir = env.get("tools", {}).get("pygmid_tables_dir", "tables")
     nmos_table = env.get("tools", {}).get("nmos_table")
     pmos_table = env.get("tools", {}).get("pmos_table")
+    explicit_tables = bool(nmos_table or pmos_table)
     pygmid = create_pygmid_adapter(
-        nmos_path=nmos_table if nmos_table and Path(nmos_table).exists() else None,
-        pmos_path=pmos_table if pmos_table and Path(pmos_table).exists() else None,
-        tables_dir=tables_dir if not (nmos_table and pmos_table) else None,
+        nmos_path=_existing_project_path(nmos_table),
+        pmos_path=_existing_project_path(pmos_table),
+        tables_dir=None if explicit_tables else str(_resolve_project_path(tables_dir)),
     )
 
     evaluator = SpecParetoEvaluator(CircuitEvaluator(state, pygmid))
@@ -329,6 +333,7 @@ def main(argv=None) -> int:
     plot_front(out_dir, front_rows, ngspice_rows)
 
     summary = {
+        "env": str(env_path),
         "schema": str(schema_path),
         "pop_size": args.pop_size,
         "generations": args.generations,

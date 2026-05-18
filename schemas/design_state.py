@@ -244,6 +244,9 @@ class ProcessInfo:
     technology_node: float = 0.13
     foundry: str = ""
     model_lib: str = ""
+    model_corner: str = ""
+    osdi_libs: List[str] = field(default_factory=list)
+    device_style: str = "mos"            # mos | subckt
     nmos_model: str = "nmos"
     pmos_model: str = "pmos"
     VTH_n: float = 0.3782

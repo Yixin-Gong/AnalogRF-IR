@@ -12,22 +12,48 @@ DEFAULT_L_SWEEP = [130e-9,150e-9,180e-9,220e-9,270e-9,350e-9,500e-9,750e-9,1.0e-
 DEFAULT_VGS_START, DEFAULT_VGS_STOP, DEFAULT_VGS_STEP = 0.0, 1.2, 0.05
 DEFAULT_VDS, DEFAULT_VSB, DEFAULT_W = 0.6, 0.0, 1e-6
 
-def generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds, W=DEFAULT_W, lib=MODEL_LIB):
-    model = "nmos" if dev=="nmos" else "pmos"
+def _resolve_model_path(lib: str) -> Path:
     p = Path(lib)
     if not p.is_absolute():
         c = Path(__file__).parent.parent / lib
         p = c.resolve() if c.exists() else p.resolve()
+    return p
+
+def _library_lines(lib: str, corner: str = "") -> List[str]:
+    p = _resolve_model_path(lib)
+    if corner:
+        return [f'.lib "{p}" {corner}', ".temp 27", ""]
+    return [f'.include "{p}"', ".temp 27", ""]
+
+def _device_line(style: str, dev: str, model: str, W: float, L: float) -> str:
+    if style == "subckt":
+        return f"X1 d g s b {model} W={W} L={L}"
+    prefix = "M1"
+    return f"{prefix} d g s b {model} W={W} L={L}"
+
+def _op_exprs(style: str, model: str) -> str:
+    if style == "subckt":
+        inner = f"n.x1.n{model.lower()}"
+        params = ("gm", "gds", "vdss", "cgg", "cgs", "cgd")
+        return " ".join(f"@{inner}[{param}]" for param in params)
+    return "@m1[gm] @m1[gds] @m1[vth] @m1[vdsat] @m1[cgg] @m1[cgs] @m1[cgd]"
+
+def generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds, W=DEFAULT_W, lib=MODEL_LIB,
+                     corner: str = "", nmos_model: str = "nmos", pmos_model: str = "pmos",
+                     device_style: str = "mos"):
+    model = nmos_model if dev=="nmos" else pmos_model
     vlist = np.arange(vgs0, vgs1+vgs_step/2, vgs_step)
     vstr = " ".join(f"{v:.4f}" for v in vlist)
+    libs = _library_lines(lib, corner)
+    op_exprs = _op_exprs(device_style, model)
     if dev == "pmos":
         vdd, vs, vd = 1.2, 1.2, vds  # V(d) = vds, current flows from s→d→VDS_dummy→0
         # PMOS needs negative VGS: V(g) < V(s) to turn on
         vstr_neg = " ".join(f"{-v:.4f}" for v in vlist)
         return "\n".join([
             f"* techsweep pmos L={L*1e9:.0f}nm |VDS|={vds}V",
-            f".include {p}", ".temp 27", "",
-            f"M1 d g s s {model} W={W} L={L}",
+            *libs,
+            _device_line(device_style, dev, model, W, L).replace(" s b ", " s s "),
             f"Vsup s 0 DC {vs}",
             f"VGS_sweep g s DC 0",
             f"VDS_dummy d 0 DC {vd}",
@@ -35,26 +61,30 @@ def generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds, W=DEFAULT_W, lib=MODEL_L
             ".control",
             f"  foreach vgs_val {vstr_neg}",
             "    alter VGS_sweep dc = $vgs_val", "    op",
-            "    print v(s,g) i(VDS_dummy) @m1[gm] @m1[gds] @m1[vth] @m1[vdsat] @m1[cgg] @m1[cgs] @m1[cgd]",
+            f"    print v(s,g) i(VDS_dummy) {op_exprs}",
             "  end", ".endc", "", ".end",
         ])
     else:
         return "\n".join([
             f"* techsweep nmos L={L*1e9:.0f}nm VDS={vds}V",
-            f".include {p}", ".temp 27", "",
-            f"M1 d g 0 0 {model} W={W} L={L}",
+            *libs,
+            _device_line(device_style, dev, model, W, L).replace(" s b ", " 0 0 "),
             f"VGS g 0 DC 0", f"VDS d 0 DC {vds}", "",
             ".control",
             f"  foreach vgs_val {vstr}",
             "    alter VGS dc = $vgs_val", "    op",
-            "    print v(g) i(vds) @m1[gm] @m1[gds] @m1[vth] @m1[vdsat] @m1[cgg] @m1[cgs] @m1[cgd]",
+            f"    print v(g) i(vds) {op_exprs}",
             "  end", ".endc", "", ".end",
         ])
 
-def run_sim(netlist, wdir, timeout=120):
+def run_sim(netlist, wdir, timeout=120, osdi_libs: Optional[List[str]] = None):
     os.makedirs(wdir, exist_ok=True)
     cp = os.path.join(wdir, "techsweep.cir")
     with open(cp,"w") as f: f.write(netlist)
+    if osdi_libs:
+        with open(os.path.join(wdir, ".spiceinit"), "w") as f:
+            for osdi in osdi_libs:
+                f.write(f"osdi {_resolve_model_path(osdi)}\n")
     try:
         p = subprocess.run([NGSPICE_BIN,"-b",os.path.abspath(cp)], capture_output=True, text=True, timeout=timeout, cwd=wdir)
         return (p.returncode==0, p.stdout)
@@ -64,30 +94,37 @@ def run_sim(netlist, wdir, timeout=120):
 def parse_output(stdout):
     vgs_l,id_l,gm_l,gds_l,vth_l,vsat_l,cgg_l,cgs_l,cgd_l = [],[],[],[],[],[],[],[],[]
     cur = {}
+    def get_param(values: Dict[str, float], name: str, default: float = 0.0) -> float:
+        for key in (f"@m1[{name}]", f"@m1[{name.lower()}]"):
+            if key in values:
+                return values[key]
+        suffix = f"[{name.lower()}]"
+        for key, value in values.items():
+            if key.lower().endswith(suffix):
+                return value
+        return default
+
+    def flush(values: Dict[str, float]) -> None:
+        if len(values) < 4:
+            return
+        vgs_l.append(values.get("v(g)", values.get("v(s,g)", 0)))
+        id_l.append(values.get("i(vds)", values.get("i(VDS_dummy)", values.get("i(vds_dummy)", 0))))
+        gm_l.append(get_param(values, "gm"))
+        gds_l.append(get_param(values, "gds"))
+        vth_l.append(get_param(values, "vth"))
+        vsat_l.append(get_param(values, "vdsat", get_param(values, "vdss")))
+        cgg_l.append(get_param(values, "cgg"))
+        cgs_l.append(get_param(values, "cgs"))
+        cgd_l.append(get_param(values, "cgd"))
+
     for line in stdout.split("\n"):
         s = line.strip()
         if not s:
-            if len(cur) >= 4:
-                try:
-                    vgs_l.append(cur.get("v(g)", cur.get("v(s,g)", 0)))
-                    id_l.append(cur.get("i(vds)", cur.get("i(VDS_dummy)", cur.get("i(vds_dummy)", 0))))
-                    gm_l.append(cur["@m1[gm]"]); gds_l.append(cur["@m1[gds]"])
-                    vth_l.append(cur.get("@m1[vth]",0)); vsat_l.append(cur.get("@m1[vdsat]",0))
-                    cgg_l.append(cur.get("@m1[cgg]",0)); cgs_l.append(cur.get("@m1[cgs]",0))
-                    cgd_l.append(cur.get("@m1[cgd]",0))
-                except KeyError: pass
+            flush(cur)
             cur = {}; continue
         m = re.match(r'^(.+?)\s*=\s*([-+]?\d+\.?\d*(?:[eE][-+]?\d+)?)', s)
         if m: cur[m.group(1).strip()] = float(m.group(2))
-    if len(cur) >= 4:
-        try:
-            vgs_l.append(cur.get("v(g)",cur.get("v(s,g)",0)))
-            id_l.append(cur.get("i(vds)",cur.get("i(VDS_dummy)",cur.get("i(vds_dummy)",0))))
-            gm_l.append(cur["@m1[gm]"]); gds_l.append(cur["@m1[gds]"])
-            vth_l.append(cur.get("@m1[vth]",0)); vsat_l.append(cur.get("@m1[vdsat]",0))
-            cgg_l.append(cur.get("@m1[cgg]",0)); cgs_l.append(cur.get("@m1[cgs]",0))
-            cgd_l.append(cur.get("@m1[cgd]",0))
-        except KeyError: pass
+    flush(cur)
     if len(vgs_l) < 3: return None
     return {"VGS":np.array(vgs_l),"ID":np.abs(np.array(id_l)),"GM":np.abs(np.array(gm_l)),
             "GDS":np.abs(np.array(gds_l)),"VTH":np.array(vth_l),"VDSAT":np.array(vsat_l),
@@ -107,10 +144,10 @@ def build_2d(L_grid, vgs_grid, all_data, vds, vsb, W):
         cgw = np.abs(d.get("CGG",np.zeros_like(iw)))/W
         csw = np.abs(d.get("CGS",np.zeros_like(iw)))/W
         cdw = np.abs(d.get("CGD",np.zeros_like(iw)))/W
-        ids = np.divide(gw, iw, where=iw>1e-18)
-        ggs = np.divide(gw, gdw, where=gdw>1e-18)
-        gcs = np.divide(gw, cgw, where=cgw>1e-18)
-        ft  = np.divide(gw, 2*math.pi*cgw, where=cgw>1e-18)
+        ids = np.divide(gw, iw, out=np.zeros_like(gw), where=iw>1e-18)
+        ggs = np.divide(gw, gdw, out=np.zeros_like(gw), where=gdw>1e-18)
+        gcs = np.divide(gw, cgw, out=np.zeros_like(gw), where=cgw>1e-18)
+        ft  = np.divide(gw, 2*math.pi*cgw, out=np.zeros_like(gw), where=cgw>1e-18)
         for k, src in [("ID_W",iw),("GM_W",gw),("GDS_W",gdw),("VTH",d.get("VTH",np.zeros_like(iw))),
                         ("VDSAT",d.get("VDSAT",np.zeros_like(iw))),("CGG_W",cgw),("CGS_W",csw),
                         ("CGD_W",cdw),("FT",ft),("GM_ID",ids),("GM_GDS",ggs),("GM_CGG",gcs)]:
@@ -135,20 +172,27 @@ def build_2d(L_grid, vgs_grid, all_data, vds, vsb, W):
 
 def generate_table(dev, L_sweep=None, vgs0=DEFAULT_VGS_START, vgs1=DEFAULT_VGS_STOP,
                    vgs_step=DEFAULT_VGS_STEP, vds=DEFAULT_VDS, vsb=DEFAULT_VSB,
-                   output_dir="tables", verbose=True, keep_tmp=False):
+                   output_dir="tables", verbose=True, keep_tmp=False, model_lib=MODEL_LIB,
+                   model_corner: str = "", nmos_model: str = "nmos", pmos_model: str = "pmos",
+                   device_style: str = "mos", osdi_libs: Optional[List[str]] = None,
+                   output_prefix: str = "ptm130"):
     if L_sweep is None: L_sweep = DEFAULT_L_SWEEP
     vgs_grid = np.arange(vgs0, vgs1+vgs_step/2, vgs_step)
     if verbose: print(f"  VGS grid: {len(vgs_grid)} pts ({vgs0:.2f}->{vgs1:.2f}V)")
     all_data = []; tmp_dir = os.path.join(output_dir, f"tmp_{dev}")
     for i, L in enumerate(L_sweep):
         if verbose: print(f"  [{i+1}/{len(L_sweep)}] L={L*1e9:.0f}nm ...", end=" ", flush=True)
-        nl = generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds)
-        ok, out = run_sim(nl, tmp_dir, 120)
+        nl = generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds, lib=model_lib,
+                              corner=model_corner, nmos_model=nmos_model,
+                              pmos_model=pmos_model, device_style=device_style)
+        ok, out = run_sim(nl, tmp_dir, 120, osdi_libs=osdi_libs)
         if not ok: print("FAILED"); continue
         d = parse_output(out)
         if d is None: print("FAILED (parse)"); continue
         all_data.append(d)
-        ids = np.divide(np.abs(d["GM"]), np.abs(d["ID"]), where=np.abs(d["ID"])>1e-18)
+        gm_abs = np.abs(d["GM"])
+        id_abs = np.abs(d["ID"])
+        ids = np.divide(gm_abs, id_abs, out=np.zeros_like(gm_abs), where=id_abs>1e-18)
         if verbose:
             vv = ids[np.abs(d["ID"])>1e-18]
             rng = (float(np.min(vv)),float(np.max(vv))) if len(vv)>=2 else (0,0)
@@ -156,7 +200,7 @@ def generate_table(dev, L_sweep=None, vgs0=DEFAULT_VGS_START, vgs1=DEFAULT_VGS_S
     if not all_data: print("  No valid data"); return None
     tbl = build_2d(L_sweep, vgs_grid, all_data, vds, vsb, DEFAULT_W)
     os.makedirs(output_dir, exist_ok=True)
-    fn = os.path.join(output_dir, f"ptm130_{dev}.npz")
+    fn = os.path.join(output_dir, f"{output_prefix}_{dev}.npz")
     np.savez_compressed(fn, **tbl)
     if verbose: print(f"  Saved: {fn}")
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -167,7 +211,7 @@ def generate_table(dev, L_sweep=None, vgs0=DEFAULT_VGS_START, vgs1=DEFAULT_VGS_S
     return fn
 
 def main():
-    ap = argparse.ArgumentParser(description="Generate gm/ID lookup tables for PTM 130nm BSIM4")
+    ap = argparse.ArgumentParser(description="Generate gm/ID lookup tables using ngspice operating points")
     ap.add_argument("--device", choices=["nmos","pmos","both"], default="both")
     ap.add_argument("--vds", type=float, default=DEFAULT_VDS)
     ap.add_argument("--vgs-start", type=float, default=DEFAULT_VGS_START)
@@ -178,20 +222,33 @@ def main():
     ap.add_argument("--L-max", type=float, default=2e-6)
     ap.add_argument("--L-points", type=int, default=11)
     ap.add_argument("--keep-tmp", action="store_true")
+    ap.add_argument("--model-lib", type=str, default=MODEL_LIB)
+    ap.add_argument("--model-corner", type=str, default="")
+    ap.add_argument("--nmos-model", type=str, default="nmos")
+    ap.add_argument("--pmos-model", type=str, default="pmos")
+    ap.add_argument("--device-style", choices=["mos", "subckt"], default="mos")
+    ap.add_argument("--osdi", action="append", default=[])
+    ap.add_argument("--output-prefix", type=str, default="ptm130")
     args = ap.parse_args()
     L_grid = list(np.logspace(math.log10(args.L_min), math.log10(args.L_max), args.L_points))
-    print(f"PTM 130nm gm/ID Lookup Table Generator V2 (BSIM4 params)")
+    print(f"gm/ID Lookup Table Generator V2")
     print(f"  VDS={args.vds}V  L: {[f'{l*1e9:.0f}nm' for l in L_grid]}")
     if args.device in ("nmos","both"):
         print("\n-- NMOS --")
         generate_table("nmos", L_sweep=L_grid, vds=args.vds, vgs0=args.vgs_start,
                        vgs1=args.vgs_stop, vgs_step=args.vgs_step, output_dir=args.output,
-                       keep_tmp=args.keep_tmp)
+                       keep_tmp=args.keep_tmp, model_lib=args.model_lib,
+                       model_corner=args.model_corner, nmos_model=args.nmos_model,
+                       pmos_model=args.pmos_model, device_style=args.device_style,
+                       osdi_libs=args.osdi, output_prefix=args.output_prefix)
     if args.device in ("pmos","both"):
         print("\n-- PMOS --")
         generate_table("pmos", L_sweep=L_grid, vds=args.vds, vgs0=args.vgs_start,
                        vgs1=args.vgs_stop, vgs_step=args.vgs_step, output_dir=args.output,
-                       keep_tmp=args.keep_tmp)
+                       keep_tmp=args.keep_tmp, model_lib=args.model_lib,
+                       model_corner=args.model_corner, nmos_model=args.nmos_model,
+                       pmos_model=args.pmos_model, device_style=args.device_style,
+                       osdi_libs=args.osdi, output_prefix=args.output_prefix)
     print("\nDone.")
 
 if __name__ == "__main__":

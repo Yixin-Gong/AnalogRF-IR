@@ -17,7 +17,7 @@ PTM 130nm · NSGA-II · Boris Murmann Pygmid · ngspice 后仿真
   5. 创建 CircuitEvaluator
   6. NSGA-II 优化搜索 → 最优 (gm_id, L) 决策变量
   7. W/L rounding 到工艺网格
-  8. 生成 SPICE 网表（PTM 130nm, .include ptm_130.lib）
+  8. 生成 SPICE 网表
   9. 调用 ngspice 批量仿真
  10. 解析仿真结果，生成仿真 log
  11. 保存全部输出到 runs/iter_NNN/
@@ -69,6 +69,13 @@ def _resolve_project_path(path_like: str | Path) -> Path:
     return path
 
 
+def _existing_project_path(path_like: str | Path | None) -> str | None:
+    if not path_like:
+        return None
+    path = _resolve_project_path(path_like)
+    return str(path) if path.exists() else None
+
+
 def load_environment(env_path: Path = None) -> dict:
     """加载工具链与工艺配置。
 
@@ -95,6 +102,9 @@ def _default_environment() -> dict:
             "technology_node": 0.13,
             "foundry": "PTM",
             "model_lib": "ptm_130.lib",
+            "model_corner": "",
+            "osdi_libs": [],
+            "device_style": "mos",
             "nmos_model": "nmos",
             "pmos_model": "pmos",
             "VTH_n": 0.3782, "VTH_p": 0.321,
@@ -143,6 +153,9 @@ def build_process_info(env: dict) -> ProcessInfo:
         technology_node=p.get("technology_node", 0.13),
         foundry=p.get("foundry", "PTM"),
         model_lib=p.get("model_lib", "ptm_130.lib"),
+        model_corner=p.get("model_corner", ""),
+        osdi_libs=p.get("osdi_libs", []) or [],
+        device_style=p.get("device_style", "mos"),
         nmos_model=p.get("nmos_model", "nmos"),
         pmos_model=p.get("pmos_model", "pmos"),
         VTH_n=p.get("VTH_n", 0.3782), VTH_p=p.get("VTH_p", 0.321),
@@ -212,6 +225,8 @@ def build_five_transistor_ota_ptm130(
     )
 
     # ── L1: 拓扑 (仅人) ──
+    nmos_model = env.get("process", {}).get("nmos_model", "nmos")
+    pmos_model = env.get("process", {}).get("pmos_model", "pmos")
     state.topology = Topology(
         name="five_transistor_ota",
         class_="ota",
@@ -228,23 +243,23 @@ def build_five_transistor_ota_ptm130(
         ],
         devices=[
             DeviceDefinition(
-                id="M1", role="input_pair", stage="input", type="nmos", model="nmos",
+                id="M1", role="input_pair", stage="input", type="nmos", model=nmos_model,
                 connections={"drain": "net1", "gate": "vinn", "source": "tail", "body": "gnd"}
             ),
             DeviceDefinition(
-                id="M2", role="input_pair", stage="input", type="nmos", model="nmos",
+                id="M2", role="input_pair", stage="input", type="nmos", model=nmos_model,
                 connections={"drain": "vout", "gate": "vinp", "source": "tail", "body": "gnd"}
             ),
             DeviceDefinition(
-                id="M3", role="current_mirror_load", stage="load", type="pmos", model="pmos",
+                id="M3", role="current_mirror_load", stage="load", type="pmos", model=pmos_model,
                 connections={"drain": "net1", "gate": "net1", "source": "vdd", "body": "vdd"}
             ),
             DeviceDefinition(
-                id="M4", role="current_mirror_load", stage="load", type="pmos", model="pmos",
+                id="M4", role="current_mirror_load", stage="load", type="pmos", model=pmos_model,
                 connections={"drain": "vout", "gate": "net1", "source": "vdd", "body": "vdd"}
             ),
             DeviceDefinition(
-                id="M5", role="tail_current_source", stage="bias", type="nmos", model="nmos",
+                id="M5", role="tail_current_source", stage="bias", type="nmos", model=nmos_model,
                 connections={"drain": "tail", "gate": "vbias", "source": "gnd", "body": "gnd"}
             ),
         ],
@@ -370,6 +385,8 @@ def build_two_stage_ota_ptm130(
         env = _default_environment()
 
     state = DesignState(schema_version="2.1", design_name="two_stage_ota")
+    nmos_model = env.get("process", {}).get("nmos_model", "nmos")
+    pmos_model = env.get("process", {}).get("pmos_model", "pmos")
     state.topology = Topology(
         name="two_stage_ota",
         class_="ota",
@@ -387,31 +404,31 @@ def build_two_stage_ota_ptm130(
         ],
         devices=[
             DeviceDefinition(
-                id="M1", role="input_pair", stage="input", type="nmos", model="nmos",
+                id="M1", role="input_pair", stage="input", type="nmos", model=nmos_model,
                 connections={"drain": "net1", "gate": "vinn", "source": "tail", "body": "gnd"}
             ),
             DeviceDefinition(
-                id="M2", role="input_pair", stage="input", type="nmos", model="nmos",
+                id="M2", role="input_pair", stage="input", type="nmos", model=nmos_model,
                 connections={"drain": "n1", "gate": "vinp", "source": "tail", "body": "gnd"}
             ),
             DeviceDefinition(
-                id="M3", role="current_mirror_load", stage="load", type="pmos", model="pmos",
+                id="M3", role="current_mirror_load", stage="load", type="pmos", model=pmos_model,
                 connections={"drain": "net1", "gate": "net1", "source": "vdd", "body": "vdd"}
             ),
             DeviceDefinition(
-                id="M4", role="current_mirror_load", stage="load", type="pmos", model="pmos",
+                id="M4", role="current_mirror_load", stage="load", type="pmos", model=pmos_model,
                 connections={"drain": "n1", "gate": "net1", "source": "vdd", "body": "vdd"}
             ),
             DeviceDefinition(
-                id="M5", role="tail_current_source", stage="bias", type="nmos", model="nmos",
+                id="M5", role="tail_current_source", stage="bias", type="nmos", model=nmos_model,
                 connections={"drain": "tail", "gate": "vbias_tail", "source": "gnd", "body": "gnd"}
             ),
             DeviceDefinition(
-                id="M6", role="second_stage_gain", stage="output", type="pmos", model="pmos",
+                id="M6", role="second_stage_gain", stage="output", type="pmos", model=pmos_model,
                 connections={"drain": "vout", "gate": "n1", "source": "vdd", "body": "vdd"}
             ),
             DeviceDefinition(
-                id="M7", role="output_current_source", stage="output", type="nmos", model="nmos",
+                id="M7", role="output_current_source", stage="output", type="nmos", model=nmos_model,
                 connections={"drain": "vout", "gate": "vbias_stage2", "source": "gnd", "body": "gnd"}
             ),
         ],
@@ -812,7 +829,7 @@ def save_simulation_log(
         "iteration": iteration,
         "timestamp": datetime.now().isoformat(),
         "design_name": state.design_name,
-        "process": "PTM_130nm",
+        "process": state.process.process_name,
         "supply_vdd": state.simulation.supply.get("vdd", 1.2),
 
         "optimizer": {
@@ -981,50 +998,81 @@ def balance_two_stage_output(
     if not gain_id or not sink_id:
         return {}
     gain_ts = state.transistors.get(gain_id)
+    sink_ts = state.transistors.get(sink_id)
     if not gain_ts or gain_ts.parameters.W <= 0:
         return {}
 
     vdd = state.simulation.supply.get("vdd", 1.2)
     target = 0.5 * vdd
     base_w = gain_ts.parameters.W
-    best = {"scale": 1.0, "vout": None, "error": float("inf")}
+    proc = state.process
+    min_w = getattr(proc, "min_W", 150e-9)
+    max_w = getattr(proc, "max_W", 200e-6)
+    base_sink_w = sink_ts.parameters.W if sink_ts and sink_ts.parameters.W > 0 else None
+    best = {"scale": 1.0, "sink_scale": 1.0, "vout": None, "error": float("inf")}
 
-    def evaluate(scale: float) -> float | None:
-        gain_ts.parameters.W = base_w * scale
+    def _clip_width(width: float) -> float:
+        return min(max(width, min_w), max_w)
+
+    def evaluate(scale: float, sink_scale: float = 1.0) -> float | None:
+        gain_ts.parameters.W = min(max(base_w * scale, min_w), max_w)
+        if sink_ts and base_sink_w:
+            sink_ts.parameters.W = _clip_width(base_sink_w * sink_scale)
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
         vout = _stage2_vout_from_result(state, trial)
         if vout is None:
             return None
         err = abs(vout - target)
         if err < best["error"]:
-            best.update({"scale": scale, "vout": vout, "error": err})
+            best.update({"scale": scale, "sink_scale": sink_scale, "vout": vout, "error": err})
         return vout
 
-    lo, hi = 0.25, 4.0
+    lo = max(0.0625, min_w / base_w) if base_w > 0 else 0.0625
+    hi = min(16.0, max_w / base_w) if base_w > 0 else 16.0
+    if hi <= lo:
+        gain_ts.parameters.W = min(max(base_w, min_w), max_w)
+        return {}
     vlo = evaluate(lo)
     vhi = evaluate(hi)
     if vlo is None or vhi is None:
         gain_ts.parameters.W = base_w
+        if sink_ts and base_sink_w:
+            sink_ts.parameters.W = base_sink_w
         return {}
 
-    increasing = vhi > vlo
-    for _ in range(max_iter):
-        mid = math.sqrt(lo * hi)
-        vmid = evaluate(mid)
-        if vmid is None:
-            break
-        if increasing:
-            if vmid < target:
-                lo = mid
+    if min(vlo, vhi) <= target <= max(vlo, vhi):
+        increasing = vhi > vlo
+        for _ in range(max_iter):
+            mid = math.sqrt(lo * hi)
+            vmid = evaluate(mid)
+            if vmid is None:
+                break
+            if increasing:
+                if vmid < target:
+                    lo = mid
+                else:
+                    hi = mid
             else:
-                hi = mid
+                if vmid < target:
+                    hi = mid
+                else:
+                    lo = mid
+    elif sink_ts and base_sink_w:
+        if best["vout"] is not None and best["vout"] < target:
+            gain_scale = hi
+            sink_candidates = [1.0, 0.75, 0.5, 0.33, 0.2, 0.125, 0.08]
         else:
-            if vmid < target:
-                hi = mid
-            else:
-                lo = mid
+            gain_scale = lo
+            sink_hi = min(16.0, max_w / base_sink_w) if base_sink_w > 0 else 16.0
+            sink_candidates = [1.0, 1.5, 2.0, 3.0, 5.0, 8.0, sink_hi]
+        for sink_scale in sink_candidates:
+            if sink_scale <= 0:
+                continue
+            evaluate(gain_scale, sink_scale)
 
-    gain_ts.parameters.W = base_w * best["scale"]
+    gain_ts.parameters.W = min(max(base_w * best["scale"], min_w), max_w)
+    if sink_ts and base_sink_w:
+        sink_ts.parameters.W = _clip_width(base_sink_w * best["sink_scale"])
     return best
 
 
@@ -1043,6 +1091,8 @@ def improve_tail_headroom(
     if len(input_ids) < 2 or not tail_id:
         return {}
 
+    proc = state.process
+    max_w = getattr(proc, "max_W", 200e-6)
     base_widths = {
         dev_id: state.transistors[dev_id].parameters.W
         for dev_id in input_ids
@@ -1056,7 +1106,7 @@ def improve_tail_headroom(
 
     for scale in (1.0, 1.2, 1.5, 2.0, 2.5, 3.0):
         for dev_id, base_w in base_widths.items():
-            state.transistors[dev_id].parameters.W = base_w * scale
+            state.transistors[dev_id].parameters.W = min(base_w * scale, max_w)
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
         op = _op_for_device(trial, tail_id)
         if not op:
@@ -1078,7 +1128,7 @@ def improve_tail_headroom(
         return {}
 
     for dev_id, base_w in base_widths.items():
-        state.transistors[dev_id].parameters.W = base_w * chosen["scale"]
+        state.transistors[dev_id].parameters.W = min(base_w * chosen["scale"], max_w)
     return chosen
 
 
@@ -1218,6 +1268,7 @@ def tune_two_stage_compensation(
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="objective_ir OTA optimizer")
+    parser.add_argument("--env", default="environment.yaml", help="Environment YAML path")
     parser.add_argument("--schema", default="ir/schema.yaml", help="Schema YAML path")
     parser.add_argument("--topology", choices=("auto", "five", "two_stage"), default="auto")
     parser.add_argument("--pop-size", type=int, default=80)
@@ -1229,23 +1280,25 @@ def _parse_args(argv=None):
 
 def main(argv=None):
     args = _parse_args(argv)
+    env_path = _resolve_project_path(args.env)
     schema_path = _resolve_project_path(args.schema)
 
     print("=" * 70)
-    print("  objective_ir V2.1 — PTM 130nm · NSGA-II · ngspice")
+    print("  objective_ir V2.1 — process-aware · NSGA-II · ngspice")
     print("  四层 Schema 架构 (架构总纲 V1.1)")
+    print(f"  env:    {env_path}")
     print(f"  schema: {schema_path}")
     print("=" * 70)
 
     # ── Step 0: 加载 environment.yaml ──
     print("\n[0/8] Loading environment.yaml ...")
-    env = load_environment()
+    env = load_environment(env_path)
     print(f"       Process:  {env['process']['process_name']}")
     print(f"       Simulator: {env['simulation']['simulator']}")
     print(f"       Vdd:       {env['simulation']['supply']['vdd']}V")
 
     # ── Step 1: 构建 Schema ──
-    print("\n[1/8] Building DesignState (PTM 130nm) ...")
+    print("\n[1/8] Building DesignState ...")
     state = build_design_state(env, schema_path, args.topology)
     print(f"       Topology: {state.topology.name} ({state.topology.architecture})")
     print(f"       Process:  {state.process.process_name} ({state.process.technology_node}um)")
@@ -1278,13 +1331,15 @@ def main(argv=None):
 
     # ── Step 3: pygmid 适配器 ──
     print("\n[3/8] Initializing pygmid adapter (Boris Murmann LookupTable) ...")
-    tables_dir = env.get("tools", {}).get("pygmid_tables_dir", "tables")
+    tools_cfg = env.get("tools", {})
+    tables_dir = tools_cfg.get("pygmid_tables_dir", "tables")
     nmos_table = env.get("tools", {}).get("nmos_table")
     pmos_table = env.get("tools", {}).get("pmos_table")
+    explicit_tables = bool(nmos_table or pmos_table)
     pygmid = create_pygmid_adapter(
-        nmos_path=nmos_table if nmos_table and Path(nmos_table).exists() else None,
-        pmos_path=pmos_table if pmos_table and Path(pmos_table).exists() else None,
-        tables_dir=tables_dir if not (nmos_table and pmos_table) else None,
+        nmos_path=_existing_project_path(nmos_table),
+        pmos_path=_existing_project_path(pmos_table),
+        tables_dir=None if explicit_tables else str(_resolve_project_path(tables_dir)),
     )
     print(pygmid.summary())
 
@@ -1362,7 +1417,7 @@ def main(argv=None):
             print(f"       {name}: {val:.4e}")
 
     # ── Step 7: 生成 SPICE 网表 ──
-    print("\n[7/8] Generating PTM 130nm SPICE netlist ...")
+    print("\n[7/8] Generating SPICE netlist ...")
     iteration_id = _next_iteration(RUNS_DIR)
     netlist_str = generate_netlist(state)
     print(f"       Netlist length: {len(netlist_str)} chars")
@@ -1392,8 +1447,12 @@ def main(argv=None):
     if balance_info:
         netlist_str = generate_netlist(state)
         scale = balance_info.get("scale")
+        sink_scale = balance_info.get("sink_scale", 1.0)
         vout = balance_info.get("vout")
-        print(f"       Stage-2 DC balance: M6_W scale={scale:.3f}, vout≈{vout:.3f}V")
+        print(
+            "       Stage-2 DC balance: "
+            f"M6_W scale={scale:.3f}, M7_W scale={sink_scale:.3f}, vout≈{vout:.3f}V"
+        )
 
     headroom_info = improve_tail_headroom(state, sim, output_dir)
     if headroom_info:
@@ -1407,8 +1466,12 @@ def main(argv=None):
         if rebalance_info:
             netlist_str = generate_netlist(state)
             scale = rebalance_info.get("scale")
+            sink_scale = rebalance_info.get("sink_scale", 1.0)
             vout = rebalance_info.get("vout")
-            print(f"       Stage-2 re-balance: M6_W scale={scale:.3f}, vout≈{vout:.3f}V")
+            print(
+                "       Stage-2 re-balance: "
+                f"M6_W scale={scale:.3f}, M7_W scale={sink_scale:.3f}, vout≈{vout:.3f}V"
+            )
 
     comp_info = tune_two_stage_compensation(state, sim, output_dir)
     if comp_info:
@@ -1458,7 +1521,7 @@ def main(argv=None):
     print(f"\n{'='*70}")
     print(f"  ✅ Output → {save_log}/")
     print(f"     design_state.yaml    Schema + transistor state")
-    print(f"     netlist.cir          PTM 130nm SPICE netlist")
+    print(f"     netlist.cir          SPICE netlist")
     print(f"     sim_log.json         Optimizer results + ngspice measurements")
     print(f"{'='*70}")
 

@@ -1571,3 +1571,121 @@
 
 ---
 
+# Iteration 025
+**Timestamp**: 2026-05-19T02:21:27.389164
+**Design**: two_stage_ota
+**Process**: IHP_SG13G2_130nm (0.13um)
+**Best loss**: 155.605280
+
+## Design Variables
+| Variable | Value | Range | Initial |
+|----------|-------|-------|---------|
+| M1.gm_id | 10.2 | [10, 22] | 16 |
+| M1.L | 4.616e-07 | [3e-07, 2e-06] | 1e-06 |
+| M2.gm_id | 10.2 | [10, 22] | 16 |
+| M2.L | 4.616e-07 | [3e-07, 2e-06] | 1e-06 |
+| M3.gm_id | 7.084 | [5, 12] | 7 |
+| M3.L | 6.213e-07 | [3e-07, 2e-06] | 1e-06 |
+| M4.gm_id | 7.084 | [5, 12] | 7 |
+| M4.L | 6.213e-07 | [3e-07, 2e-06] | 1e-06 |
+| M5.gm_id | 8.997 | [6, 14] | 9 |
+| M5.L | 5.052e-07 | [2e-07, 1.5e-06] | 5e-07 |
+| M6.gm_id | 13.39 | [6, 18] | 10 |
+| M6.L | 1.914e-06 | [2e-07, 2e-06] | 8e-07 |
+| M7.gm_id | 8.035 | [6, 14] | 9 |
+| M7.L | 1.012e-06 | [2e-07, 1.5e-06] | 5e-07 |
+| I_tail | 6.496e-05 | [5e-06, 8e-05] | 2e-05 |
+| I_stage2 | 1.697e-05 | [1e-05, 0.00025] | 8e-05 |
+| Cc | 2.5e-12 | [1e-13, 2.5e-12] | 4e-13 |
+| Rz | 1e+04 | [1e+02, 2e+04] | 1000.0 |
+
+## Loss Terms
+| ID | Weight | Formula | Contribution |
+|----|--------|---------|-------------|
+| gain_deficit | 4.0 | `relu(targets.dc_gain.min - realized.dc_gain)/max(t` | 0.588768 |
+| bw_deficit | 3.0 | `relu(targets.unity_gain_bandwidth.min - realized.u` | 1.944309 |
+| pm_deficit | 7.0 | `relu(targets.phase_margin.min - realized.phase_mar` | 7.000000 |
+| power_ratio | 0.4 | `realized.power/max(targets.power.max, 1e-9)` | 0.078654 |
+| zero_alignment | 0.08 | `abs(realized.Rz - realized.zero_target_rz)/max(rea` | 0.062142 |
+
+## Correction Factors
+- gm_factor: 0.85
+- gds_factor: 1.0
+- c_factor: 1.15
+- description: Conservative two-stage estimator; ngspice remains final authority
+
+## Performance
+| Metric | Optimizer | ngspice | Δ |
+|--------|-----------|---------|---|
+| dc_gain | 51.2 | 51.2 | +0.0619 |
+| unity_gain_bandwidth | 1.76e+08 | 3.49e+07 | -1.41e+08 |
+| phase_margin | 0 | 68.5 | +68.5 |
+| power | 9.83e-05 | 0.000101 | +3.08e-06 |
+| cmrr | 28.1 | N/A | N/A |
+| psrr_plus | 17.9 | N/A | N/A |
+| Cc | 2.5e-12 | N/A | N/A |
+| Rz | 1e+04 | N/A | N/A |
+| zero_target_rz | 1.02e+04 | N/A | N/A |
+
+
+---
+
+# Iteration 026
+**Timestamp**: 2026-05-19T03:31:36.150777
+**Design**: two_stage_ota
+**Process**: IHP_SG13G2_130nm (0.13um)
+**Best loss**: 70.985524
+
+## Design Variables
+| Variable | Value | Range | Initial |
+|----------|-------|-------|---------|
+| M1.gm_id | 10 | [10, 22] | 16 |
+| M1.L | 3.856e-07 | [3e-07, 2e-06] | 1e-06 |
+| M2.gm_id | 10 | [10, 22] | 16 |
+| M2.L | 3.856e-07 | [3e-07, 2e-06] | 1e-06 |
+| M3.gm_id | 9.78 | [5, 12] | 7 |
+| M3.L | 1.296e-06 | [3e-07, 2e-06] | 1e-06 |
+| M4.gm_id | 9.78 | [5, 12] | 7 |
+| M4.L | 1.296e-06 | [3e-07, 2e-06] | 1e-06 |
+| M5.gm_id | 13.05 | [6, 14] | 9 |
+| M5.L | 2e-07 | [2e-07, 1.5e-06] | 5e-07 |
+| M6.gm_id | 15.14 | [6, 18] | 10 |
+| M6.L | 4.129e-07 | [2e-07, 2e-06] | 8e-07 |
+| M7.gm_id | 6.012 | [6, 14] | 9 |
+| M7.L | 1.221e-06 | [2e-07, 1.5e-06] | 5e-07 |
+| I_tail | 7.147e-05 | [5e-06, 8e-05] | 2e-05 |
+| I_stage2 | 2.927e-05 | [1e-05, 0.00025] | 8e-05 |
+| Cc | 2.5e-12 | [1e-13, 2.5e-12] | 4e-13 |
+| Rz | 7500 | [1e+02, 2e+04] | 1000.0 |
+
+## Loss Terms
+| ID | Weight | Formula | Contribution |
+|----|--------|---------|-------------|
+| gain_deficit | 4.0 | `relu(targets.dc_gain.min - realized.dc_gain)/max(t` | 0.377907 |
+| bw_deficit | 3.0 | `relu(targets.unity_gain_bandwidth.min - realized.u` | 2.628962 |
+| pm_deficit | 7.0 | `relu(targets.phase_margin.min - realized.phase_mar` | 0.000000 |
+| power_ratio | 0.4 | `realized.power/max(targets.power.max, 1e-9)` | 0.096715 |
+| zero_alignment | 0.08 | `abs(realized.Rz - realized.zero_target_rz)/max(rea` | 0.270941 |
+
+## Correction Factors
+- gm_factor: 0.85
+- gds_factor: 1.0
+- c_factor: 1.15
+- description: Conservative two-stage estimator; ngspice remains final authority
+
+## Performance
+| Metric | Optimizer | ngspice | Δ |
+|--------|-----------|---------|---|
+| dc_gain | 54.3 | 38.6 | -15.7 |
+| unity_gain_bandwidth | 6.18e+07 | 3.12e+08 | +2.5e+08 |
+| phase_margin | 60.7 | 78.6 | +18 |
+| power | 0.000121 | 0.00019 | +6.89e-05 |
+| cmrr | 29.9 | N/A | N/A |
+| psrr_plus | 19 | N/A | N/A |
+| Cc | 2.5e-12 | N/A | N/A |
+| Rz | 7.5e+03 | N/A | N/A |
+| zero_target_rz | 3.81e+03 | N/A | N/A |
+
+
+---
+

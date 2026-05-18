@@ -1,19 +1,20 @@
 schema_version: '1.0'
 process:
-  process_name: PTM_130nm
+  process_name: IHP_SG13G2_130nm
   technology_node: 0.13
-  foundry: PTM
-  model_lib: ptm_130.lib
-  model_corner: ''
-  osdi_libs: []
-  device_style: mos
-  nmos_model: nmos
-  pmos_model: pmos
-  VTH_n: 0.3782
-  VTH_p: 0.321
-  KP_n: 0.00091
-  KP_p: 0.000123
-  COX: 0.01535
+  foundry: IHP
+  model_lib: /mnt/d/IHP-Open-PDK-0.3.0/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib
+  model_corner: mos_tt
+  osdi_libs:
+  - /mnt/d/IHP-Open-PDK-0.3.0/ihp-sg13g2/libs.tech/ngspice/osdi/psp103.osdi
+  device_style: subckt
+  nmos_model: sg13_lv_nmos
+  pmos_model: sg13_lv_pmos
+  VTH_n: 0.42
+  VTH_p: 0.42
+  KP_n: 0.0006
+  KP_p: 0.00018
+  COX: 0.017
 simulation:
   simulator: ngspice
   temperature: 27.0
@@ -31,8 +32,8 @@ simulation:
 tools:
   ngspice_bin: ngspice
   pygmid_tables_dir: tables
-  nmos_table: tables/ptm130_nmos.npz
-  pmos_table: tables/ptm130_pmos.npz
+  nmos_table: tables/ihp_sg13g2_nmos.npz
+  pmos_table: tables/ihp_sg13g2_pmos.npz
 design_rules:
   min_L: 1.3e-07
   max_L: 1.0e-05
@@ -44,8 +45,8 @@ design_rules:
   max_W_L_ratio: 1000.0
   min_W_L_ratio: 0.1
   max_finger_width: 1.0e-05
-  max_VGS: 1.32
-  max_VDS: 1.32
+  max_VGS: 1.5
+  max_VDS: 1.5
   VDS_safe_margin: 0.15
   nominal_VDD: 1.2
   VDD_min: 1.08

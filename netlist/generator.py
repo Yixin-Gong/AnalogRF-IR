@@ -1,7 +1,7 @@
 """
-ngspice 网表生成器 V2.0 — PTM 130nm · ngspice 45 兼容
+ngspice 网表生成器 V2.0 — process-aware · ngspice 45 兼容
 
-从 DesignState 生成 PTM 130nm SPICE 网表。
+从 DesignState 生成 SPICE 网表。
 
 双 pass 架构：
   Pass 1 (AC):  .ac + .meas ac → simulator 提取 gain/GBW/PM
@@ -18,7 +18,7 @@ from schemas.design_state import DesignState
 
 
 class NetlistGenerator:
-    """PTM 130nm ngspice 网表生成器（双 pass 兼容）。"""
+    """ngspice 网表生成器（双 pass 兼容）。"""
 
     def __init__(self, state: DesignState):
         self.state = state
@@ -49,8 +49,7 @@ class NetlistGenerator:
 
     # ── Library ──
 
-    def _gen_library(self) -> List[str]:
-        model_name = self._proc.model_lib or "ptm_130.lib"
+    def _resolve_model_path(self, model_name: str) -> Path:
         model_path = Path(model_name)
         if not model_path.is_absolute():
             candidate = Path(__file__).parent.parent / model_name
@@ -58,11 +57,24 @@ class NetlistGenerator:
                 model_path = candidate.resolve()
             elif model_path.exists():
                 model_path = model_path.resolve()
-        return [
-            f".include {model_path}",
-            f".temp {self.state.simulation.temperature}",
-            "",
-        ]
+        return model_path
+
+    def _gen_library(self) -> List[str]:
+        model_name = self._proc.model_lib or "ptm_130.lib"
+        model_path = self._resolve_model_path(model_name)
+        corner = getattr(self._proc, "model_corner", "") or ""
+        osdi_libs = getattr(self._proc, "osdi_libs", []) or []
+        lines = []
+        if osdi_libs:
+            lines.append("* OSDI models are loaded by simulator/ngspice.py via local .spiceinit")
+            for osdi in osdi_libs:
+                lines.append(f"* .osdi {self._resolve_model_path(osdi)}")
+        if corner:
+            lines.append(f'.lib "{model_path}" {corner}')
+        else:
+            lines.append(f'.include "{model_path}"')
+        lines.extend([f".temp {self.state.simulation.temperature}", ""])
+        return lines
 
     # ── Engineering formatting ──
 
@@ -85,7 +97,7 @@ class NetlistGenerator:
     def _gen_devices(self) -> List[str]:
         W_grid = getattr(self._proc, "W_precision", 10e-9)
         L_grid = getattr(self._proc, "L_precision", 1e-9)
-        lines = ["* ── Devices ──"]
+        lines = ["* -- Devices --"]
         for dev in self.state.topology.devices:
             ts = self.state.transistors.get(dev.id)
             if ts is None:
@@ -98,7 +110,10 @@ class NetlistGenerator:
             W = ts.parameters.W if ts.parameters.W > 0 else 1e-6
             L = ts.parameters.L if ts.parameters.L > 0 else 1.3e-7
             model = dev.model or "nmos"
-            lines.append(f"M{dev.id} {d} {g} {s} {b} {model} W={self._eng(W, W_grid)} L={self._eng(L, L_grid)}")
+            if getattr(self._proc, "device_style", "mos") == "subckt":
+                lines.append(f"X{dev.id} {d} {g} {s} {b} {model} W={self._eng(W, W_grid)} L={self._eng(L, L_grid)}")
+            else:
+                lines.append(f"M{dev.id} {d} {g} {s} {b} {model} W={self._eng(W, W_grid)} L={self._eng(L, L_grid)}")
         lines.append("")
         return lines
 
@@ -151,7 +166,7 @@ class NetlistGenerator:
             return []
 
         rz = self._get_global_param("Rz", 0.0) or 0.0
-        lines = ["* ── Compensation ──"]
+        lines = ["* -- Compensation --"]
         if rz > 1e-9:
             mid = "ncc"
             lines.append(f"Rz {comp_node} {mid} {self._fmt_si(rz, 'Ohm')}")
@@ -166,14 +181,14 @@ class NetlistGenerator:
     def _gen_supplies(self) -> List[str]:
         vdd = self.state.simulation.supply.get("vdd", 1.2)
         vss = self.state.simulation.supply.get("vss", 0.0)
-        lines = ["* ── Supplies ──", f"Vdd vdd 0 DC {vdd}"]
+        lines = ["* -- Supplies --", f"Vdd vdd 0 DC {vdd}"]
         if vss != 0:
             lines.append(f"Vss 0 vss DC {vss}")
         lines.append("")
         return lines
 
     def _gen_bias(self) -> List[str]:
-        lines = ["* ── Bias ──"]
+        lines = ["* -- Bias --"]
         vdd = self.state.simulation.supply.get("vdd", 1.2)
         fallback = getattr(self.state.simulation, "bias_voltage", None)
         if fallback is None or fallback <= 0:
@@ -204,7 +219,7 @@ class NetlistGenerator:
         vdd = self.state.simulation.supply.get("vdd", 1.2)
         vcm = vdd * 0.5
         inputs = [p for p in self.state.topology.ports if p.direction == "input"]
-        lines = ["* ── Stimuli ──"]
+        lines = ["* -- Stimuli --"]
         if len(inputs) >= 2:
             lines.append(f"* Common-mode = {vcm:.2f}V, diff AC=0.5")
             lines.append(f"Vinp {inputs[0].id} 0 DC {vcm} AC 0.5")
@@ -220,13 +235,13 @@ class NetlistGenerator:
             outs = [p for p in self.state.topology.ports if p.direction == "output"]
             if outs:
                 cl_ff = cl * 1e15
-                return ["* ── Load ──", f"Cload {outs[0].id} 0 {cl_ff:.1f}f", ""]
+                return ["* -- Load --", f"Cload {outs[0].id} 0 {cl_ff:.1f}f", ""]
         return []
 
     # ── Analyses ──
 
     def _gen_analyses(self) -> List[str]:
-        lines = ["* ── Analyses ──"]
+        lines = ["* -- Analyses --"]
         vcm = self.state.simulation.supply.get("vdd", 1.2) * 0.5
         lines.append(f".dc Vinp {vcm:.3f} {vcm:.3f} 0.001")
         sim = self.state.simulation
@@ -242,7 +257,7 @@ class NetlistGenerator:
         根据 L3 evaluations 生成 .meas 行。
         每个 Evaluation 映射到相应的 .meas 语句。
         """
-        lines = ["* ── Measures ──"]
+        lines = ["* -- Measures --"]
 
         # 确定输出节点
         out = None
