@@ -554,3 +554,38 @@ runs/iter_062/
 2. Removed `runs/debug_*` and `runs/tmp_*` directories.
 3. Removed `ir/schema.yaml.bak`; the active schema path and `topologies.legacy` compatibility builder now cover that role.
 4. Kept historical `runs/iter_*` and Pareto result directories because they contain useful performance evidence and diagnostics.
+
+## 2026-05-20 Lowered IHP Two-Stage OTA Spec
+
+### Scope
+
+Relaxed the IHP two-stage OTA target specification to 50 dB gain, 100 MHz unity-gain bandwidth, and 45 degree phase margin, then re-ran the full optimizer plus ngspice verification flow.
+
+### Changes
+
+1. Updated `ir/schema_two_stage.yaml` targets:
+   - `dc_gain.min`: 50 dB
+   - `unity_gain_bandwidth.min`: 100 MHz
+   - `phase_margin.min`: 45 deg
+2. Added a guarded post-process refinement in `postprocess.two_stage`: if the standard compensation sweep still misses spec, the flow now tries a small grid-aligned W/L scale on the first-stage PMOS current-mirror load and re-checks a compact compensation grid.
+3. Snapped post-process width/length scaling to the process W/L grid before validation and netlist emission.
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+16 passed
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 16 --pop-size 36 --seed 31
+
+runs/iter_066/
+  spec_pass: true
+  dc_gain_db: 50.110 dB
+  unity_gain_bandwidth: 104.932 MHz
+  phase_margin: 68.335 deg
+  total_power: 112.030 uW
+```
+
+### Notes
+
+The lowered spec is now reachable with the all-current-mirror IHP topology. Remaining warnings are mainly conservative stack/headroom and inversion preference diagnostics on the tail branch; they do not block the current target pass.

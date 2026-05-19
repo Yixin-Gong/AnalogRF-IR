@@ -66,11 +66,12 @@ def balance_two_stage_output(
     proc = state.process
     min_w = getattr(proc, "min_W", 150e-9)
     max_w = getattr(proc, "max_W", 200e-6)
+    w_grid = getattr(proc, "W_precision", 10e-9)
     base_sink_w = sink_ts.parameters.W if sink_ts and sink_ts.parameters.W > 0 else None
     best = {"scale": 1.0, "sink_scale": 1.0, "vout": None, "error": float("inf")}
 
     def _clip_width(width: float) -> float:
-        return min(max(width, min_w), max_w)
+        return min(max(_snap_to_grid(width, w_grid), min_w), max_w)
 
     def evaluate(scale: float, sink_scale: float = 1.0) -> float | None:
         gain_ts.parameters.W = _clip_width(base_w * scale)
@@ -158,6 +159,8 @@ def improve_tail_headroom(
         return {}
 
     max_w = getattr(state.process, "max_W", 200e-6)
+    min_w = getattr(state.process, "min_W", 150e-9)
+    w_grid = getattr(state.process, "W_precision", 10e-9)
     base_widths = {
         dev_id: state.transistors[dev_id].parameters.W
         for dev_id in input_ids
@@ -168,9 +171,12 @@ def improve_tail_headroom(
 
     best = {"scale": 1.0, "margin": float("-inf"), "vds": None, "vdsat": None}
     chosen = None
+    def clip_width(width: float) -> float:
+        return min(max(_snap_to_grid(width, w_grid), min_w), max_w)
+
     for scale in (1.0, 1.2, 1.5, 2.0, 2.5, 3.0):
         for dev_id, base_w in base_widths.items():
-            state.transistors[dev_id].parameters.W = min(base_w * scale, max_w)
+            state.transistors[dev_id].parameters.W = clip_width(base_w * scale)
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
         op = op_for_device(trial, tail_id)
         if not op:
@@ -190,7 +196,7 @@ def improve_tail_headroom(
             state.transistors[dev_id].parameters.W = base_w
         return {}
     for dev_id, base_w in base_widths.items():
-        state.transistors[dev_id].parameters.W = min(base_w * chosen["scale"], max_w)
+        state.transistors[dev_id].parameters.W = clip_width(base_w * chosen["scale"])
     return chosen
 
 
@@ -273,30 +279,109 @@ def tune_two_stage_compensation(
     pm_min = targets.get("phase_margin", Target()).min or 0.0
     power_max = targets.get("power", Target()).max or float("inf")
 
-    best = {"score": float("inf"), "Cc": current_cc, "Rz": current_rz, "measurements": {}}
+    load_ids = [dev.id for dev in state.topology.devices if dev.role == "current_mirror_load"]
+    load_dims = {
+        dev_id: (
+            state.transistors[dev_id].parameters.W,
+            state.transistors[dev_id].parameters.L,
+            state.transistors[dev_id].L_strategy,
+        )
+        for dev_id in load_ids
+        if dev_id in state.transistors
+    }
+    proc = state.process
+    min_w = getattr(proc, "min_W", 150e-9)
+    max_w = getattr(proc, "max_W", 200e-6)
+    min_l = getattr(proc, "min_L", 130e-9)
+    max_l = getattr(proc, "max_L", 10e-6)
+    w_grid = getattr(proc, "W_precision", 10e-9)
+    l_grid = getattr(proc, "L_precision", 1e-9)
+
+    def apply_load_scale(scale: float) -> None:
+        for dev_id, (base_w, base_l, base_strategy_l) in load_dims.items():
+            ts = state.transistors[dev_id]
+            ts.parameters.W = min(max(_snap_to_grid(base_w * scale, w_grid), min_w), max_w)
+            scaled_l = min(max(_snap_to_grid(base_l * scale, l_grid), min_l), max_l)
+            ts.parameters.L = scaled_l
+            ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
+
+    def spec_pass(meas: dict) -> bool:
+        return (
+            meas.get("dc_gain_db", 0.0) >= gain_min
+            and meas.get("unity_gain_bandwidth", 0.0) >= bw_min
+            and meas.get("phase_margin", 0.0) >= pm_min
+        )
+
+    def score_measurements(meas: dict) -> float:
+        gain = meas.get("dc_gain_db", 0.0)
+        bw = meas.get("unity_gain_bandwidth", 0.0)
+        pm = meas.get("phase_margin", 0.0)
+        power = meas.get("total_power", 0.0)
+        score = 0.0
+        score += 20.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
+        score += 15.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
+        score += 25.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+        if bw_max < float("inf"):
+            score += 0.7 * max(0.0, bw - bw_max) / max(bw_max, 1.0)
+        if power_max < float("inf"):
+            score += 0.2 * max(0.0, power) / max(power_max, 1e-12)
+        if pm >= pm_min and gain >= gain_min and bw >= bw_min:
+            score -= min(pm - pm_min, 40.0) / 200.0
+            score -= min(max(0.0, bw - bw_min) / max(bw_min, 1.0), 1.0) / 50.0
+        return score
+
+    def evaluate_candidate(best: dict, cc: float, rz: float, load_scale: float) -> dict:
+        apply_load_scale(load_scale)
+        state.global_parameters["Cc"] = cc
+        state.global_parameters["Rz"] = rz
+        trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
+        meas = dict(trial.measurements)
+        score = score_measurements(meas)
+        if score < best["score"]:
+            return {
+                "score": score,
+                "Cc": cc,
+                "Rz": rz,
+                "load_scale": load_scale,
+                "measurements": meas,
+            }
+        return best
+
+    best = {"score": float("inf"), "Cc": current_cc, "Rz": current_rz, "load_scale": 1.0, "measurements": {}}
     for cc in cc_candidates:
         for rz in rz_candidates:
-            state.global_parameters["Cc"] = cc
-            state.global_parameters["Rz"] = rz
-            trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
-            meas = dict(trial.measurements)
-            gain = meas.get("dc_gain_db", 0.0)
-            bw = meas.get("unity_gain_bandwidth", 0.0)
-            pm = meas.get("phase_margin", 0.0)
-            power = meas.get("total_power", 0.0)
-            score = 0.0
-            score += 20.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
-            score += 15.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-            score += 25.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
-            if bw_max < float("inf"):
-                score += 0.7 * max(0.0, bw - bw_max) / max(bw_max, 1.0)
-            if power_max < float("inf"):
-                score += 0.2 * max(0.0, power) / max(power_max, 1e-12)
-            if pm >= pm_min and gain >= gain_min and bw >= bw_min:
-                score -= min(pm - pm_min, 40.0) / 200.0
-            if score < best["score"]:
-                best = {"score": score, "Cc": cc, "Rz": rz, "measurements": meas}
+            best = evaluate_candidate(best, cc, rz, 1.0)
 
+    if load_dims and not spec_pass(best["measurements"]):
+        local_cc_candidates = _unique_sorted(
+            [
+                best["Cc"],
+                cc_low * 1.25,
+                cc_low * 1.4,
+                cc_low * 1.55,
+                cc_low * 1.75,
+                cc_low * 2.0,
+                cc_low * 2.3,
+            ],
+            cc_low,
+            cc_high,
+        )
+        local_rz_candidates = _unique_sorted(
+            [
+                best["Rz"],
+                rz_high * 0.8,
+                rz_high * 0.9,
+                rz_high,
+            ],
+            rz_low,
+            rz_high,
+        )
+        for load_scale in (1.08, 1.15, 1.20, 1.22, 1.25):
+            for cc in local_cc_candidates:
+                for rz in local_rz_candidates:
+                    best = evaluate_candidate(best, cc, rz, load_scale)
+
+    apply_load_scale(best.get("load_scale", 1.0))
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
     return best
@@ -343,3 +428,9 @@ def _unique_sorted(values: list[float], low: float, high: float) -> list[float]:
         if not any(abs(value - old) <= max(abs(old), abs(value), 1e-30) * 1e-6 for old in out):
             out.append(value)
     return sorted(out)
+
+
+def _snap_to_grid(value: float, precision: float) -> float:
+    if precision <= 0:
+        return value
+    return round(value / precision) * precision

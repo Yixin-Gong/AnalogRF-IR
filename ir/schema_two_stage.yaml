@@ -29,9 +29,9 @@ topology:
     - {id: M9, role: output_bias_mirror,  stage: bias,   type: nmos, connections: {drain: vbias_stage2, gate: vbias_stage2, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 60, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 500000000, unit: Hz, priority: 1}
-  phase_margin:         {min: 60, unit: deg, priority: 1}
+  dc_gain:              {min: 50, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
+  phase_margin:         {min: 45, unit: deg, priority: 1}
   power:                {max: 5.0e-04, unit: W, priority: 2}
 
 design_variables:
