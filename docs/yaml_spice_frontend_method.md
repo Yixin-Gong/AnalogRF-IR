@@ -20,6 +20,10 @@ The project now has two complementary IR layers:
 
 The optimizer consumes `DesignState`. ASIR can compile YAML topology into semantic graphs for reasoning, documentation, and future topology-aware diagnosis.
 
+### Agent Diagnostics
+
+Each optimizer run writes `agent_diagnostics.json` beside `sim_log.json`. This replaces the old append-only root `history.md` log. The diagnostics file is intentionally machine-readable and contains run metadata, target pass/fail state, margins, top loss contributors, optimizer/ngspice mismatch, device operating status, and diagnosis items.
+
 ### YAML Rule Set
 
 The YAML frontend accepts a top-level `topology` mapping with explicit devices and ports. It also reads:
@@ -71,7 +75,7 @@ flowchart TD
     G --> H["W/L Rounding And Repair"]
     H --> I["SPICE Netlist Generator"]
     I --> J["ngspice Verification"]
-    J --> K["design_state.yaml + sim_log.json"]
+    J --> K["design_state.yaml + sim_log.json + agent_diagnostics.json"]
 ```
 
 ## Commands

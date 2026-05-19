@@ -311,3 +311,42 @@ total_power             280.78 uW
 ```
 
 The IHP flow is wired correctly and produces a stable verified result, but this imported/default objective setup still does not meet the original `60 dB / 500 MHz / 60 deg` target. It primarily misses gain and UGBW.
+
+## 2026-05-19 Structured Agent Diagnostics
+
+### Scope
+
+Removed the append-only root `history.md` write path from `main.py` and replaced it with per-run structured diagnostics.
+
+### Major Changes
+
+1. `main.py` no longer appends Markdown history to the repository root.
+2. Each run now writes:
+   - `design_state.yaml`
+   - `netlist.cir`
+   - `sim_log.json`
+   - `agent_diagnostics.json`
+3. `agent_diagnostics.json` is designed for agent parsing and includes:
+   - run metadata
+   - ngspice success/return code
+   - spec pass/fail status
+   - per-target margins
+   - dominant loss contributors
+   - optimizer/ngspice mismatch
+   - per-device operating status
+   - machine-readable diagnosis items
+4. The no-ngspice early-exit path now also writes `sim_log.json` and `agent_diagnostics.json`, so missing simulator failures are structured instead of only printed.
+
+### Validation
+
+```text
+python -m py_compile main.py
+python3 -m pytest tests/test_frontends.py tests/test_asir.py -q
+10 passed
+```
+
+Smoke output:
+
+```text
+runs/iter_033/agent_diagnostics.json
+```

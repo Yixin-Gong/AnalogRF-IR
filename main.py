@@ -912,7 +912,217 @@ def save_simulation_log(
     with open(output_dir / "sim_log.json", "w", encoding="utf-8") as f:
         json.dump(log, f, indent=2)
 
+    diagnostics = build_agent_diagnostics(state, best_meta, sim_result, iteration, log["comparison"])
+    with open(output_dir / "agent_diagnostics.json", "w", encoding="utf-8") as f:
+        json.dump(diagnostics, f, indent=2)
+
     return output_dir
+
+
+def build_agent_diagnostics(
+    state: DesignState,
+    best_meta: dict,
+    sim_result: SimulationResult,
+    iteration: int,
+    comparison: dict,
+) -> dict:
+    """Build structured, agent-readable run diagnostics.
+
+    This file replaces the old append-only Markdown history log. It is scoped
+    to a single run directory and is designed for downstream agents to parse
+    without natural-language scraping.
+    """
+    measurements = sim_result.measurements or {}
+    perf_est = best_meta.get("performance", {}) or {}
+    loss_breakdown = best_meta.get("loss_breakdown", {}) or {}
+    target_status = _target_status(state, measurements, perf_est)
+    failed_targets = [name for name, item in target_status.items() if item["status"] == "fail"]
+    top_losses = _top_items(loss_breakdown, limit=8)
+    top_model_mismatch = _comparison_mismatch(comparison)
+    device_status = _device_status(state)
+
+    return {
+        "schema_version": "agent_diagnostics.v1",
+        "run": {
+            "iteration": iteration,
+            "timestamp": datetime.now().isoformat(),
+            "design_name": state.design_name,
+            "topology": state.topology.name,
+            "architecture": state.topology.architecture,
+            "class": state.topology.class_,
+            "process": state.process.process_name,
+            "technology_node_um": state.process.technology_node,
+            "vdd": state.simulation.supply.get("vdd", 1.2),
+        },
+        "status": {
+            "ngspice_success": bool(sim_result.success),
+            "return_code": sim_result.return_code,
+            "spec_pass": bool(target_status) and not failed_targets,
+            "failed_targets": failed_targets,
+            "best_loss": best_meta.get("total_loss", 0.0),
+        },
+        "targets": target_status,
+        "optimizer": {
+            "estimated_performance": perf_est,
+            "top_loss_terms": top_losses,
+            "decoded": best_meta.get("decoded", {}),
+            "global_parameters": dict(state.global_parameters or {}),
+        },
+        "ngspice": {
+            "measurements": measurements,
+            "elapsed_sec": sim_result.elapsed_sec,
+            "operating_point_count": len(sim_result.operating_points or {}),
+        },
+        "model_mismatch": top_model_mismatch,
+        "devices": device_status,
+        "diagnosis": _diagnosis_items(target_status, top_losses, top_model_mismatch, device_status),
+        "artifacts": {
+            "design_state": "design_state.yaml",
+            "netlist": "netlist.cir",
+            "sim_log": "sim_log.json",
+            "agent_diagnostics": "agent_diagnostics.json",
+        },
+    }
+
+
+def _target_status(state: DesignState, measurements: dict, perf_est: dict) -> dict:
+    metric_map = {
+        "dc_gain": "dc_gain_db",
+        "unity_gain_bandwidth": "unity_gain_bandwidth",
+        "phase_margin": "phase_margin",
+        "power": "total_power",
+    }
+    out = {}
+    for name, target in state.targets.items():
+        metric = metric_map.get(name, name)
+        source = "ngspice" if metric in measurements else "optimizer_estimate"
+        value = measurements.get(metric, perf_est.get(name))
+        status = "unknown"
+        margin_abs = None
+        margin_rel = None
+        if value is not None:
+            status = "pass"
+            if target.min is not None:
+                margin_abs = float(value) - float(target.min)
+                margin_rel = margin_abs / max(abs(float(target.min)), 1e-30)
+                if margin_abs < 0:
+                    status = "fail"
+            if target.max is not None:
+                max_margin = float(target.max) - float(value)
+                max_margin_rel = max_margin / max(abs(float(target.max)), 1e-30)
+                if margin_abs is None or max_margin < margin_abs:
+                    margin_abs = max_margin
+                    margin_rel = max_margin_rel
+                if max_margin < 0:
+                    status = "fail"
+        out[name] = {
+            "status": status,
+            "source": source,
+            "measurement_key": metric,
+            "value": value,
+            "min": target.min,
+            "max": target.max,
+            "unit": target.unit,
+            "priority": target.priority,
+            "margin_abs": margin_abs,
+            "margin_rel": margin_rel,
+        }
+    return out
+
+
+def _top_items(values: dict, limit: int = 8) -> list[dict]:
+    items = []
+    for name, value in values.items():
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        items.append({"name": name, "value": numeric})
+    return sorted(items, key=lambda item: abs(item["value"]), reverse=True)[:limit]
+
+
+def _comparison_mismatch(comparison: dict) -> list[dict]:
+    out = []
+    for name, item in comparison.items():
+        est = item.get("optimizer_estimated")
+        meas = item.get("ngspice_measured")
+        if est is None or meas is None:
+            continue
+        delta = meas - est
+        rel = delta / max(abs(est), 1e-30)
+        out.append({"metric": name, "optimizer_estimated": est, "ngspice_measured": meas, "delta": delta, "rel_delta": rel})
+    return sorted(out, key=lambda item: abs(item["rel_delta"]), reverse=True)
+
+
+def _device_status(state: DesignState) -> dict:
+    out = {}
+    for dev in state.topology.devices:
+        ts = state.transistors.get(dev.id)
+        if ts is None:
+            continue
+        p = ts.parameters
+        vds_margin = None
+        if p.vds and p.vdsat:
+            vds_margin = p.vds - p.vdsat * state.process.VDSAT_headroom_factor
+        out[dev.id] = {
+            "role": dev.role,
+            "stage": dev.stage,
+            "type": dev.type,
+            "model": dev.model,
+            "W": p.W,
+            "L": p.L,
+            "gm_id_strategy": ts.gm_id_strategy,
+            "gm_id_realized": p.gm_id_realized,
+            "region": p.region or "unknown",
+            "id": p.id,
+            "gm": p.gm,
+            "gds": p.gds,
+            "vgs": p.vgs,
+            "vds": p.vds,
+            "vdsat": p.vdsat,
+            "vds_margin_vs_required": vds_margin,
+        }
+    return out
+
+
+def _diagnosis_items(targets: dict, losses: list[dict], mismatches: list[dict], devices: dict) -> list[dict]:
+    items = []
+    for name, target in targets.items():
+        if target["status"] != "fail":
+            continue
+        if name in {"unity_gain_bandwidth", "ugbw"}:
+            hint = "Increase speed by raising bias current, reducing compensation/load capacitance, or shortening high-capacitance devices."
+        elif name in {"phase_margin"}:
+            hint = "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
+        elif name in {"dc_gain"}:
+            hint = "Increase intrinsic gain by lengthening output/load devices or reducing output conductance."
+        elif name in {"power"}:
+            hint = "Reduce bias currents or device widths on non-critical paths."
+        else:
+            hint = "Inspect the target-specific measurement and its related loss term."
+        items.append({"type": "target_failure", "metric": name, "severity": "error", "hint": hint, "target": target})
+
+    for loss in losses:
+        if loss["value"] <= 0:
+            continue
+        severity = "warning" if loss["value"] < 10 else "error"
+        items.append({"type": "loss_contributor", "name": loss["name"], "severity": severity, "value": loss["value"]})
+
+    for mismatch in mismatches[:4]:
+        if abs(mismatch["rel_delta"]) > 0.1:
+            items.append({"type": "model_mismatch", "severity": "warning", **mismatch})
+
+    for dev_id, dev in devices.items():
+        margin = dev.get("vds_margin_vs_required")
+        if margin is not None and margin < 0:
+            items.append({
+                "type": "device_headroom",
+                "severity": "warning",
+                "device": dev_id,
+                "margin": margin,
+                "hint": "Device may be outside robust saturation; adjust bias, current, or W/L.",
+            })
+    return items
 
 
 def normalize_phase_margin(raw_value: float) -> float:
@@ -1444,17 +1654,16 @@ def main(argv=None):
     ngspice_bin = args.ngspice_bin or env.get("tools", {}).get("ngspice_bin", "ngspice")
     sim = NgspiceSimulator(timeout_sec=30, ngspice_bin=ngspice_bin)
     if not sim.check_available():
-        print("       ⚠️  ngspice not available — saving netlist only.")
+        print("       ⚠️  ngspice not available — saving structured outputs without simulation.")
         print("       Install ngspice: sudo apt install ngspice")
-        print(f"       Netlist saved to runs/iter_{iteration_id:03d}/netlist.cir")
-
-        # 保存优化器结果（无仿真）
-        output_dir = RUNS_DIR / f"iter_{iteration_id:03d}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        state.to_yaml(output_dir / "design_state.yaml")
-        with open(output_dir / "netlist.cir", "w", encoding="utf-8") as f:
-            f.write(netlist_str)
+        missing_result = SimulationResult(
+            success=False,
+            return_code=-1,
+            raw_stderr=f"ngspice binary not available: {ngspice_bin}",
+        )
+        output_dir = save_simulation_log(state, best_meta, missing_result, iteration_id, netlist_str)
         print(f"       Output → {output_dir}/")
+        print(f"       agent_diagnostics.json records ngspice availability failure.")
         return 0
 
     # 将网表写入仿真工作目录
@@ -1540,6 +1749,7 @@ def main(argv=None):
     print(f"     design_state.yaml    Schema + transistor state")
     print(f"     netlist.cir          SPICE netlist")
     print(f"     sim_log.json         Optimizer results + ngspice measurements")
+    print(f"     agent_diagnostics.json Structured diagnostics for agents")
     print(f"{'='*70}")
 
     # ── 对比简表 ──
@@ -1562,91 +1772,7 @@ def main(argv=None):
             delta_str = f"{ng_val - est_val:+.2e}" if ng_val is not None else ""
             print(f"       {key:>22s}: {est_str:>12s} {ng_str:>12s} {delta_str:>10s}")
 
-    # ── History Log ──
-    _write_history(state, best_meta, result, iteration_id)
-
     return 0
-
-
-# ═══════════════════════════════════════════════════════════════
-# History Log — 记录每次迭代的变更与理由
-# ═══════════════════════════════════════════════════════════════
-
-def _write_history(state, best_meta, result, iteration_id):
-    """追加 history log 到项目根目录 history.yaml。"""
-    import json, datetime, shutil
-    from pathlib import Path
-
-    hist_dir = output_dir = Path(f"runs/iter_{iteration_id:03d}")
-    hist_path = hist_dir / "history.md"
-
-    perf_est = best_meta.get("performance", {})
-    meas = result.measurements if result.success else {}
-    loss_breakdown = best_meta.get("loss_breakdown", {})
-    decoded = best_meta.get("decoded", {})
-
-    lines = []
-    lines.append(f"# Iteration {iteration_id:03d}")
-    lines.append(f"**Timestamp**: {datetime.datetime.now().isoformat()}")
-    lines.append(f"**Design**: {state.design_name}")
-    lines.append(f"**Process**: {state.process.process_name} ({state.process.technology_node}um)")
-    lines.append(f"**Best loss**: {best_meta.get('total_loss', 0):.6f}")
-    lines.append("")
-
-    lines.append("## Design Variables")
-    lines.append("| Variable | Value | Range | Initial |")
-    lines.append("|----------|-------|-------|---------|")
-    for dv in state.design_variables:
-        label = f"{dv.device}.{dv.variable}" if dv.device else dv.variable
-        if dv.device and dv.device in decoded:
-            val = decoded[dv.device].get(dv.variable, "?")
-        elif not dv.device and "__global__" in decoded:
-            val = decoded["__global__"].get(dv.variable, "?")
-        else:
-            val = "?"
-        if isinstance(val, float):
-            val = f"{val:.4g}"
-        lines.append(f"| {label} | {val} | [{dv.range.min:.2g}, {dv.range.max:.2g}] | {dv.initial} |")
-    lines.append("")
-
-    lines.append("## Loss Terms")
-    lines.append("| ID | Weight | Formula | Contribution |")
-    lines.append("|----|--------|---------|-------------|")
-    for lt in state.loss_terms:
-        contrib = loss_breakdown.get(lt.id, 0)
-        lines.append(f"| {lt.id} | {lt.weight} | `{lt.formula[:50]}` | {contrib:.6f} |")
-    lines.append("")
-
-    lines.append("## Correction Factors")
-    corr = state.corrections
-    lines.append(f"- gm_factor: {corr.gm_factor}")
-    lines.append(f"- gds_factor: {corr.gds_factor}")
-    lines.append(f"- c_factor: {corr.c_factor}")
-    if corr.description:
-        lines.append(f"- description: {corr.description}")
-    lines.append("")
-
-    lines.append("## Performance")
-    lines.append("| Metric | Optimizer | ngspice | Δ |")
-    lines.append("|--------|-----------|---------|---|")
-    for key, est_val in perf_est.items():
-        ng_key = {"dc_gain": "dc_gain_db", "unity_gain_bandwidth": "unity_gain_bandwidth",
-                  "phase_margin": "phase_margin", "power": "total_power"}.get(key, key)
-        ng_val = meas.get(ng_key, None)
-        delta = f"{ng_val - est_val:+.3g}" if ng_val is not None else "N/A"
-        est_str = f"{est_val:.3g}"
-        ng_str = f"{ng_val:.3g}" if ng_val is not None else "N/A"
-        lines.append(f"| {key} | {est_str} | {ng_str} | {delta} |")
-    lines.append("")
-
-    # 追加到同名 summary 文件 (项目根)
-    root_hist = Path("history.md")
-    with open(root_hist, "a") as f:
-        f.write("\n".join(lines) + "\n\n---\n\n")
-
-    with open(hist_path, "w") as f:
-        f.write("\n".join(lines))
-    print(f"     history.md           Iteration history log")
 
 
 if __name__ == "__main__":
