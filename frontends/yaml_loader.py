@@ -80,7 +80,7 @@ def build_design_state_from_yaml(data: dict[str, Any], env: dict[str, Any]) -> D
 
     # Inject process/simulation from the active environment; process remains an
     # environment concern while the YAML describes the design/problem.
-    from main import build_process_info, build_simulation_config
+    from core.environment import build_process_info, build_simulation_config
 
     state.process = build_process_info(env)
     state.simulation = build_simulation_config(env)

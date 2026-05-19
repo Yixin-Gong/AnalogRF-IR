@@ -434,3 +434,43 @@ runs/iter_058  full flow after repair fix:
 ### Current Diagnosis
 
 The all-current-mirror model fixes the earlier output-collapse failure mode and can find ngspice-verified high-gain points. The remaining IHP two-stage bottleneck is bandwidth: reaching 60 dB and stable PM currently drives long-channel/high-capacitance PMOS mirror loads, which limits UGBW far below the 500 MHz target. A simultaneous 60 dB / 500 MHz / 60 deg IHP point likely needs a SPICE-aware outer-loop search, topology changes, or a looser gain/bandwidth tradeoff.
+
+## 2026-05-20 Modular Flow Refactor
+
+### Scope
+
+Refactored the execution path so schema/SPICE input, ASIR enrichment, environment loading, gm/ID lookup, optimization, post-processing, ngspice simulation, spec interpretation, and artifact writing are separated behind explicit modules. The CLI still preserves the original command shape, but now delegates to a modular runner.
+
+### Major Changes
+
+1. Added `core.environment` as the single environment/process/simulation builder. `frontends.yaml_loader` no longer imports `main.py`.
+2. Added `frontends.design_input` to normalize schema or SPICE input into a `DesignState`, with optional ASIR semantic annotation.
+3. Added `pygmid.plugin.GmIdPlugin` so gm/ID lookup tables are treated as a service; optional table auto-generation is controlled by environment `tools.auto_generate_tables`.
+4. Added `optimizer.registry` to decouple algorithm selection from the flow. NSGA-II remains the active implementation.
+5. Added `specs.models` with OTA, comparator, sample/hold, and generic spec models. The flow selects a spec model from `topology.class` and `topology.architecture`.
+6. Added `postprocess` modules for ngspice backfill and two-stage OTA repair/tuning.
+7. Added `outputs.artifacts` to own `design_state.yaml`, `netlist.cir`, `sim_log.json`, `agent_diagnostics.json`, and the new compact `result.json`.
+8. Added `flow.runner.ObjectiveIRFlowRunner` as the single orchestrator. It validates schema at input, post-optimizer, post-process, and post-ngspice update points before writing artifacts.
+
+### Validation
+
+```text
+python3 -m py_compile main.py core/environment.py frontends/design_input.py specs/models.py pygmid/plugin.py optimizer/registry.py flow/runner.py flow/state_update.py outputs/artifacts.py postprocess/common.py postprocess/two_stage.py tests/test_modular_flow.py tests/test_frontends.py tests/test_asir.py
+python3 -m pytest tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+15 passed
+```
+
+Smoke flow:
+
+```text
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 2 --pop-size 8 --seed 7 --skip-dc-repair --skip-comp-tune
+
+runs/iter_059/
+  design_state.yaml
+  netlist.cir
+  sim_log.json
+  agent_diagnostics.json
+  result.json
+```
+
+This smoke run was intentionally tiny and not performance-oriented. It verified the full data chain: schema/env input, ASIR-safe frontend, gm/ID plugin, optimizer update, schema validation, netlist emission, ngspice simulation, state backfill, and JSON artifact output.

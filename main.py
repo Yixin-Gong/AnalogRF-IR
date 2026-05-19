@@ -1531,6 +1531,33 @@ def _parse_args(argv=None):
 
 def main(argv=None):
     args = _parse_args(argv)
+    from flow.runner import FlowConfig, ObjectiveIRFlowRunner
+
+    config = FlowConfig(
+        env=args.env,
+        schema=args.schema,
+        spice=args.spice or None,
+        spice_yaml_out=args.spice_yaml_out or None,
+        topology=args.topology,
+        pop_size=args.pop_size,
+        generations=args.generations,
+        seed=args.seed,
+        skip_dc_repair=bool(args.skip_dc_repair),
+        skip_comp_tune=bool(args.skip_comp_tune),
+        ngspice_bin=args.ngspice_bin or None,
+        tail_current_mirror=bool(args.tail_current_mirror),
+    )
+    try:
+        ObjectiveIRFlowRunner(
+            config=config,
+            legacy_state_builder=build_design_state,
+            emit=print,
+        ).run()
+    except RuntimeError as exc:
+        print(f"\n[FATAL] {exc}")
+        return 1
+    return 0
+
     env_path = _resolve_project_path(args.env)
     schema_path = _resolve_project_path(args.schema)
     if args.spice:
