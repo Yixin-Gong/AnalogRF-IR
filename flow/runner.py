@@ -297,6 +297,12 @@ class ObjectiveIRFlowRunner:
                 "slew_rate",
                 "slew_rate_pos",
                 "slew_rate_neg",
+                "output_swing",
+                "output_swing_low",
+                "output_swing_high",
+                "icmr",
+                "icmr_min",
+                "icmr_max",
                 "total_power",
                 "i_vdd",
             }

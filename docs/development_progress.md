@@ -698,3 +698,59 @@ runs/iter_066/netlist.cir
 ### Notes
 
 The short optimizer run intentionally verifies the new SR data chain rather than seeking a final optimum. A full `16 x 36` run hit the external command timeout while in the existing ngspice-heavy postprocess loop; the new transient pass itself takes about 2.7 seconds on the prior passing netlist. Further runtime reduction should focus on pruning the compensation sweep candidate count or adding an early-stop condition once AC/DC specs are already met.
+
+## 2026-05-20 Swing And ICMR Metrics
+
+### Scope
+
+Added output swing and input common-mode range as first-class OTA metrics, using the same schema-driven path as gain, GBW, PM, SR, and power.
+
+### Major Changes
+
+1. Added targets to `ir/schema_two_stage.yaml`:
+   - `output_swing.min`: 0.5 V
+   - `icmr_min.max`: 0.9 V
+   - `icmr_max.min`: 0.6 V
+2. Added optimizer estimates:
+   - `output_swing = Vout_high - Vout_low`
+   - `Vout_low ~= VSS + k * VDSAT_nout`
+   - `Vout_high ~= VDD - k * VDSAT_pout`
+   - `icmr_min ~= VSS + VGS_in + k * VDSAT_tail`
+   - `icmr_max ~= VDD - k * VDSAT_load - k * VDSAT_in + VGS_in`
+3. Added `swing_deficit`, `icmr_min_excess`, and `icmr_max_deficit` loss terms.
+4. Added ngspice operating-point extraction for:
+   - `output_swing`, `output_swing_low`, `output_swing_high`
+   - `icmr`, `icmr_min`, `icmr_max`
+5. Added feasibility slack calculations and report columns for output swing and ICMR.
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+20 passed
+
+python3 scripts/run_feasibility_check.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --samples 3000 --seed 41
+
+runs/feasibility_007/
+  classification: roughly feasible
+  best predicted output_swing: 0.717 V
+  best predicted ICMR: 0.554 V to 1.104 V
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 3 --pop-size 10 --seed 31 --skip-dc-repair --skip-comp-tune
+
+runs/iter_069/
+  ngspice output_swing: 0.698 V
+  ngspice output_swing_low/high: 0.320 V / 1.018 V
+  ngspice ICMR: 0.687 V to 0.965 V
+  output_swing, icmr_min, icmr_max target status: pass
+
+Direct headroom validation on the prior passing IHP sizing:
+runs/iter_066/netlist.cir
+  output_swing: 0.684 V
+  output_swing_low/high: 0.261 V / 0.946 V
+  ICMR: 0.547 V to 1.188 V
+```
+
+### Notes
+
+The current ngspice swing/ICMR metrics are operating-point headroom estimates, not full large-signal DC sweeps. They are therefore appropriate as fast necessary-condition checks and structured optimization diagnostics. A later stricter version can add true input-common-mode and output-swing sweeps once runtime is under control.

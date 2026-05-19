@@ -469,6 +469,8 @@ class CircuitEvaluator:
         power = (vdd - vss) * vdd_current
         i_tail_sr = M5.get("id_effective", M5.get("id", 0.0))
         slew_rate = i_tail_sr / max(c_out, 1e-18)
+        output_swing, output_low, output_high = self._estimate_output_swing(M1, M3)
+        icmr_min, icmr_max = self._estimate_nmos_input_icmr(M1, M3, M5)
 
         return {
             "dc_gain": dc_gain_db,
@@ -477,6 +479,12 @@ class CircuitEvaluator:
             "slew_rate": slew_rate,
             "slew_rate_pos": slew_rate,
             "slew_rate_neg": slew_rate,
+            "output_swing": output_swing,
+            "output_swing_low": output_low,
+            "output_swing_high": output_high,
+            "icmr": max(0.0, icmr_max - icmr_min),
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
             "power": power,
         }
 
@@ -606,6 +614,9 @@ class CircuitEvaluator:
         power = (vdd - vss) * (i_tail + i_stage2 + i_bias_ref)
         slew_rate_pos = i_tail / max(cc, 1e-18)
         slew_rate_neg = i_stage2 / max(cload + c2_par, 1e-18)
+        output_swing, output_low, output_high = self._estimate_output_swing(M7, M6)
+        tail_ref = tail_sources[0] if tail_sources else {}
+        icmr_min, icmr_max = self._estimate_nmos_input_icmr(M1, M3, tail_ref)
 
         return {
             "dc_gain": dc_gain_db,
@@ -614,6 +625,12 @@ class CircuitEvaluator:
             "slew_rate": min(slew_rate_pos, slew_rate_neg),
             "slew_rate_pos": slew_rate_pos,
             "slew_rate_neg": slew_rate_neg,
+            "output_swing": output_swing,
+            "output_swing_low": output_low,
+            "output_swing_high": output_high,
+            "icmr": max(0.0, icmr_max - icmr_min),
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
             "power": power,
             "Cc": cc,
             "Rz": rz,
@@ -627,6 +644,36 @@ class CircuitEvaluator:
             "stage2_current_effective": stage2_current_effective,
             "load_gate_cap": load_gate_caps,
         }
+
+    def _estimate_output_swing(
+        self,
+        n_device: Dict[str, float],
+        p_device: Dict[str, float],
+    ) -> Tuple[float, float, float]:
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+        low = vss + abs(n_device.get("vdsat", 0.0)) * factor
+        high = vdd - abs(p_device.get("vdsat", 0.0)) * factor
+        return max(0.0, high - low), low, high
+
+    def _estimate_nmos_input_icmr(
+        self,
+        input_device: Dict[str, float],
+        load_device: Dict[str, float],
+        tail_device: Dict[str, float],
+    ) -> Tuple[float, float]:
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+        vgs_in = abs(input_device.get("vgs", 0.0))
+        vdsat_in = abs(input_device.get("vdsat", 0.0))
+        vdsat_tail = abs(tail_device.get("vdsat", 0.0))
+        vdsat_load = abs(load_device.get("vdsat", 0.0))
+        icmr_min = vss + vgs_in + vdsat_tail * factor
+        drain_limit = vdd - vdsat_load * factor
+        icmr_max = drain_limit - vdsat_in * factor + vgs_in
+        return icmr_min, max(icmr_min, icmr_max)
     def _compute_loss(self, perf: Dict[str, float],
                        tp: Dict[str, Dict[str, float]]) -> Tuple[float, Dict[str, float]]:
         """

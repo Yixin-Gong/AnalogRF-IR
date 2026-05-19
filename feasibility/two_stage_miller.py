@@ -47,6 +47,12 @@ class FeasibilityCandidate:
     PM_pred_deg: float
     SRp_pred_V_s: float
     SRn_pred_V_s: float
+    output_swing_V: float
+    output_swing_low_V: float
+    output_swing_high_V: float
+    ICMR_min_V: float
+    ICMR_max_V: float
+    ICMR_range_V: float
     power_pred_W: float
     CL_eff: float
     Cpar_out: float
@@ -232,6 +238,8 @@ class TwoStageMillerFeasibilityChecker:
         rz = rz_factor / max(gm2, 1e-30)
         power = vdd * (itail + i2) * (1.0 + self._current_overhead())
         headroom = self._headroom_margin(vdd, n_in, p_load, n_tail, p_stage2, n_out)
+        output_swing, output_low, output_high = self._output_swing(vdd, p_stage2, n_out)
+        icmr_min, icmr_max = self._input_common_mode_range(vdd, n_in, p_load, n_tail)
         ft_min = min(
             float(n_in.get("ft", 0.0) or n_in.get("ft_approx", 0.0) or 0.0),
             float(p_load.get("ft", 0.0) or p_load.get("ft_approx", 0.0) or 0.0),
@@ -252,6 +260,9 @@ class TwoStageMillerFeasibilityChecker:
             srp=srp,
             srn=srn,
             pm_pred=pm_pred,
+            output_swing=output_swing,
+            icmr_min=icmr_min,
+            icmr_max=icmr_max,
             power=power,
             headroom=headroom,
             ft_min=ft_min,
@@ -282,6 +293,12 @@ class TwoStageMillerFeasibilityChecker:
             PM_pred_deg=pm_pred,
             SRp_pred_V_s=srp,
             SRn_pred_V_s=srn,
+            output_swing_V=output_swing,
+            output_swing_low_V=output_low,
+            output_swing_high_V=output_high,
+            ICMR_min_V=icmr_min,
+            ICMR_max_V=icmr_max,
+            ICMR_range_V=max(0.0, icmr_max - icmr_min),
             power_pred_W=power,
             CL_eff=cl_eff,
             Cpar_out=cpar_out,
@@ -337,6 +354,9 @@ class TwoStageMillerFeasibilityChecker:
         srp: float,
         srn: float,
         pm_pred: float,
+        output_swing: float,
+        icmr_min: float,
+        icmr_max: float,
         power: float,
         headroom: float,
         ft_min: float,
@@ -345,6 +365,10 @@ class TwoStageMillerFeasibilityChecker:
         pmax = self.spec.get("Pmax_W")
         srp_spec = self.spec.get("SRp_V_s")
         srn_spec = self.spec.get("SRn_V_s")
+        swing_min = self.spec.get("output_swing_min_V")
+        icmr_min_max = self.spec.get("ICMR_min_max_V")
+        icmr_max_min = self.spec.get("ICMR_max_min_V")
+        icmr_range_min = self.spec.get("ICMR_range_min_V")
         max_w = getattr(self.state.process, "max_W", 200e-6)
         return {
             "gain_dB": av_db - float(self.spec["Av_dB"]),
@@ -352,6 +376,10 @@ class TwoStageMillerFeasibilityChecker:
             "srp_log": math.log(max(srp, 1e-30) / srp_spec) if srp_spec else None,
             "srn_log": math.log(max(srn, 1e-30) / srn_spec) if srn_spec else None,
             "pm_deg": pm_pred - float(self.spec["PM_deg"]),
+            "output_swing_V": output_swing - swing_min if swing_min else None,
+            "icmr_min_V": icmr_min_max - icmr_min if icmr_min_max else None,
+            "icmr_max_V": icmr_max - icmr_max_min if icmr_max_min else None,
+            "icmr_range_V": max(0.0, icmr_max - icmr_min) - icmr_range_min if icmr_range_min else None,
             "power_log": math.log(pmax / max(power, 1e-30)) if pmax else None,
             "headroom_V": headroom,
             "ft_log": math.log(max(ft_min, 1.0) / max(self.config.ft_multiple * float(self.spec["GBW_Hz"]), 1.0)),
@@ -365,6 +393,10 @@ class TwoStageMillerFeasibilityChecker:
             "srp_log": math.log(1.2),
             "srn_log": math.log(1.2),
             "pm_deg": 5.0,
+            "output_swing_V": 0.05,
+            "icmr_min_V": 0.05,
+            "icmr_max_V": 0.05,
+            "icmr_range_V": 0.05,
             "power_log": math.log(1.2),
             "headroom_V": 0.05,
             "ft_log": math.log(2.0),
@@ -427,6 +459,10 @@ class TwoStageMillerFeasibilityChecker:
             "gain_dB": ("Av-GBW-speed conflict", "Predicted gm/gds gain margin is tight."),
             "pm_deg": ("PM-CL-GBW-power conflict", "Second-pole separation and phase-margin reserve are tight."),
             "headroom_V": ("Headroom-swing conflict", "Estimated Vdsat stack is close to available supply margin."),
+            "output_swing_V": ("Headroom-swing conflict", "Output swing is limited by output pull-up/pull-down saturation headroom."),
+            "icmr_min_V": ("Headroom-swing conflict", "Input common-mode low end is limited by tail and input-pair headroom."),
+            "icmr_max_V": ("Headroom-swing conflict", "Input common-mode high end is limited by input-pair and load headroom."),
+            "icmr_range_V": ("Headroom-swing conflict", "Input common-mode range is too narrow under estimated saturation limits."),
             "ft_log": ("Parasitic/speed conflict", "Device ft reserve over target GBW is tight."),
             "width_log": ("Parasitic-dominated conflict", "Estimated widths approach process max width."),
             "srp_log": ("GBW-SR-power conflict", "Positive slew requirement is close to the gm/ID/GBW current boundary."),
@@ -513,6 +549,19 @@ class TwoStageMillerFeasibilityChecker:
                 "suggested_min_V": self._vdd() + abs(float(best.slacks["headroom_V"])) + 0.05,
                 "reason": "Vdsat stack needs more supply or relaxed swing/headroom.",
             })
+        if (best.slacks.get("output_swing_V") or 0.0) < 0:
+            suggestions.append({
+                "spec": "output_swing",
+                "current": self.spec.get("output_swing_min_V"),
+                "suggested_max_V": best.output_swing_V,
+                "reason": "Output pull-up/pull-down VDSAT leaves less swing than requested.",
+            })
+        if (best.slacks.get("icmr_min_V") or 0.0) < 0 or (best.slacks.get("icmr_max_V") or 0.0) < 0:
+            suggestions.append({
+                "spec": "ICMR",
+                "suggested_range_V": [best.ICMR_min_V, best.ICMR_max_V],
+                "reason": "Input common-mode range is limited by input pair, load, and tail headroom.",
+            })
         if not suggestions:
             suggestions.append({
                 "spec": "none",
@@ -587,9 +636,10 @@ class TwoStageMillerFeasibilityChecker:
             "SRn_V_s": srn,
             "Pmax_W": self._target_max("power", "total_power", default=None),
             "CL_F": self.state.simulation.cload,
-            "output_swing_V": self._target_min("output_swing", "swing", default=None),
-            "ICMR_min_V": self._target_min("icmr_min", "input_common_mode_min", default=None),
-            "ICMR_max_V": self._target_max("icmr_max", "input_common_mode_max", default=None),
+            "output_swing_min_V": self._target_min("output_swing", "swing", default=None),
+            "ICMR_min_max_V": self._target_max("icmr_min", "input_common_mode_min", default=None),
+            "ICMR_max_min_V": self._target_min("icmr_max", "input_common_mode_max", default=None),
+            "ICMR_range_min_V": self._target_min("icmr", "icmr_range", default=None),
         }
 
     def _target_min(self, *names: str, default: float | None) -> float | None:
@@ -667,6 +717,28 @@ class TwoStageMillerFeasibilityChecker:
         stack_output = abs(float(p_stage2.get("vdsat", 0.0))) + abs(float(n_out.get("vdsat", 0.0))) + margin
         return min(vdd - stack_input, vdd - stack_output)
 
+    def _output_swing(self, vdd: float, p_stage2: dict, n_out: dict) -> tuple[float, float, float]:
+        factor = getattr(self.state.process, "VDSAT_headroom_factor", 1.0)
+        low = abs(float(n_out.get("vdsat", 0.0))) * factor
+        high = vdd - abs(float(p_stage2.get("vdsat", 0.0))) * factor
+        return max(0.0, high - low), low, high
+
+    def _input_common_mode_range(
+        self,
+        vdd: float,
+        n_in: dict,
+        p_load: dict,
+        n_tail: dict,
+    ) -> tuple[float, float]:
+        factor = getattr(self.state.process, "VDSAT_headroom_factor", 1.0)
+        vgs_in = abs(float(n_in.get("vgs", 0.0)))
+        vdsat_in = abs(float(n_in.get("vdsat", 0.0)))
+        vdsat_tail = abs(float(n_tail.get("vdsat", 0.0)))
+        vdsat_load = abs(float(p_load.get("vdsat", 0.0)))
+        low = vgs_in + vdsat_tail * factor
+        high = vdd - vdsat_load * factor - vdsat_in * factor + vgs_in
+        return low, max(low, high)
+
     def _output_parasitic(self, phys: dict[str, float]) -> float:
         return abs(float(phys.get("cgd", 0.0))) + 0.2 * abs(float(phys.get("cgg", 0.0)))
 
@@ -719,15 +791,16 @@ class TwoStageMillerFeasibilityChecker:
             "",
             "## Best Candidates",
             "",
-            "| id | score | gmID_in | gmID_2 | gmID_load | L_in | L_load | L_2 | Cc | Rz | Itail | I2 | Av(dB) | GBW(MHz) | PM(deg) | SR+/SR-(V/us) | P(uW) | headroom(mV) |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| id | score | gmID_in | gmID_2 | gmID_load | L_in | L_load | L_2 | Cc | Rz | Itail | I2 | Av(dB) | GBW(MHz) | PM(deg) | SR+/SR-(V/us) | swing(V) | ICMR(V) | P(uW) | headroom(mV) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
         for raw in report.get("best_candidates", [])[:8]:
             lines.append(
                 "| {candidate_id} | {feasibility_score:.2f} | {gmID_in:.2f} | {gmID_stage2:.2f} | "
                 "{gmID_load:.2f} | {L_in:.2e} | {L_load:.2e} | {L_stage2:.2e} | {Cc:.2e} | {Rz:.2e} | "
                 "{Itail:.2e} | {I2:.2e} | {Av_pred_dB:.2f} | {gbw_mhz:.2f} | {PM_pred_deg:.2f} | "
-                "{srp_vus:.2f}/{srn_vus:.2f} | {power_uW:.2f} | {headroom_mV:.1f} |".format(
+                "{srp_vus:.2f}/{srn_vus:.2f} | {output_swing_V:.2f} | {ICMR_min_V:.2f}-{ICMR_max_V:.2f} | "
+                "{power_uW:.2f} | {headroom_mV:.1f} |".format(
                     **raw,
                     gbw_mhz=raw["GBW_pred_Hz"] / 1e6,
                     srp_vus=raw["SRp_pred_V_s"] / 1e6,
@@ -756,7 +829,15 @@ class TwoStageMillerFeasibilityChecker:
         for key in ("current", "current_Hz", "current_dB", "current_deg", "current_V"):
             if key in item:
                 values.append(f"{key}={item[key]:.3g}" if isinstance(item[key], (int, float)) else f"{key}={item[key]}")
-        for key in ("suggested_min", "suggested_max_Hz", "suggested_max_dB", "suggested_max_deg", "suggested_min_V"):
+        for key in (
+            "suggested_min",
+            "suggested_max_Hz",
+            "suggested_max_dB",
+            "suggested_max_deg",
+            "suggested_min_V",
+            "suggested_max_V",
+            "suggested_range_V",
+        ):
             if key in item:
                 values.append(f"{key}={item[key]:.3g}" if isinstance(item[key], (int, float)) else f"{key}={item[key]}")
         suffix = f" ({'; '.join(values)})" if values else ""

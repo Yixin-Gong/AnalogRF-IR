@@ -52,6 +52,8 @@ def test_spec_registry_selects_ota_and_comparator():
     assert registry.select(comparator).name == "comparator"
     assert registry.select(ota).measurement_key("dc_gain") == "dc_gain_db"
     assert registry.select(ota).measurement_key("slew_rate") == "slew_rate"
+    assert registry.select(ota).measurement_key("swing") == "output_swing"
+    assert registry.select(ota).measurement_key("input_common_mode_min") == "icmr_min"
     assert registry.select(comparator).measurement_key("offset") == "offset"
 
 
@@ -65,6 +67,9 @@ def test_artifact_writer_emits_result_json(tmp_path):
             "unity_gain_bandwidth": 5.1e8,
             "phase_margin": 65.0,
             "slew_rate": 6.0e7,
+            "output_swing": 0.7,
+            "icmr_min": 0.8,
+            "icmr_max": 0.7,
             "total_power": 2e-4,
         },
     )
@@ -74,6 +79,9 @@ def test_artifact_writer_emits_result_json(tmp_path):
             "unity_gain_bandwidth": 5.0e8,
             "phase_margin": 64.0,
             "slew_rate": 5.5e7,
+            "output_swing": 0.7,
+            "icmr_min": 0.8,
+            "icmr_max": 0.7,
             "power": 2.1e-4,
         },
         "decoded": {"__global__": {}},
@@ -131,9 +139,14 @@ def test_optimizer_and_netlist_include_slew_rate():
     assert perf["slew_rate"] > 0
     assert perf["slew_rate_pos"] > 0
     assert perf["slew_rate_neg"] > 0
+    assert perf["output_swing"] > 0
+    assert perf["icmr_max"] >= perf["icmr_min"]
     assert "sr_deficit" in meta["loss_breakdown"]
+    assert "swing_deficit" in meta["loss_breakdown"]
+    assert "icmr_min_excess" in meta["loss_breakdown"]
     assert ".tran" in netlist
     assert "slew_rate" in netlist
+    assert "output_swing" in netlist
 
 
 def test_ngspice_transient_curve_extracts_slew_rate(tmp_path):
@@ -157,6 +170,36 @@ def test_ngspice_transient_curve_extracts_slew_rate(tmp_path):
     assert perf["slew_rate_pos"] > 0
     assert perf["slew_rate_neg"] > 0
     assert perf["slew_rate"] == min(perf["slew_rate_pos"], perf["slew_rate_neg"])
+
+
+def test_ngspice_headroom_extracts_swing_and_icmr():
+    netlist = """
+* VDSAT_headroom_factor: 1.3
+XM1 net1 vinn tail gnd sg13_lv_nmos W=1u L=500n
+XM2 n1 vinp tail gnd sg13_lv_nmos W=1u L=500n
+XM3 net1 net1 vdd vdd sg13_lv_pmos W=1u L=500n
+XM4 n1 net1 vdd vdd sg13_lv_pmos W=1u L=500n
+XM5 tail vbias_tail gnd gnd sg13_lv_nmos W=1u L=500n
+XM6 vout n1 vdd vdd sg13_lv_pmos W=1u L=500n
+XM7 vout vbias_stage2 gnd gnd sg13_lv_nmos W=1u L=500n
+Vdd vdd 0 DC 1.2
+Cload vout 0 200f
+.end
+"""
+    op = {
+        "M1": {"vgs": 0.55, "vdsat": 0.12},
+        "M3": {"vdsat": 0.10},
+        "M5": {"vdsat": 0.15},
+        "M6": {"vdsat": 0.16},
+        "M7": {"vdsat": 0.14},
+    }
+
+    perf = NgspiceSimulator()._extract_headroom_performance(netlist, op)
+
+    assert perf["output_swing"] > 0
+    assert perf["output_swing_low"] < perf["output_swing_high"]
+    assert perf["icmr_min"] > 0
+    assert perf["icmr_max"] >= perf["icmr_min"]
 
 
 def test_two_stage_feasibility_report_has_required_sections(tmp_path):

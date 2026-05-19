@@ -487,6 +487,7 @@ class NgspiceSimulator:
             }
             dc_perf = self._extract_dc_performance(combined, result.operating_points)
             result.measurements.update(dc_perf)
+            result.measurements.update(self._extract_headroom_performance(netlist, result.operating_points))
 
         return result
 
@@ -796,6 +797,180 @@ class NgspiceSimulator:
                     continue
                 op.setdefault(dev, {})[param] = val
         return op
+
+    def _extract_headroom_performance(
+        self,
+        netlist: str,
+        op: Dict[str, Dict[str, float]],
+    ) -> Dict[str, float]:
+        devices = self._parse_mos_devices(netlist)
+        if not devices:
+            return {}
+        vdd = self._infer_vdd(netlist)
+        vss = self._infer_vss(netlist)
+        factor = self._infer_vdsat_factor(netlist)
+        output_node = self._infer_output_node(netlist)
+
+        perf: Dict[str, float] = {}
+        if output_node:
+            output = self._output_swing_from_op(devices, op, output_node, vdd, vss, factor)
+            perf.update(output)
+        icmr = self._icmr_from_op(devices, op, vdd, vss, factor)
+        perf.update(icmr)
+        return perf
+
+    def _parse_mos_devices(self, netlist: str) -> List[Dict[str, str]]:
+        devices: List[Dict[str, str]] = []
+        for line in netlist.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("*"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 6:
+                continue
+            name = parts[0]
+            if name[0].upper() not in {"M", "X"}:
+                continue
+            model = parts[5]
+            device_type = self._mos_type_from_model(model)
+            if not device_type:
+                continue
+            canonical = name.upper()
+            if canonical.startswith("X"):
+                canonical = canonical[1:]
+            devices.append(
+                {
+                    "id": canonical,
+                    "raw_id": name.upper(),
+                    "drain": parts[1].lower(),
+                    "gate": parts[2].lower(),
+                    "source": parts[3].lower(),
+                    "body": parts[4].lower(),
+                    "model": model,
+                    "type": device_type,
+                }
+            )
+        return devices
+
+    def _mos_type_from_model(self, model: str) -> Optional[str]:
+        low = model.lower()
+        if "pmos" in low or "pch" in low or low.startswith("p"):
+            return "pmos"
+        if "nmos" in low or "nch" in low or low.startswith("n"):
+            return "nmos"
+        return None
+
+    def _infer_output_node(self, netlist: str) -> str:
+        m = re.search(r"^\s*Cload\s+(\S+)\s+", netlist, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            return m.group(1).lower()
+        return "vout"
+
+    def _infer_vss(self, netlist: str) -> float:
+        m = re.search(r"^\s*Vss\s+\S+\s+\S+\s+DC\s+(\S+)", netlist, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            try:
+                return -abs(self._spice_number(m.group(1)))
+            except ValueError:
+                pass
+        return 0.0
+
+    def _infer_vdsat_factor(self, netlist: str) -> float:
+        m = re.search(r"^\s*\*\s*VDSAT_headroom_factor:\s*(\S+)", netlist, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            try:
+                return max(0.0, self._spice_number(m.group(1)))
+            except ValueError:
+                pass
+        return 1.0
+
+    def _output_swing_from_op(
+        self,
+        devices: List[Dict[str, str]],
+        op: Dict[str, Dict[str, float]],
+        output_node: str,
+        vdd: float,
+        vss: float,
+        factor: float,
+    ) -> Dict[str, float]:
+        pullups = [
+            dev for dev in devices
+            if dev["drain"] == output_node and dev["type"] == "pmos"
+        ]
+        pulldowns = [
+            dev for dev in devices
+            if dev["drain"] == output_node and dev["type"] == "nmos"
+        ]
+        if not pullups or not pulldowns:
+            return {}
+        p_vdsat = max(self._op_abs(op, dev["id"], "vdsat") for dev in pullups)
+        n_vdsat = max(self._op_abs(op, dev["id"], "vdsat") for dev in pulldowns)
+        if p_vdsat <= 0.0 or n_vdsat <= 0.0:
+            return {}
+        low = vss + factor * n_vdsat
+        high = vdd - factor * p_vdsat
+        return {
+            "output_swing": max(0.0, high - low),
+            "output_swing_low": low,
+            "output_swing_high": high,
+        }
+
+    def _icmr_from_op(
+        self,
+        devices: List[Dict[str, str]],
+        op: Dict[str, Dict[str, float]],
+        vdd: float,
+        vss: float,
+        factor: float,
+    ) -> Dict[str, float]:
+        input_nodes = self._input_nodes_from_sources(devices)
+        input_devs = [
+            dev for dev in devices
+            if dev["gate"] in input_nodes
+        ]
+        n_inputs = [dev for dev in input_devs if dev["type"] == "nmos"]
+        if len(n_inputs) < 1:
+            return {}
+        inp = n_inputs[0]
+        source_node = inp["source"]
+        tail_candidates = [
+            dev for dev in devices
+            if dev["type"] == "nmos" and dev["drain"] == source_node and dev["id"] != inp["id"]
+        ]
+        load_candidates = [
+            dev for dev in devices
+            if dev["type"] == "pmos" and dev["drain"] == inp["drain"]
+        ]
+        if not tail_candidates or not load_candidates:
+            return {}
+        tail = tail_candidates[0]
+        load = load_candidates[0]
+        vgs_in = self._op_abs(op, inp["id"], "vgs")
+        vdsat_in = self._op_abs(op, inp["id"], "vdsat")
+        vdsat_tail = self._op_abs(op, tail["id"], "vdsat")
+        vdsat_load = self._op_abs(op, load["id"], "vdsat")
+        if min(vgs_in, vdsat_in, vdsat_tail, vdsat_load) <= 0.0:
+            return {}
+        icmr_min = vss + vgs_in + factor * vdsat_tail
+        drain_limit = vdd - factor * vdsat_load
+        icmr_max = drain_limit - factor * vdsat_in + vgs_in
+        if icmr_max < icmr_min:
+            icmr_max = icmr_min
+        return {
+            "icmr": max(0.0, icmr_max - icmr_min),
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
+        }
+
+    def _input_nodes_from_sources(self, devices: List[Dict[str, str]]) -> set[str]:
+        nodes = {"vin", "vinp", "vinn", "inp", "inn", "in_p", "in_n"}
+        return nodes | {dev["gate"] for dev in devices if dev["gate"].startswith("vin")}
+
+    def _op_abs(self, op: Dict[str, Dict[str, float]], device_id: str, param: str) -> float:
+        for name in (device_id.upper(), f"M{device_id}".upper()):
+            if name in op and param in op[name]:
+                return abs(float(op[name][param]))
+        return 0.0
 
     def _canonical_op_device_name(self, raw: str) -> str:
         name = raw.upper()

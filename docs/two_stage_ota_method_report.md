@@ -642,7 +642,7 @@ For this two-stage OTA:
 1. PM should be upgraded to true loop-gain measurement. The current method is a robust open-loop transfer proxy, not full Middlebrook/Tian loop gain.
 2. The compact model still underestimates or mispredicts some ngspice behaviors, especially high-speed PM. More ngspice-in-the-loop search or surrogate correction would improve convergence.
 3. Pareto search should eventually use real multi-objective SPICE-aware objectives rather than compact estimates alone.
-4. Layout effects, parasitic loading, mismatch, noise, slew rate, input/output swing, and PVT corners are not yet included.
+4. Layout effects, detailed parasitic loading, mismatch, noise, full DC swing/ICMR sweeps, and PVT corners are not yet included. Slew rate now has transient ngspice validation; output swing and ICMR are currently operating-point headroom estimates.
 5. The remaining M5 inversion-region warning suggests that tail current source sizing could be improved if stronger inversion is required by design policy.
 
 ## 15. Conclusion
@@ -657,4 +657,3 @@ The updated flow successfully converts a schema-level two-stage OTA specificatio
 6. Generate local ngspice Pareto fronts to understand stability-bandwidth tradeoffs.
 
 The final 500 MHz design meets the specified gain, UGBW, PM, and power targets with comfortable stability margin, and the generated reports/logs provide a reproducible path for future users to inspect, modify, and extend the flow.
-
