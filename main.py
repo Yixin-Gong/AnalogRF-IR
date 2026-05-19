@@ -1248,7 +1248,20 @@ def balance_two_stage_output(
             best.update({"scale": scale, "sink_scale": sink_scale, "vout": vout, "error": err})
         return vout
 
-    lo = max(0.0625, min_w / base_w) if base_w > 0 else 0.0625
+    base_vout = evaluate(1.0, 1.0)
+    if base_vout is None:
+        gain_ts.parameters.W = base_w
+        if sink_ts and base_sink_w:
+            sink_ts.parameters.W = base_sink_w
+        return {}
+    if 0.25 * vdd <= base_vout <= 0.75 * vdd:
+        gain_ts.parameters.W = base_w
+        if sink_ts and base_sink_w:
+            sink_ts.parameters.W = base_sink_w
+        best.update({"scale": 1.0, "sink_scale": 1.0, "vout": base_vout, "error": abs(base_vout - target)})
+        return best
+
+    lo = max(0.25, min_w / base_w) if base_w > 0 else 0.25
     hi = min(16.0, max_w / base_w) if base_w > 0 else 16.0
     if hi <= lo:
         gain_ts.parameters.W = min(max(base_w, min_w), max_w)
@@ -1552,6 +1565,9 @@ def main(argv=None):
     formal_tail_current_mirror = any(
         dev.role == "tail_bias_mirror" for dev in state.topology.devices
     )
+    formal_stage2_current_mirror = any(
+        dev.role == "output_bias_mirror" for dev in state.topology.devices
+    )
     tail_current_mirror_active = formal_tail_current_mirror or bool(args.tail_current_mirror)
     print(f"       Topology: {state.topology.name} ({state.topology.architecture})")
     print(f"       Process:  {state.process.process_name} ({state.process.technology_node}um)")
@@ -1620,6 +1636,7 @@ def main(argv=None):
         "skip_dc_repair": bool(args.skip_dc_repair),
         "skip_comp_tune": bool(args.skip_comp_tune),
         "tail_current_mirror": bool(tail_current_mirror_active),
+        "stage2_current_mirror": bool(formal_stage2_current_mirror),
     }
 
     perf_est = best_meta.get("performance", {})

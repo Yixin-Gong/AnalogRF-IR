@@ -195,22 +195,26 @@ class NetlistGenerator:
             fallback = vdd * 0.5
         handled_ports = set()
 
+        bias_mirror_specs = {
+            "tail_bias_mirror": ("I_tail", "Iref_tail", 10e-6),
+            "output_bias_mirror": ("I_stage2", "Iref_stage2", 20e-6),
+        }
         for dev in self.state.topology.devices:
-            if dev.role != "tail_bias_mirror":
+            if dev.role not in bias_mirror_specs:
                 continue
             gate = dev.connections.get("gate", "")
             drain = dev.connections.get("drain", "")
             if not gate or gate != drain:
                 continue
             ts = self.state.transistors.get(dev.id)
+            current_name, source_name, default_current = bias_mirror_specs[dev.role]
             iref = self._get_global_param(
-                "I_tail",
-                ts.parameters.id if ts and ts.parameters.id > 0 else 10e-6,
+                current_name,
+                ts.parameters.id if ts and ts.parameters.id > 0 else default_current,
             )
-            lines.append("* Tail bias mirror reference current")
-            lines.append(f"Iref_tail vdd {gate} DC {self._fmt_si(float(iref), 'A')}")
+            lines.append(f"* {dev.role} reference current")
+            lines.append(f"{source_name} vdd {gate} DC {self._fmt_si(float(iref), 'A')}")
             handled_ports.add(gate)
-            break
 
         params = getattr(self.state, "global_parameters", {}) or {}
         if not handled_ports and float(params.get("tail_current_mirror_bias", 0.0) or 0.0) > 0.5:

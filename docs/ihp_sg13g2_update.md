@@ -58,6 +58,12 @@ The IHP model integration is functional, but the original 60 dB / 500 MHz / 60 d
 Useful ngspice-verified points found during diagnosis:
 
 ```text
+runs/iter_058:
+  gain ~= 59.3 dB, UGBW ~= 62.6 MHz, PM ~= 81.4 deg, power ~= 304 uW
+
+runs/iter_056:
+  optimizer-only sizing, gain ~= 60.9 dB, UGBW ~= 71.6 MHz, PM ~= 0 deg, power ~= 299 uW
+
 runs/pareto_comp_ihp_verify03:
   gain ~= 47.7 dB, UGBW ~= 593 MHz, PM ~= 65.9 deg, power ~= 322 uW
 
@@ -68,4 +74,4 @@ runs/iter_026:
   gain ~= 38.6 dB, UGBW ~= 312 MHz, PM ~= 78.6 deg, power ~= 190 uW
 ```
 
-Interpretation: IHP SG13G2 can produce either a stable high-bandwidth point or a higher-gain stable point in this topology, but the current compact optimizer and repair flow do not yet find a simultaneous 60 dB / 500 MHz / 60 deg solution. The main remaining work is a true ngspice-in-the-loop or surrogate-corrected outer search for second-stage bias, output resistance, and compensation together.
+Interpretation: IHP SG13G2 can produce either a stable high-bandwidth point or a higher-gain stable point in this topology, but the current compact optimizer and repair flow do not yet find a simultaneous 60 dB / 500 MHz / 60 deg solution. After adding explicit tail and output current mirrors, the high-gain point is now close to 60 dB with stable PM, but bandwidth falls to tens of MHz because the high-ro PMOS load mirror becomes very capacitive. The main remaining work is a true ngspice-in-the-loop or surrogate-corrected outer search for second-stage bias, output resistance, and compensation together, or a topology-level bandwidth improvement.

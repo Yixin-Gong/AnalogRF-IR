@@ -394,3 +394,43 @@ The smoke run correctly reported:
 spec_pass: false
 unverified_targets: [dc_gain, unity_gain_bandwidth, phase_margin]
 ```
+
+## 2026-05-19 Full Current-Mirror Two-Stage Model
+
+### Scope
+
+Converted the IHP two-stage OTA biasing to explicit current mirrors on both the tail and second-stage sink branches, then added compact-model diagnostics for the new bias topology.
+
+### Major Changes
+
+1. Added an output bias mirror device `M9` to `ir/schema_two_stage.yaml`.
+2. Updated the netlist generator so `tail_bias_mirror` and `output_bias_mirror` emit reference current sources instead of ideal bias-voltage sources.
+3. Updated the SPICE parser and YAML frontend so imported diode-connected tail/output bias transistors keep their semantic roles.
+4. Added optimizer-side current mirror modeling:
+   - tail and output mirror copy factors
+   - stage-2 current demand/capacity/effective current
+   - `stage2_balance_factor` loss term
+   - PMOS load gate capacitance diagnostic
+5. Tightened the high-gain two-stage search region by raising selected channel-length lower bounds and gain-deficit weight.
+6. Fixed the DC repair flow so stage-2 re-balance first evaluates the current operating point and does not destructively resize M6 when `vout` is already in a valid output window.
+
+### Validation
+
+```text
+python3 -m py_compile main.py netlist/generator.py optimizer/nsga2.py frontends/yaml_loader.py frontends/spice_parser.py tests/test_frontends.py
+manual tests/test_frontends.py checks: passed
+```
+
+IHP all-current-mirror runs:
+
+```text
+runs/iter_050  optimizer sizing only:
+  gain 31.7 dB, UGBW 100.5 MHz, PM 41.6 deg, power 270.3 uW
+
+runs/iter_058  full flow after repair fix:
+  gain 59.3 dB, UGBW 62.6 MHz, PM 81.4 deg, power 304.4 uW
+```
+
+### Current Diagnosis
+
+The all-current-mirror model fixes the earlier output-collapse failure mode and can find ngspice-verified high-gain points. The remaining IHP two-stage bottleneck is bandwidth: reaching 60 dB and stable PM currently drives long-channel/high-capacitance PMOS mirror loads, which limits UGBW far below the 500 MHz target. A simultaneous 60 dB / 500 MHz / 60 deg IHP point likely needs a SPICE-aware outer-loop search, topology changes, or a looser gain/bandwidth tradeoff.

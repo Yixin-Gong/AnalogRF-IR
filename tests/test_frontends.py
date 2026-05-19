@@ -64,6 +64,17 @@ def test_spice_parser_recognizes_tail_bias_mirror():
     assert device["role"] == "tail_bias_mirror"
 
 
+def test_spice_parser_recognizes_output_bias_mirror():
+    data = parse_spice_text(
+        "XM9 vbias_stage2 vbias_stage2 gnd gnd sg13_lv_nmos W=1u L=500n",
+        design_name="output_bias_mirror",
+    )
+
+    device = data["topology"]["devices"][0]
+    assert device["id"] == "M9"
+    assert device["role"] == "output_bias_mirror"
+
+
 def test_generic_mos_models_map_to_active_process():
     data = parse_spice_text(
         """

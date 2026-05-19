@@ -183,6 +183,9 @@ class CircuitEvaluator:
             i_tail_est = power_max / (vdd - vss) / 3
         i_stage2_est = globals_decoded.get("I_stage2", globals_decoded.get("I_out", i_tail_est))
 
+        has_tail_mirror = any(dev.role == "tail_bias_mirror" for dev in self.schema.topology.devices)
+        has_output_mirror = any(dev.role == "output_bias_mirror" for dev in self.schema.topology.devices)
+
         def _role_current(role: str) -> float:
             if role in ("tail_current_source", "tail_bias_mirror"):
                 return i_tail_est
@@ -190,9 +193,20 @@ class CircuitEvaluator:
                 return i_tail_est / 2
             if "current_mirror" in role:
                 return i_tail_est / 2
-            if role in ("second_stage_gain", "second_stage_load", "output_current_source"):
+            if role in ("second_stage_gain", "second_stage_load", "output_current_source", "output_bias_mirror"):
                 return i_stage2_est
             return i_tail_est / 2
+
+        def _mirror_copy_factor(role: str, vds: float, phys: dict) -> float:
+            if role == "tail_current_source" and not has_tail_mirror:
+                return 1.0
+            if role == "output_current_source" and not has_output_mirror:
+                return 1.0
+            if role not in ("tail_current_source", "output_current_source"):
+                return 1.0
+            vref = max(phys.get("vgs", 0.0), phys.get("vdsat", 0.0), 1e-3)
+            ratio = max(vds, 1e-6) / vref
+            return max(0.05, min(1.0, ratio ** 0.35))
 
         # ── 先翻译主导管，再复制给从属管 ──
         translated: Dict[str, dict] = {}
@@ -230,8 +244,18 @@ class CircuitEvaluator:
             phys["W"] = _snap_to_grid(phys["W"], proc.W_precision or 1e-9)
             phys["W"] = max(phys["W"], proc.min_W)
             L = _snap_to_grid(L, proc.L_precision or 1e-9)
+            width_factor = 1.0
+            if role == "second_stage_gain" and dev_type == "pmos" and has_output_mirror:
+                # The second-stage PMOS gate is imposed by the first-stage
+                # diode load; IHP ngspice consistently needs a wider device
+                # than the isolated lookup-table inversion predicts.
+                width_factor = 4.0
+                phys["W"] = min(
+                    _snap_to_grid(phys["W"] * width_factor, proc.W_precision or 1e-9),
+                    proc.max_W,
+                )
 
-            if role == "tail_bias_mirror":
+            if role in ("tail_bias_mirror", "output_bias_mirror"):
                 vds = max(phys.get("vgs", 0.45), 0.02)
             elif role == "tail_current_source":
                 input_refs = [
@@ -249,6 +273,7 @@ class CircuitEvaluator:
                 vds = max((vdd - vss) * 0.5, 0.2)
             else:
                 vds = max(vdd - 0.5, 0.2)
+            mirror_factor = _mirror_copy_factor(role, vds, phys)
 
             # 工作区判断 — 基于 gm_id 经验值
             gm_id_eff = phys.get("gm_id", gm_id)
@@ -258,7 +283,11 @@ class CircuitEvaluator:
             # 不覆盖 gds — pygmid.forward() 已从 BSIM4 查表给出真实输出导纳
             translated[device_id] = {
                 **phys, "L": L, "vds": vds,
-                "id": id_val, "region": region,
+                "id": id_val,
+                "id_effective": id_val * mirror_factor,
+                "mirror_copy_factor": mirror_factor,
+                "model_width_factor": width_factor,
+                "region": region,
                 "role": role, "type": dev_type,
             }
 
@@ -469,18 +498,51 @@ class CircuitEvaluator:
         M3 = tp[load_devs[0]]
         M6 = tp[gain_devs[0]]
         M7 = tp[out_loads[0]] if out_loads else {}
+        tail_sources = [p for p in tp.values() if p.get("role") == "tail_current_source"]
+        bias_refs = [p for p in tp.values() if p.get("role") in ("tail_bias_mirror", "output_bias_mirror")]
+        tail_factor = min([p.get("mirror_copy_factor", 1.0) for p in tail_sources] or [1.0])
+        stage2_mirror_factor = M7.get("mirror_copy_factor", 1.0)
+
+        def _wl_ratio(dev: Dict[str, float]) -> float:
+            return dev.get("W", 0.0) / max(dev.get("L", 0.0), 1e-30)
+
+        # The second-stage PMOS gate is tied to the first-stage PMOS diode load.
+        # Its available current is therefore mirror-like, not independently
+        # biasable by I_stage2. Derate the ideal W/L copy ratio so the compact
+        # model stays conservative against IHP ngspice operating points.
+        first_stage_load_current = M3.get("id", 0.0) * tail_factor
+        m6_copy_ratio = _wl_ratio(M6) / max(_wl_ratio(M3), 1e-30)
+        stage2_current_capacity = first_stage_load_current * m6_copy_ratio * 0.30
+        stage2_current_demand = max(
+            M6.get("id", 0.0) * stage2_mirror_factor,
+            M7.get("id_effective", M7.get("id", 0.0)),
+            1e-15,
+        )
+        stage2_balance_factor = max(
+            0.02,
+            min(1.0, stage2_current_capacity / stage2_current_demand),
+        )
+        stage2_factor = stage2_mirror_factor * stage2_balance_factor
+        stage2_current_effective = min(stage2_current_demand, stage2_current_capacity)
+        collapse_deficit = max(0.0, 0.85 - stage2_balance_factor) / 0.85
 
         corr = self.schema.corrections
         gm_corr = corr.gm_factor
         gds_corr = corr.gds_factor
         c_corr = corr.c_factor
 
-        gm1 = M1.get("gm", 0) * gm_corr
-        gds1 = max(M1.get("gds", 0) * gds_corr, 1e-15)
-        gds3 = max(M3.get("gds", 0) * gds_corr, 1e-15)
-        gm6 = M6.get("gm", 0) * gm_corr
-        gds6 = max(M6.get("gds", 0) * gds_corr, 1e-15)
-        gds7 = max(M7.get("gds", 0) * gds_corr, 1e-15)
+        gm1 = M1.get("gm", 0) * gm_corr * tail_factor
+        gds1 = max(M1.get("gds", 0) * gds_corr * max(tail_factor, 0.35), 1e-15)
+        gds3 = max(M3.get("gds", 0) * gds_corr * max(tail_factor, 0.35), 1e-15)
+        gm6 = M6.get("gm", 0) * gm_corr * stage2_factor
+        gds6 = max(M6.get("gds", 0) * gds_corr * max(stage2_factor, 0.35), 1e-15)
+        gds7 = max(
+            M7.get("gds", 0)
+            * gds_corr
+            * max(stage2_factor, 0.35)
+            * (1.0 + 30.0 * collapse_deficit ** 2),
+            1e-15,
+        )
 
         r1 = 1.0 / max(gds1 + gds3, 1e-15)
         r2 = 1.0 / max(gds6 + gds7, 1e-15)
@@ -492,8 +554,12 @@ class CircuitEvaluator:
         rz = self._global_value("Rz", 0.0, global_vars)
         cload = self.schema.simulation.cload or 2e-13
 
+        load_gate_caps = sum(
+            tp.get(did, {}).get("cgs", 0.0) + tp.get(did, {}).get("cgd", 0.0)
+            for did in load_devs
+        )
         c1_par = (
-            M1.get("cgd", 0) + M3.get("cgd", 0) + M6.get("cgs", 0)
+            M1.get("cgd", 0) + M6.get("cgs", 0) + load_gate_caps
             + (M1.get("W", 0) + M3.get("W", 0)) * 1e6 * 0.5e-15
         ) * c_corr
         c2_par = (
@@ -526,9 +592,9 @@ class CircuitEvaluator:
 
         vdd = self.schema.simulation.supply.get("vdd", 1.2)
         vss = self.schema.simulation.supply.get("vss", 0.0)
-        i_tail = max([p.get("id", 0.0) for p in tp.values() if p.get("role") == "tail_current_source"] or [0.0])
-        i_bias_ref = max([p.get("id", 0.0) for p in tp.values() if p.get("role") == "tail_bias_mirror"] or [0.0])
-        i_stage2 = max(M6.get("id", 0.0), M7.get("id", 0.0))
+        i_tail = max([p.get("id_effective", p.get("id", 0.0)) for p in tail_sources] or [0.0])
+        i_bias_ref = sum(p.get("id", 0.0) for p in bias_refs)
+        i_stage2 = stage2_current_effective
         power = (vdd - vss) * (i_tail + i_stage2 + i_bias_ref)
 
         return {
@@ -539,6 +605,14 @@ class CircuitEvaluator:
             "Cc": cc,
             "Rz": rz,
             "zero_target_rz": inv_gm6,
+            "tail_mirror_factor": tail_factor,
+            "stage2_mirror_factor_raw": stage2_mirror_factor,
+            "stage2_mirror_factor": stage2_factor,
+            "stage2_balance_factor": stage2_balance_factor,
+            "stage2_current_capacity": stage2_current_capacity,
+            "stage2_current_demand": stage2_current_demand,
+            "stage2_current_effective": stage2_current_effective,
+            "load_gate_cap": load_gate_caps,
         }
     def _compute_loss(self, perf: Dict[str, float],
                        tp: Dict[str, Dict[str, float]]) -> Tuple[float, Dict[str, float]]:
@@ -562,6 +636,13 @@ class CircuitEvaluator:
         proc = self.schema.process
         PENALTY_BIG = 1e6
         PENALTY_WARN = 1e3
+        roles_present = {p.get("role", "") for p in tp.values()}
+
+        def _is_mirrored_copy(role: str) -> bool:
+            return (
+                (role == "tail_current_source" and "tail_bias_mirror" in roles_present)
+                or (role == "output_current_source" and "output_bias_mirror" in roles_present)
+            )
 
         for did, p in tp.items():
             W = p.get("W", 0)
@@ -587,12 +668,13 @@ class CircuitEvaluator:
                 breakdown[f"soft:L_max_{did}"] = PENALTY_WARN * (L_val - proc.max_L)
 
             # 工作区软约束（diode-connected 豁免）
-            if role not in ("current_mirror_load", "tail_bias_mirror") and vds > 0 and "vdsat" in p:
+            if role not in ("current_mirror_load", "tail_bias_mirror", "output_bias_mirror") and vds > 0 and "vdsat" in p:
                 vdsat = p.get("vdsat", 0)
                 if vdsat > 0 and vds < vdsat * proc.VDSAT_headroom_factor:
                     shortage = vdsat * proc.VDSAT_headroom_factor - vds
-                    total += PENALTY_WARN * shortage
-                    breakdown[f"soft:saturation_{did}"] = PENALTY_WARN * shortage
+                    penalty_scale = PENALTY_WARN * (0.1 if _is_mirrored_copy(role) else 1.0)
+                    total += penalty_scale * shortage
+                    breakdown[f"soft:saturation_{did}"] = penalty_scale * shortage
 
             # VGS 安全范围
             VTH = proc.VTH_n if dev_type == "nmos" else proc.VTH_p
@@ -600,16 +682,22 @@ class CircuitEvaluator:
                 total += PENALTY_WARN * (0.05 - (vgs - VTH))
                 breakdown[f"soft:deep_subth_{did}"] = PENALTY_WARN * (0.05 - (vgs - VTH))
 
-        tail = next((p for p in tp.values() if p.get("role") == "tail_current_source"), None)
-        mirror = next((p for p in tp.values() if p.get("role") == "tail_bias_mirror"), None)
-        if tail and mirror:
-            tail_ratio = tail.get("W", 0.0) / max(tail.get("L", 0.0), 1e-30)
-            mirror_ratio = mirror.get("W", 0.0) / max(mirror.get("L", 0.0), 1e-30)
-            if tail_ratio > 0 and mirror_ratio > 0:
-                mismatch = abs(math.log(tail_ratio / mirror_ratio))
+        mirror_pairs = [
+            ("tail_current_source", "tail_bias_mirror", "tail_bias_mirror_ratio"),
+            ("output_current_source", "output_bias_mirror", "output_bias_mirror_ratio"),
+        ]
+        for copy_role, ref_role, label in mirror_pairs:
+            copy_dev = next((p for p in tp.values() if p.get("role") == copy_role), None)
+            ref_dev = next((p for p in tp.values() if p.get("role") == ref_role), None)
+            if not copy_dev or not ref_dev:
+                continue
+            copy_ratio = copy_dev.get("W", 0.0) / max(copy_dev.get("L", 0.0), 1e-30)
+            ref_ratio = ref_dev.get("W", 0.0) / max(ref_dev.get("L", 0.0), 1e-30)
+            if copy_ratio > 0 and ref_ratio > 0:
+                mismatch = abs(math.log(copy_ratio / ref_ratio))
                 if mismatch > 1e-3:
                     total += PENALTY_WARN * mismatch
-                    breakdown["soft:tail_bias_mirror_ratio"] = PENALTY_WARN * mismatch
+                    breakdown[f"soft:{label}"] = PENALTY_WARN * mismatch
 
         return total, breakdown
 

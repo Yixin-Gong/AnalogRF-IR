@@ -406,7 +406,7 @@ def _role_default_gm_id(role: str, mos_type: str) -> float:
 
 def _role_default_l(role: str) -> float:
     role = role.lower()
-    if "tail" in role:
+    if "tail" in role or "bias" in role or "source" in role:
         return 5.0e-7
     if "load" in role or "mirror" in role:
         return 1.0e-6
