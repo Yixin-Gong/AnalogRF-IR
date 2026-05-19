@@ -230,6 +230,8 @@ def _infer_role(dev_id: str, mos_type: str, c: dict[str, str]) -> str:
     drain = c["drain"].lower()
     if gate in {"vinp", "vinn", "inp", "inn", "vip", "vim"}:
         return "input_pair"
+    if gate == drain and mos_type == "nmos" and ("bias" in gate or gate.startswith("vb")) and source in GROUND_NAMES:
+        return "tail_bias_mirror"
     if "tail" in name or ("tail" in drain and source in GROUND_NAMES):
         return "tail_current_source"
     if c["gate"] == c["drain"] and mos_type == "pmos":

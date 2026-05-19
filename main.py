@@ -1549,6 +1549,10 @@ def main(argv=None):
     # ── Step 1: 构建 Schema ──
     print("\n[1/8] Building DesignState ...")
     state = build_design_state(env, schema_path, args.topology)
+    formal_tail_current_mirror = any(
+        dev.role == "tail_bias_mirror" for dev in state.topology.devices
+    )
+    tail_current_mirror_active = formal_tail_current_mirror or bool(args.tail_current_mirror)
     print(f"       Topology: {state.topology.name} ({state.topology.architecture})")
     print(f"       Process:  {state.process.process_name} ({state.process.technology_node}um)")
     print(f"       Vdd:      {state.simulation.supply.get('vdd', 1.2)}V")
@@ -1615,7 +1619,7 @@ def main(argv=None):
     best_meta["flow_options"] = {
         "skip_dc_repair": bool(args.skip_dc_repair),
         "skip_comp_tune": bool(args.skip_comp_tune),
-        "tail_current_mirror": bool(args.tail_current_mirror),
+        "tail_current_mirror": bool(tail_current_mirror_active),
     }
 
     perf_est = best_meta.get("performance", {})
@@ -1633,7 +1637,7 @@ def main(argv=None):
     state.global_parameters = {
         k: float(v) for k, v in decoded.get("__global__", {}).items()
     }
-    if args.tail_current_mirror:
+    if args.tail_current_mirror and not formal_tail_current_mirror:
         state.global_parameters["tail_current_mirror_bias"] = 1.0
 
     # 更新 state.transistors 的物理参数

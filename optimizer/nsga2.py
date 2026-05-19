@@ -184,7 +184,7 @@ class CircuitEvaluator:
         i_stage2_est = globals_decoded.get("I_stage2", globals_decoded.get("I_out", i_tail_est))
 
         def _role_current(role: str) -> float:
-            if role == "tail_current_source":
+            if role in ("tail_current_source", "tail_bias_mirror"):
                 return i_tail_est
             if role == "input_pair":
                 return i_tail_est / 2
@@ -231,7 +231,9 @@ class CircuitEvaluator:
             phys["W"] = max(phys["W"], proc.min_W)
             L = _snap_to_grid(L, proc.L_precision or 1e-9)
 
-            if role == "tail_current_source":
+            if role == "tail_bias_mirror":
+                vds = max(phys.get("vgs", 0.45), 0.02)
+            elif role == "tail_current_source":
                 input_refs = [
                     p for p in translated.values()
                     if p.get("role") == "input_pair"
@@ -525,8 +527,9 @@ class CircuitEvaluator:
         vdd = self.schema.simulation.supply.get("vdd", 1.2)
         vss = self.schema.simulation.supply.get("vss", 0.0)
         i_tail = max([p.get("id", 0.0) for p in tp.values() if p.get("role") == "tail_current_source"] or [0.0])
+        i_bias_ref = max([p.get("id", 0.0) for p in tp.values() if p.get("role") == "tail_bias_mirror"] or [0.0])
         i_stage2 = max(M6.get("id", 0.0), M7.get("id", 0.0))
-        power = (vdd - vss) * (i_tail + i_stage2)
+        power = (vdd - vss) * (i_tail + i_stage2 + i_bias_ref)
 
         return {
             "dc_gain": dc_gain_db,
@@ -584,7 +587,7 @@ class CircuitEvaluator:
                 breakdown[f"soft:L_max_{did}"] = PENALTY_WARN * (L_val - proc.max_L)
 
             # 工作区软约束（diode-connected 豁免）
-            if role not in ("current_mirror_load",) and vds > 0 and "vdsat" in p:
+            if role not in ("current_mirror_load", "tail_bias_mirror") and vds > 0 and "vdsat" in p:
                 vdsat = p.get("vdsat", 0)
                 if vdsat > 0 and vds < vdsat * proc.VDSAT_headroom_factor:
                     shortage = vdsat * proc.VDSAT_headroom_factor - vds
@@ -596,6 +599,17 @@ class CircuitEvaluator:
             if vgs > 0 and vgs - VTH < 0.05:
                 total += PENALTY_WARN * (0.05 - (vgs - VTH))
                 breakdown[f"soft:deep_subth_{did}"] = PENALTY_WARN * (0.05 - (vgs - VTH))
+
+        tail = next((p for p in tp.values() if p.get("role") == "tail_current_source"), None)
+        mirror = next((p for p in tp.values() if p.get("role") == "tail_bias_mirror"), None)
+        if tail and mirror:
+            tail_ratio = tail.get("W", 0.0) / max(tail.get("L", 0.0), 1e-30)
+            mirror_ratio = mirror.get("W", 0.0) / max(mirror.get("L", 0.0), 1e-30)
+            if tail_ratio > 0 and mirror_ratio > 0:
+                mismatch = abs(math.log(tail_ratio / mirror_ratio))
+                if mismatch > 1e-3:
+                    total += PENALTY_WARN * mismatch
+                    breakdown["soft:tail_bias_mirror_ratio"] = PENALTY_WARN * mismatch
 
         return total, breakdown
 

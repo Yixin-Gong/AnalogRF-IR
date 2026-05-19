@@ -53,6 +53,17 @@ def test_spice_yaml_can_seed_optimizer_design_state():
     assert any(variable.variable == "Cc" for variable in state.design_variables)
 
 
+def test_spice_parser_recognizes_tail_bias_mirror():
+    data = parse_spice_text(
+        "XM8 vbias_tail vbias_tail gnd gnd sg13_lv_nmos W=1u L=500n",
+        design_name="tail_bias_mirror",
+    )
+
+    device = data["topology"]["devices"][0]
+    assert device["id"] == "M8"
+    assert device["role"] == "tail_bias_mirror"
+
+
 def test_generic_mos_models_map_to_active_process():
     data = parse_spice_text(
         """
