@@ -32,6 +32,7 @@ targets:
   dc_gain:              {min: 50, unit: dB, priority: 1}
   unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
   phase_margin:         {min: 45, unit: deg, priority: 1}
+  slew_rate:            {min: 5.0e+07, unit: V/s, priority: 1}
   power:                {max: 5.0e-04, unit: W, priority: 2}
 
 design_variables:
@@ -82,6 +83,7 @@ loss_terms:
   - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 60.0}
   - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 90.0}
   - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 12.0}
+  - {id: sr_deficit,   formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 8.0}
   - {id: power_ratio,  formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.2}
   - {id: stage2_balance, formula: "relu(0.85 - realized.stage2_balance_factor)/0.85", weight: 80.0}
   - {id: zero_alignment, formula: "abs(realized.Rz - realized.zero_target_rz)/max(realized.zero_target_rz, 1)", weight: 0.08}
@@ -90,4 +92,5 @@ evaluations:
   - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}
   - {name: unity_gain_bandwidth, type: ugbw, probe: vout, target_ref: unity_gain_bandwidth}
   - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
+  - {name: slew_rate, type: slew_rate, probe: vout, target_ref: slew_rate}
   - {name: total_power, type: dc_power, target_ref: power}

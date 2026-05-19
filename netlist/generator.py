@@ -306,8 +306,33 @@ class NetlistGenerator:
         sim = self.state.simulation
         if "ac" in sim.analyses:
             lines.append(f".ac dec {sim.ac_points} {sim.ac_start} {sim.ac_stop}")
+        if self._needs_transient():
+            tstep, tstop, tmax = self._transient_timing()
+            lines.append(f".tran {tstep:.6g} {tstop:.6g} 0 {tmax:.6g}")
         lines.append("")
         return lines
+
+    def _needs_transient(self) -> bool:
+        if any(str(name).lower() in {"tran", "transient"} for name in self.state.simulation.analyses):
+            return True
+        if any(name in self.state.targets for name in ("slew_rate", "slew_rate_pos", "slew_rate_neg")):
+            return True
+        return any(ev.type in {"slew_rate", "slew_rate_pos", "slew_rate_neg"} for ev in self.state.evaluations)
+
+    def _transient_timing(self) -> tuple[float, float, float]:
+        gbw_target = None
+        for key in ("unity_gain_bandwidth", "ugbw"):
+            target = self.state.targets.get(key)
+            if target and target.min:
+                gbw_target = float(target.min)
+                break
+        if gbw_target and gbw_target > 0:
+            tstop = min(max(20.0 / gbw_target, 2.0e-8), 5.0e-6)
+        else:
+            tstop = 2.0e-7
+        tstep = max(tstop / 4000.0, 1.0e-12)
+        tmax = max(tstop / 8000.0, 1.0e-12)
+        return tstep, tstop, tmax
 
     # ── Measures (L3 evaluations 驱动 .meas 生成) ──
 
@@ -346,6 +371,8 @@ class NetlistGenerator:
                     lines.append(f".meas ac {ev.name} find vp({probe}) when vdb({probe})=0")
                 elif ev.type == "dc_power":
                     lines.append(f".meas dc {ev.name} MAX par('{vdd}*abs(i(Vdd))')")
+                elif ev.type in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
+                    lines.append(f"* .meas tran {ev.name}: computed from exported transient waveform in simulator")
                 elif ev.type == "cmrr":
                     lines.append(f"* .meas ac {ev.name} ... ; CMRR measurement TBD (unsupported)")
                 elif ev.type == "psrr":
@@ -363,6 +390,8 @@ class NetlistGenerator:
                 lines.append(f".meas ac ugbw when vdb({out})=0")
             if "phase_margin" in targets:
                 lines.append(f".meas ac pm find vp({out}) when vdb({out})=0")
+            if any(name in targets for name in ("slew_rate", "slew_rate_pos", "slew_rate_neg")):
+                lines.append("* .meas tran slew_rate: computed from exported transient waveform in simulator")
             if "power" in targets:
                 lines.append(f".meas dc total_power MAX par('{vdd}*abs(i(Vdd))')")
 

@@ -467,11 +467,16 @@ class CircuitEvaluator:
         if vdd_current == 0 and tail_dev_id and tail_dev_id in tp:
             vdd_current = tp[tail_dev_id].get("id", 0)
         power = (vdd - vss) * vdd_current
+        i_tail_sr = M5.get("id_effective", M5.get("id", 0.0))
+        slew_rate = i_tail_sr / max(c_out, 1e-18)
 
         return {
             "dc_gain": dc_gain_db,
             "unity_gain_bandwidth": gbw,
             "phase_margin": pm,
+            "slew_rate": slew_rate,
+            "slew_rate_pos": slew_rate,
+            "slew_rate_neg": slew_rate,
             "power": power,
         }
 
@@ -599,11 +604,16 @@ class CircuitEvaluator:
         i_bias_ref = sum(p.get("id", 0.0) for p in bias_refs)
         i_stage2 = stage2_current_effective
         power = (vdd - vss) * (i_tail + i_stage2 + i_bias_ref)
+        slew_rate_pos = i_tail / max(cc, 1e-18)
+        slew_rate_neg = i_stage2 / max(cload + c2_par, 1e-18)
 
         return {
             "dc_gain": dc_gain_db,
             "unity_gain_bandwidth": ugbw,
             "phase_margin": pm,
+            "slew_rate": min(slew_rate_pos, slew_rate_neg),
+            "slew_rate_pos": slew_rate_pos,
+            "slew_rate_neg": slew_rate_neg,
             "power": power,
             "Cc": cc,
             "Rz": rz,

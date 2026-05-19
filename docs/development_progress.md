@@ -642,3 +642,59 @@ runs/feasibility_005/
 ### Notes
 
 The feasibility report correctly classifies the relaxed IHP two-stage OTA spec as roughly feasible, matching the later ngspice-passing optimizer result. The report still flags Middlebrook return-ratio loop-gain verification as mandatory because analytical PM is only a screening metric.
+
+## 2026-05-20 Slew-Rate Optimization And Ngspice Validation
+
+### Scope
+
+Added slew-rate as a first-class OTA metric in the optimizer, schema, structured diagnostics, and ngspice validation flow.
+
+### Major Changes
+
+1. Added `slew_rate` target to `ir/schema_two_stage.yaml`:
+   - `slew_rate.min`: 50 V/us (`5.0e7 V/s`)
+2. Added optimizer estimates:
+   - Five-transistor OTA: `SR ~= Itail / Cout`
+   - Two-stage Miller OTA: `SR+ ~= Itail / Cc`, `SR- ~= Istage2 / (CL + Cpar_out)`, and `slew_rate = min(SR+, SR-)`
+3. Added `sr_deficit` loss term so SR participates in optimization.
+4. Added transient analysis generation when SR targets/evaluations are present.
+5. Added ngspice transient pass:
+   - Keeps AC/DC testbenches unchanged.
+   - Injects a differential pulse only in the transient pass.
+   - Exports `vout(t)` and computes `slew_rate`, `slew_rate_pos`, and `slew_rate_neg` from the waveform.
+6. Postprocess compensation/DC repair sweeps explicitly disable transient evaluation to avoid multiplying runtime during internal candidate sweeps.
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+19 passed
+
+python3 scripts/run_feasibility_check.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --samples 3000 --seed 41
+
+runs/feasibility_006/
+  classification: roughly feasible
+  best predicted SR+/SR-: 69.81 / 138.23 V/us
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 3 --pop-size 10 --seed 31 --skip-dc-repair --skip-comp-tune
+
+runs/iter_068/
+  ngspice slew_rate: 133.43 V/us
+  ngspice slew_rate_pos: 133.43 V/us
+  ngspice slew_rate_neg: 136.34 V/us
+  SR target status: pass
+
+Direct transient validation on the prior passing IHP sizing:
+runs/iter_066/netlist.cir
+  dc_gain_db: 50.110 dB
+  unity_gain_bandwidth: 104.932 MHz
+  phase_margin: 68.335 deg
+  total_power: 112.030 uW
+  slew_rate: 53.132 V/us
+  slew_rate_pos: 91.514 V/us
+  slew_rate_neg: 53.132 V/us
+```
+
+### Notes
+
+The short optimizer run intentionally verifies the new SR data chain rather than seeking a final optimum. A full `16 x 36` run hit the external command timeout while in the existing ngspice-heavy postprocess loop; the new transient pass itself takes about 2.7 seconds on the prior passing netlist. Further runtime reduction should focus on pruning the compensation sweep candidate count or adding an early-stop condition once AC/DC specs are already met.

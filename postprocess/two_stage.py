@@ -77,7 +77,7 @@ def balance_two_stage_output(
         gain_ts.parameters.W = _clip_width(base_w * scale)
         if sink_ts and base_sink_w:
             sink_ts.parameters.W = _clip_width(base_sink_w * sink_scale)
-        trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
+        trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
         vout = stage2_vout_from_result(state, trial)
         if vout is None:
             return None
@@ -177,7 +177,7 @@ def improve_tail_headroom(
     for scale in (1.0, 1.2, 1.5, 2.0, 2.5, 3.0):
         for dev_id, base_w in base_widths.items():
             state.transistors[dev_id].parameters.W = clip_width(base_w * scale)
-        trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
+        trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
         op = op_for_device(trial, tail_id)
         if not op:
             continue
@@ -334,7 +334,7 @@ def tune_two_stage_compensation(
         apply_load_scale(load_scale)
         state.global_parameters["Cc"] = cc
         state.global_parameters["Rz"] = rz
-        trial = sim.run(generate_netlist(state), work_dir=str(work_dir))
+        trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
         meas = dict(trial.measurements)
         score = score_measurements(meas)
         if score < best["score"]:

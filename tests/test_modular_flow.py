@@ -5,9 +5,11 @@ from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
+from netlist.generator import generate_netlist
+from optimizer.nsga2 import CircuitEvaluator
 from outputs.artifacts import ArtifactWriter
 from pygmid.adapter import create_pygmid_adapter
-from simulator.ngspice import SimulationResult
+from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
 
 
@@ -49,6 +51,7 @@ def test_spec_registry_selects_ota_and_comparator():
     assert registry.select(ota).name == "ota"
     assert registry.select(comparator).name == "comparator"
     assert registry.select(ota).measurement_key("dc_gain") == "dc_gain_db"
+    assert registry.select(ota).measurement_key("slew_rate") == "slew_rate"
     assert registry.select(comparator).measurement_key("offset") == "offset"
 
 
@@ -57,10 +60,22 @@ def test_artifact_writer_emits_result_json(tmp_path):
     result = SimulationResult(
         success=True,
         return_code=0,
-        measurements={"dc_gain_db": 61.0, "unity_gain_bandwidth": 5.1e8, "phase_margin": 65.0, "total_power": 2e-4},
+        measurements={
+            "dc_gain_db": 61.0,
+            "unity_gain_bandwidth": 5.1e8,
+            "phase_margin": 65.0,
+            "slew_rate": 6.0e7,
+            "total_power": 2e-4,
+        },
     )
     best_meta = {
-        "performance": {"dc_gain": 60.0, "unity_gain_bandwidth": 5.0e8, "phase_margin": 64.0, "power": 2.1e-4},
+        "performance": {
+            "dc_gain": 60.0,
+            "unity_gain_bandwidth": 5.0e8,
+            "phase_margin": 64.0,
+            "slew_rate": 5.5e7,
+            "power": 2.1e-4,
+        },
         "decoded": {"__global__": {}},
         "loss_breakdown": {},
     }
@@ -102,6 +117,46 @@ def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
     )
 
     assert state.transistors["M1"].parameters.region == "saturation"
+
+
+def test_optimizer_and_netlist_include_slew_rate():
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
+
+    _obj, _violation, meta = evaluator.evaluate(x)
+    perf = meta["performance"]
+    netlist = generate_netlist(state)
+
+    assert perf["slew_rate"] > 0
+    assert perf["slew_rate_pos"] > 0
+    assert perf["slew_rate_neg"] > 0
+    assert "sr_deficit" in meta["loss_breakdown"]
+    assert ".tran" in netlist
+    assert "slew_rate" in netlist
+
+
+def test_ngspice_transient_curve_extracts_slew_rate(tmp_path):
+    curve = tmp_path / "tran_sweep.dat"
+    curve.write_text(
+        "\n".join(
+            [
+                "0 0.1",
+                "1e-9 0.2",
+                "2e-9 0.3",
+                "3e-9 0.25",
+                "4e-9 0.15",
+                "5e-9 0.05",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    perf = NgspiceSimulator()._extract_tran_curve_performance(curve)
+
+    assert perf["slew_rate_pos"] > 0
+    assert perf["slew_rate_neg"] > 0
+    assert perf["slew_rate"] == min(perf["slew_rate_pos"], perf["slew_rate_neg"])
 
 
 def test_two_stage_feasibility_report_has_required_sections(tmp_path):

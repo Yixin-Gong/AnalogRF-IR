@@ -96,6 +96,9 @@ class OTASpecModel(CircuitSpecModel):
                 "unity_gain_bandwidth": "unity_gain_bandwidth",
                 "ugbw": "unity_gain_bandwidth",
                 "phase_margin": "phase_margin",
+                "slew_rate": "slew_rate",
+                "slew_rate_pos": "slew_rate_pos",
+                "slew_rate_neg": "slew_rate_neg",
                 "power": "total_power",
             },
         )

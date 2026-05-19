@@ -290,7 +290,16 @@ class ObjectiveIRFlowRunner:
         if result.success:
             self.emit(f"       Simulation completed in {result.elapsed_sec:.1f}s")
             self.emit("       Measurements:")
-            perf_keys = {"dc_gain_db", "unity_gain_bandwidth", "phase_margin", "total_power", "i_vdd"}
+            perf_keys = {
+                "dc_gain_db",
+                "unity_gain_bandwidth",
+                "phase_margin",
+                "slew_rate",
+                "slew_rate_pos",
+                "slew_rate_neg",
+                "total_power",
+                "i_vdd",
+            }
             for key, value in result.measurements.items():
                 if key in perf_keys or key.startswith("m"):
                     self.emit(f"         {key:>20s}: {value:>12.4e}")

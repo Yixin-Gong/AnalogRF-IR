@@ -56,12 +56,20 @@ class NgspiceSimulator:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
 
-    def run(self, netlist: str, work_dir: Optional[str] = None) -> SimulationResult:
+    def run(
+        self,
+        netlist: str,
+        work_dir: Optional[str] = None,
+        include_transient: Optional[bool] = None,
+    ) -> SimulationResult:
         """双 pass 仿真：AC 测量 + DC 工作点。"""
         t0 = time.time()
 
         result_ac = self._run_ac_pass(netlist, work_dir)
         result_dc = self._run_dc_pass(netlist, work_dir)
+        if include_transient is None:
+            include_transient = self._has_tran_request(netlist)
+        result_tran = self._run_tran_pass(netlist, work_dir) if include_transient else SimulationResult()
 
         merged = SimulationResult()
         merged.elapsed_sec = time.time() - t0
@@ -70,15 +78,16 @@ class NgspiceSimulator:
         merged.measurements = {}
         merged.measurements.update(result_dc.measurements)  # DC: total_power
         merged.measurements.update(result_ac.measurements)  # AC: dc_gain_db, ugbw, pm
+        merged.measurements.update(result_tran.measurements)  # TRAN: slew_rate
 
         # 工作点从 DC pass
         merged.operating_points = result_dc.operating_points
 
-        merged.raw_stdout = result_ac.raw_stdout + "\n" + result_dc.raw_stdout
-        merged.raw_stderr = result_ac.raw_stderr + "\n" + result_dc.raw_stderr
+        merged.raw_stdout = result_ac.raw_stdout + "\n" + result_dc.raw_stdout + "\n" + result_tran.raw_stdout
+        merged.raw_stderr = result_ac.raw_stderr + "\n" + result_dc.raw_stderr + "\n" + result_tran.raw_stderr
 
         pass_codes = [
-            code for code in (result_ac.return_code, result_dc.return_code)
+            code for code in (result_ac.return_code, result_dc.return_code, result_tran.return_code)
             if code is not None and code >= 0
         ]
         if pass_codes:
@@ -87,6 +96,10 @@ class NgspiceSimulator:
         merged.success = bool(merged.measurements)  # 有测量值即成功
 
         return merged
+
+    def _has_tran_request(self, netlist: str) -> bool:
+        low = netlist.lower()
+        return ".tran" in low or ".meas tran" in low or "slew_rate" in low
 
     # ── Pass 1: AC ──
 
@@ -131,21 +144,26 @@ class NgspiceSimulator:
         return "\n".join(lines + control + [".end"])
 
     def _strip_dc_control(self, netlist: str) -> str:
-        """移除 .dc 和 .control 块，保留 .ac 和 .meas ac。"""
+        """移除 .dc/.tran 和 .control 块，保留 .ac 和 .meas ac。"""
         lines = netlist.split("\n")
         out = []
         skip_control = False
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith(".control"):
+            low = stripped.lower()
+            if low.startswith(".control"):
                 skip_control = True
                 continue
             if skip_control:
-                if stripped.startswith(".endc"):
+                if low.startswith(".endc"):
                     skip_control = False
                 continue
-            # 移除 .dc 分析行
-            if stripped.startswith(".dc ") or stripped.startswith(".dc\t"):
+            # 移除非 AC 分析和测量
+            if low.startswith(".dc ") or low.startswith(".dc\t"):
+                continue
+            if low.startswith(".tran ") or low.startswith(".tran\t"):
+                continue
+            if ".meas dc" in low or ".meas tran" in low:
                 continue
             out.append(line)
         return "\n".join(out)
@@ -158,11 +176,14 @@ class NgspiceSimulator:
         out = []
         for line in lines:
             stripped = line.strip()
+            low = stripped.lower()
             # 注释掉 .ac 行
-            if stripped.startswith(".ac ") or stripped.startswith(".ac\t"):
+            if low.startswith(".ac ") or low.startswith(".ac\t"):
+                out.append(f"* {line}")
+            elif low.startswith(".tran ") or low.startswith(".tran\t"):
                 out.append(f"* {line}")
             # 移除 .meas ac 行
-            elif ".meas ac" in stripped:
+            elif ".meas ac" in low or ".meas tran" in low:
                 out.append(f"* {line}")
             else:
                 out.append(line)
@@ -208,6 +229,167 @@ class NgspiceSimulator:
             lines.append(f"print {exprs}")
         return lines
 
+    # ── Pass 3: transient slew-rate ──
+
+    def _run_tran_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
+        """Pass 3: transient step response + Python slew-rate extraction."""
+        cleaned = self._strip_for_tran(netlist)
+        probe = self._infer_tran_probe(cleaned)
+        cleaned = self._inject_slew_stimulus(cleaned)
+        cleaned = self._ensure_tran_analysis(cleaned)
+        cleaned = self._add_tran_curve_export(cleaned, probe)
+        return self._exec_ngspice(cleaned, work_dir, suffix="tran")
+
+    def _strip_for_tran(self, netlist: str) -> str:
+        lines = netlist.split("\n")
+        out = []
+        skip_control = False
+        for line in lines:
+            stripped = line.strip()
+            low = stripped.lower()
+            if low.startswith(".control"):
+                skip_control = True
+                continue
+            if skip_control:
+                if low.startswith(".endc"):
+                    skip_control = False
+                continue
+            if low.startswith(".ac ") or low.startswith(".ac\t"):
+                continue
+            if low.startswith(".dc ") or low.startswith(".dc\t"):
+                continue
+            if low.startswith(".meas "):
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def _infer_tran_probe(self, netlist: str) -> str:
+        for pattern in (r"^Cload\s+(\S+)\s+", r"vdb\(([^)]+)\)", r"vp\(([^)]+)\)"):
+            m = re.search(pattern, netlist, flags=re.IGNORECASE | re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+        return "vout"
+
+    def _inject_slew_stimulus(self, netlist: str) -> str:
+        lines = netlist.splitlines()
+        tstop = self._tran_stop_time(netlist)
+        vdd = self._infer_vdd(netlist)
+        vcm = 0.5 * vdd
+        half_step = min(0.10, 0.10 * vdd)
+        td = 0.15 * tstop
+        tr = max(min(tstop / 2000.0, 50e-12), 1e-12)
+        tf = tr
+        pw = 0.35 * tstop
+        per = 2.0 * tstop
+
+        def fmt(value: float) -> str:
+            return f"{value:.6g}"
+
+        def replacement(name: str, node: str, invert: bool) -> str:
+            low = vcm - half_step
+            high = vcm + half_step
+            v1, v2 = (high, low) if invert else (low, high)
+            ac = "-0.5" if invert else "0.5"
+            return (
+                f"{name} {node} 0 DC {fmt(vcm)} AC {ac} "
+                f"PULSE({fmt(v1)} {fmt(v2)} {fmt(td)} {fmt(tr)} {fmt(tf)} {fmt(pw)} {fmt(per)})"
+            )
+
+        out = []
+        changed_single = False
+        for line in lines:
+            stripped = line.strip()
+            m = re.match(r"^(V\S+)\s+(\S+)\s+0\s+", stripped, flags=re.IGNORECASE)
+            if not m:
+                out.append(line)
+                continue
+            name, node = m.group(1), m.group(2)
+            node_low = node.lower()
+            name_low = name.lower()
+            if node_low == "vinp" or name_low == "vinp":
+                out.append(replacement(name, node, invert=False))
+            elif node_low == "vinn" or name_low == "vinn":
+                out.append(replacement(name, node, invert=True))
+            elif node_low in {"vin", "in", "inp"} and not changed_single:
+                out.append(replacement(name, node, invert=False))
+                changed_single = True
+            else:
+                out.append(line)
+        return "\n".join(out)
+
+    def _ensure_tran_analysis(self, netlist: str) -> str:
+        if re.search(r"^\s*\.tran\s+", netlist, flags=re.IGNORECASE | re.MULTILINE):
+            return netlist
+        tstop = 2.0e-7
+        tstep = 5.0e-11
+        tmax = 2.5e-11
+        lines = netlist.splitlines()
+        for idx in range(len(lines) - 1, -1, -1):
+            if lines[idx].strip().lower() == ".end":
+                return "\n".join(lines[:idx] + [f".tran {tstep:.6g} {tstop:.6g} 0 {tmax:.6g}"] + lines[idx:])
+        return "\n".join(lines + [f".tran {tstep:.6g} {tstop:.6g} 0 {tmax:.6g}", ".end"])
+
+    def _add_tran_curve_export(self, netlist: str, probe: str) -> str:
+        lines = netlist.splitlines()
+        control = [
+            "",
+            ".control",
+            "  set filetype=ascii",
+            "  set wr_singlescale",
+            "  set wr_vecnames",
+            "  run",
+            f"  wrdata tran_sweep.dat v({probe})",
+            ".endc",
+        ]
+        for idx in range(len(lines) - 1, -1, -1):
+            if lines[idx].strip().lower() == ".end":
+                return "\n".join(lines[:idx] + control + lines[idx:])
+        return "\n".join(lines + control + [".end"])
+
+    def _infer_vdd(self, netlist: str) -> float:
+        m = re.search(r"^\s*Vdd\s+\S+\s+\S+\s+DC\s+(\S+)", netlist, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            try:
+                return abs(self._spice_number(m.group(1)))
+            except ValueError:
+                pass
+        return 1.2
+
+    def _tran_stop_time(self, netlist: str) -> float:
+        m = re.search(r"^\s*\.tran\s+(\S+)\s+(\S+)", netlist, flags=re.IGNORECASE | re.MULTILINE)
+        if m:
+            try:
+                return max(self._spice_number(m.group(2)), 1e-12)
+            except ValueError:
+                pass
+        return 2.0e-7
+
+    def _spice_number(self, token: str) -> float:
+        token = token.strip().strip("'\"")
+        try:
+            return float(token)
+        except ValueError:
+            pass
+        m = re.match(r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([a-zA-Z]+)$", token)
+        if not m:
+            raise ValueError(token)
+        value = float(m.group(1))
+        suffix = m.group(2).lower()
+        scale = {
+            "t": 1e12,
+            "g": 1e9,
+            "meg": 1e6,
+            "k": 1e3,
+            "m": 1e-3,
+            "u": 1e-6,
+            "n": 1e-9,
+            "p": 1e-12,
+            "f": 1e-15,
+        }.get(suffix)
+        if scale is None:
+            raise ValueError(token)
+        return value * scale
+
     # ── 执行 ──
 
     def _exec_ngspice(self, netlist: str, work_dir: Optional[str], suffix: str) -> SimulationResult:
@@ -229,6 +411,14 @@ class NgspiceSimulator:
 
         if suffix == "ac":
             sweep_path = Path(os.path.dirname(cir_path)) / "ac_sweep.dat"
+            try:
+                sweep_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        if suffix == "tran":
+            sweep_path = Path(os.path.dirname(cir_path)) / "tran_sweep.dat"
             try:
                 sweep_path.unlink()
             except FileNotFoundError:
@@ -279,6 +469,14 @@ class NgspiceSimulator:
                 if "phase_margin" in result.measurements:
                     result.measurements["phase_at_unity_meas"] = result.measurements["phase_margin"]
                 result.measurements.update(curve_perf)
+
+        if suffix == "tran":
+            result.measurements = {
+                k: v for k, v in result.measurements.items()
+                if k.startswith("slew_rate") or k.startswith("tran_")
+            }
+            tran_path = Path(os.path.dirname(cir_path)) / "tran_sweep.dat"
+            result.measurements.update(self._extract_tran_curve_performance(tran_path))
 
         # DC pass: 保留 .meas dc 解析 + 补充 vdd#branch fallback
         if suffix == "dc":
@@ -402,7 +600,7 @@ class NgspiceSimulator:
                 except ValueError:
                     vals = []
                     break
-            if len(vals) >= 3:
+            if len(vals) >= 2:
                 rows.append(vals)
         return rows
 
@@ -490,6 +688,96 @@ class NgspiceSimulator:
                 continue
             crossings.append((freq, phase))
         return crossings
+
+    def _extract_tran_curve_performance(self, path: Path) -> Dict[str, float]:
+        rows = self._read_numeric_table(path)
+        if len(rows) < 4:
+            return {}
+        columns = self._select_tran_columns(rows)
+        if columns is None:
+            return {}
+        t_col, v_col = columns
+        samples = [
+            (row[t_col], row[v_col])
+            for row in rows
+            if len(row) > max(t_col, v_col)
+            and math.isfinite(row[t_col])
+            and math.isfinite(row[v_col])
+        ]
+        if len(samples) < 4:
+            return {}
+        samples.sort(key=lambda item: item[0])
+        deduped: List[Tuple[float, float]] = []
+        for t, v in samples:
+            if deduped and abs(t - deduped[-1][0]) <= max(abs(t), 1.0) * 1e-15:
+                deduped[-1] = (t, v)
+            else:
+                deduped.append((t, v))
+        if len(deduped) < 4:
+            return {}
+        times = [item[0] for item in deduped]
+        volts = [item[1] for item in deduped]
+        span = max(volts) - min(volts)
+        if span <= 1e-6:
+            return {
+                "slew_rate": 0.0,
+                "slew_rate_pos": 0.0,
+                "slew_rate_neg": 0.0,
+                "tran_curve_points": float(len(deduped)),
+                "tran_output_span": span,
+            }
+
+        window = max(1, min(25, len(deduped) // 200))
+        pos = 0.0
+        neg = 0.0
+        for i in range(0, len(deduped) - window):
+            dt = times[i + window] - times[i]
+            if dt <= 0:
+                continue
+            slope = (volts[i + window] - volts[i]) / dt
+            if slope > pos:
+                pos = slope
+            if -slope > neg:
+                neg = -slope
+        return {
+            "slew_rate": min(pos, neg),
+            "slew_rate_pos": pos,
+            "slew_rate_neg": neg,
+            "tran_curve_points": float(len(deduped)),
+            "tran_output_span": span,
+            "tran_t_start": times[0],
+            "tran_t_stop": times[-1],
+        }
+
+    def _select_tran_columns(self, rows: List[List[float]]) -> Optional[Tuple[int, int]]:
+        width = min(len(row) for row in rows)
+        best: Optional[Tuple[int, int]] = None
+        best_score = float("-inf")
+        for t_col in range(width):
+            times = [row[t_col] for row in rows]
+            if any(not math.isfinite(t) for t in times):
+                continue
+            monotonic = all(b >= a for a, b in zip(times, times[1:]))
+            if not monotonic or max(times) <= min(times):
+                continue
+            for v_col in range(width):
+                if v_col == t_col:
+                    continue
+                values = [row[v_col] for row in rows]
+                if any(not math.isfinite(v) for v in values):
+                    continue
+                span = max(values) - min(values)
+                if span <= 1e-9:
+                    continue
+                score = span
+                if 0.0 <= min(values) <= max(values) <= 2.5:
+                    score += 10.0
+                if t_col == 0:
+                    score += 1.0
+                if score > best_score:
+                    best_score = score
+                    best = (t_col, v_col)
+        return best
 
     def _parse_op(self, stdout: str) -> Dict[str, Dict[str, float]]:
         """解析 print all 输出中的晶体管工作点。"""

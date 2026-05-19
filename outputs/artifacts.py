@@ -379,6 +379,8 @@ def _target_hint(name: str) -> str:
         return "Increase speed by raising useful gm, reducing compensation/load capacitance, or shortening high-capacitance devices."
     if name in {"phase_margin"}:
         return "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
+    if name in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
+        return "Increase available large-signal charging current or reduce compensation/load capacitance."
     if name in {"dc_gain", "gain"}:
         return "Increase intrinsic gain by lengthening output/load devices or reducing output conductance."
     if name in {"delay", "regeneration_time"}:
