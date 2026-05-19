@@ -196,3 +196,73 @@ The PDK connection is working, but the original `60 dB / 500 MHz / 60 deg` two-s
 - Short M6/M7 lengths can reach the 500 MHz and PM targets, but DC gain stays around 48 dB.
 - Longer M7 / higher output resistance can raise gain toward 58 dB with stable PM, but UGBW drops below 200 MHz.
 - The compact optimizer still mispredicts IHP two-stage gain and second-stage DC bias after repair, so the next step should be ngspice-in-the-loop or surrogate-corrected optimization for the second-stage bias and compensation variables.
+
+## 2026-05-19 ASIR Merge And YAML/SPICE Frontend
+
+### Scope
+
+Merged the `obj_irv2.0` ASIR project into `objective_ir` and added a new frontend path so the optimizer can be driven by explicit YAML topology/spec files or by SPICE netlists converted into YAML.
+
+### Major Changes
+
+1. Added the `asir/` package, comparator YAML examples under `inputs/`, and ASIR tests.
+2. Added `frontends/yaml_loader.py`.
+   - Builds `DesignState` directly from YAML topology, targets, constraints, variables, losses, evaluations, and transistor seed values.
+   - Keeps process and simulation ownership in `environment.yaml`.
+   - Synthesizes missing initial values from device roles and constraints.
+   - Auto-generates default loss terms from targets when YAML omits `loss_terms`.
+3. Added `frontends/spice_parser.py`.
+   - Parses flat MOS, resistor, capacitor, and voltage source lines.
+   - Infers OTA roles, ports, architecture, constraints, design variables, compensation globals, and default objectives.
+   - Canonicalizes generated instance names such as `MM1` back to stable YAML ids such as `M1`.
+4. Added `scripts/spice_to_yaml.py`.
+   - Converts a SPICE netlist into the new YAML format.
+   - Can be executed directly from WSL or Windows because it inserts the repo root into `sys.path`.
+5. Extended `main.py`.
+   - `--topology yaml` forces YAML-driven construction.
+   - `--topology auto` now chooses the YAML frontend when the schema has explicit devices.
+   - `--spice` plus `--spice-yaml-out` runs SPICE -> YAML -> diagnosis/initialization -> optimization.
+6. Added `docs/yaml_spice_frontend_method.md` with the method, algorithm, flow, commands, and limitations.
+7. Updated `requirements.txt` with `networkx` and `pytest` for ASIR and tests.
+
+### Validation
+
+Windows Python:
+
+```text
+python -m pytest tests/test_frontends.py tests/test_asir.py -q
+9 passed
+```
+
+Ubuntu-26.04 WSL:
+
+```text
+python3 -m pytest tests/test_frontends.py tests/test_asir.py -q
+9 passed
+```
+
+Main CLI smoke test:
+
+```bash
+python3 main.py --spice runs/iter_024/netlist.cir \
+  --spice-yaml-out runs/tmp_spice_import/main_cli.yaml \
+  --generations 1 --pop-size 4 --seed 3 --ngspice-bin /no/such/ngspice
+```
+
+Result:
+
+```text
+SPICE parsed to YAML
+DesignState built with 7 MOS devices and 18 variables
+4 spec-derived loss terms loaded
+NSGA-II completed 1 smoke generation
+SPICE netlist generated successfully
+```
+
+### Environment Notes
+
+Ubuntu-26.04 WSL already had `numpy` and `pyyaml`. Installed missing frontend/test dependencies:
+
+```bash
+python3 -m pip install --user networkx pytest --break-system-packages
+```

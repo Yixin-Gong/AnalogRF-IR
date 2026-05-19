@@ -53,6 +53,8 @@ from optimizer.nsga2 import (
 )
 from netlist.generator import NetlistGenerator, generate_netlist
 from simulator.ngspice import NgspiceSimulator, SimulationResult
+from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping, yaml_has_explicit_topology
+from frontends.spice_parser import parse_spice_file, write_yaml
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -527,6 +529,8 @@ def _read_schema_header(schema_path: Path) -> dict:
 
 def build_design_state(env: dict, schema_path: Path, topology: str = "auto") -> DesignState:
     schema_path = _resolve_project_path(schema_path)
+    if topology == "yaml" or (topology == "auto" and yaml_has_explicit_topology(schema_path)):
+        return build_design_state_from_yaml(load_yaml_mapping(schema_path), env)
     if topology == "two_stage":
         return build_two_stage_ota_ptm130(env, schema_path=schema_path)
     if topology == "five":
@@ -1270,7 +1274,9 @@ def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="objective_ir OTA optimizer")
     parser.add_argument("--env", default="environment.yaml", help="Environment YAML path")
     parser.add_argument("--schema", default="ir/schema.yaml", help="Schema YAML path")
-    parser.add_argument("--topology", choices=("auto", "five", "two_stage"), default="auto")
+    parser.add_argument("--spice", default="", help="Parse a SPICE netlist into YAML before optimization")
+    parser.add_argument("--spice-yaml-out", default="", help="YAML path generated from --spice")
+    parser.add_argument("--topology", choices=("auto", "five", "two_stage", "yaml"), default="auto")
     parser.add_argument("--pop-size", type=int, default=80)
     parser.add_argument("--generations", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
@@ -1282,12 +1288,23 @@ def main(argv=None):
     args = _parse_args(argv)
     env_path = _resolve_project_path(args.env)
     schema_path = _resolve_project_path(args.schema)
+    if args.spice:
+        spice_path = _resolve_project_path(args.spice)
+        out_path = _resolve_project_path(args.spice_yaml_out) if args.spice_yaml_out else (
+            Path(__file__).parent / "runs" / "tmp_spice_import" / f"{spice_path.stem}.yaml"
+        )
+        generated = parse_spice_file(spice_path)
+        write_yaml(generated, out_path)
+        schema_path = out_path
+        args.topology = "yaml"
 
     print("=" * 70)
     print("  objective_ir V2.1 — process-aware · NSGA-II · ngspice")
     print("  四层 Schema 架构 (架构总纲 V1.1)")
     print(f"  env:    {env_path}")
     print(f"  schema: {schema_path}")
+    if args.spice:
+        print(f"  spice:  {_resolve_project_path(args.spice)}")
     print("=" * 70)
 
     # ── Step 0: 加载 environment.yaml ──

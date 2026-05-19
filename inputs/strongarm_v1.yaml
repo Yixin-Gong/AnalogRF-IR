@@ -1,0 +1,90 @@
+schema_version: '2.1'
+design_name: strongarm_comparator
+topology:
+  name: strongarm_comparator
+  class: comparator
+  architecture: strongarm
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: vss, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: outp, direction: output}
+    - {id: outn, direction: output}
+  nets:
+    clk: clock
+    clkb: clock
+    tail: dynamic_internal
+    intp: dynamic_internal
+    intn: dynamic_internal
+  clocks:
+    CLK: {drives: clk, phases: [amplify, regenerate]}
+    CLKB: {drives: clkb, phases: [reset]}
+  devices:
+    - id: M_INP
+      role: input_pair_left
+      stage: input
+      type: nmos
+      connections: {drain: intp, gate: vinp, source: tail, body: vss}
+    - id: M_INN
+      role: input_pair_right
+      stage: input
+      type: nmos
+      connections: {drain: intn, gate: vinn, source: tail, body: vss}
+    - id: M_TAIL
+      role: tail_current_source
+      stage: evaluate
+      type: nmos
+      connections: {drain: tail, gate: clk, source: vss, body: vss}
+    - id: M_NL_P
+      role: latch_nmos_left
+      stage: latch
+      type: nmos
+      connections: {drain: outp, gate: outn, source: intp, body: vss}
+    - id: M_NL_N
+      role: latch_nmos_right
+      stage: latch
+      type: nmos
+      connections: {drain: outn, gate: outp, source: intn, body: vss}
+    - id: M_PL_P
+      role: latch_pmos_left
+      stage: latch
+      type: pmos
+      connections: {drain: outp, gate: outn, source: vdd, body: vdd}
+    - id: M_PL_N
+      role: latch_pmos_right
+      stage: latch
+      type: pmos
+      connections: {drain: outn, gate: outp, source: vdd, body: vdd}
+    - id: M_RST_P
+      role: reset_precharge_left
+      stage: reset
+      type: pmos
+      connections: {drain: outp, gate: clkb, source: vdd, body: vdd}
+    - id: M_RST_N
+      role: reset_precharge_right
+      stage: reset
+      type: pmos
+      connections: {drain: outn, gate: clkb, source: vdd, body: vdd}
+    - id: M_EQ
+      role: reset_equalize_outputs
+      stage: reset
+      type: pmos
+      connections: {drain: outp, gate: clkb, source: outn, body: vdd}
+    - id: C_OUTP
+      kind: capacitor
+      role: output_load
+      capacitance: CL
+      connections: {plus: outp, minus: vss}
+    - id: C_OUTN
+      kind: capacitor
+      role: output_load
+      capacitance: CL
+      connections: {plus: outn, minus: vss}
+targets:
+  delay: {max: 100e-12, unit: s, priority: 1}
+  offset: {max: 2e-3, unit: V, priority: 1}
+  noise: {max: 500e-6, unit: V_rms, priority: 2}
+constraints:
+  phase_order: [reset, amplify, regenerate, saturate]
