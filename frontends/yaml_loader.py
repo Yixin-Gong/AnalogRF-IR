@@ -150,7 +150,7 @@ def _parse_topology(data: dict[str, Any], env: dict[str, Any]) -> Topology:
         if not isinstance(item, dict) or not _is_mos_device(item):
             continue
         mos_type = _normalize_mos_type(item.get("type") or item.get("mos_type") or item.get("model") or "nmos")
-        model = item.get("model") or (pmos_model if mos_type == "pmos" else nmos_model)
+        model = _process_model_name(item.get("model"), mos_type, nmos_model, pmos_model)
         devices.append(
             DeviceDefinition(
                 id=str(item["id"]),
@@ -341,6 +341,17 @@ def _normalize_mos_type(value: Any) -> str:
     if "pmos" in low or "pch" in low or low in {"p", "pfet"}:
         return "pmos"
     return MOS_TYPE_ALIASES.get(low, "nmos")
+
+
+def _process_model_name(model: Any, mos_type: str, nmos_model: str, pmos_model: str) -> str:
+    if model is None:
+        return pmos_model if mos_type == "pmos" else nmos_model
+    low = str(model).lower()
+    if low in {"n", "nmos", "nch", "nfet"}:
+        return nmos_model
+    if low in {"p", "pmos", "pch", "pfet"}:
+        return pmos_model
+    return str(model)
 
 
 def _normalize_connections(raw: dict[str, Any]) -> dict[str, str]:

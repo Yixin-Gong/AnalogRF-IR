@@ -266,3 +266,48 @@ Ubuntu-26.04 WSL already had `numpy` and `pyyaml`. Installed missing frontend/te
 ```bash
 python3 -m pip install --user networkx pytest --break-system-packages
 ```
+
+## 2026-05-19 IHP Run Through YAML/SPICE Frontend
+
+### Scope
+
+Ran the new SPICE -> YAML -> optimizer -> ngspice flow with `environment_ihp_sg13g2.yaml`.
+
+### Interface Fix
+
+SPICE-imported YAML can contain generic model names such as `nmos` and `pmos`. The YAML frontend now maps those generic names to the active process models:
+
+```text
+IHP NMOS: sg13_lv_nmos
+IHP PMOS: sg13_lv_pmos
+```
+
+This prevents a PTM-origin netlist import from accidentally generating IHP subckt instances with stale `nmos/pmos` model names.
+
+### Command
+
+```bash
+python3 main.py --env environment_ihp_sg13g2.yaml \
+  --spice runs/iter_024/netlist.cir \
+  --spice-yaml-out runs/tmp_spice_import/flow_test_ihp_from_spice.yaml \
+  --generations 45 --pop-size 80 --seed 23
+```
+
+### Result
+
+Run directory:
+
+```text
+runs/iter_031/
+```
+
+ngspice measurements:
+
+```text
+dc_gain_db              49.56 dB
+unity_gain_bandwidth    377.90 MHz
+phase_margin            69.76 deg
+total_power             280.78 uW
+```
+
+The IHP flow is wired correctly and produces a stable verified result, but this imported/default objective setup still does not meet the original `60 dB / 500 MHz / 60 deg` target. It primarily misses gain and UGBW.

@@ -51,3 +51,21 @@ def test_spice_yaml_can_seed_optimizer_design_state():
     assert state.global_parameters["Cc"] == 500e-15
     assert state.global_parameters["Rz"] == 3500.0
     assert any(variable.variable == "Cc" for variable in state.design_variables)
+
+
+def test_generic_mos_models_map_to_active_process():
+    data = parse_spice_text(
+        """
+        M1 out in 0 0 nmos W=1u L=130n
+        M2 out out vdd vdd pmos W=2u L=130n
+        """,
+        design_name="process_model_mapping",
+    )
+    env = _default_environment()
+    env["process"]["nmos_model"] = "sg13_lv_nmos"
+    env["process"]["pmos_model"] = "sg13_lv_pmos"
+
+    state = build_design_state_from_yaml(data, env)
+
+    assert state.topology.devices[0].model == "sg13_lv_nmos"
+    assert state.topology.devices[1].model == "sg13_lv_pmos"
