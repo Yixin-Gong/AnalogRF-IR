@@ -525,3 +525,32 @@ runs/iter_061/
 ```
 
 The IHP smoke is intentionally tiny, so it is a wiring/data-chain check rather than a performance run. The structured diagnostics correctly report remaining gain/bandwidth target failures and the output/tail current-source headroom warnings.
+
+## 2026-05-20 Flow Recheck and Repository Cleanup
+
+### Scope
+
+Re-ran the modular IHP two-stage flow after migration, then removed files that are generated, temporary, or superseded by the new schema/topology path.
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+16 passed
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 2 --pop-size 8 --seed 13
+
+runs/iter_062/
+  ngspice_success: true
+  dc_gain_db: 59.3 dB
+  unity_gain_bandwidth: 67.2 MHz
+  phase_margin: 63.9 deg
+  total_power: 107.9 uW
+```
+
+### Cleanup
+
+1. Removed Python bytecode caches and `.pytest_cache`.
+2. Removed `runs/debug_*` and `runs/tmp_*` directories.
+3. Removed `ir/schema.yaml.bak`; the active schema path and `topologies.legacy` compatibility builder now cover that role.
+4. Kept historical `runs/iter_*` and Pareto result directories because they contain useful performance evidence and diagnostics.
