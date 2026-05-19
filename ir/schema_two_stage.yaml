@@ -9,8 +9,6 @@ targets:
   unity_gain_bandwidth: {min: 500000000, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
   power:                {max: 5.0e-04, unit: W, priority: 2}
-  cmrr:                 {min: 30, unit: dB, priority: 9}
-  psrr_plus:            {min: 20, unit: dB, priority: 9}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_M1_M2}

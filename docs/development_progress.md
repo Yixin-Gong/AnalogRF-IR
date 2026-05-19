@@ -350,3 +350,47 @@ Smoke output:
 ```text
 runs/iter_033/agent_diagnostics.json
 ```
+
+## 2026-05-19 Strict Spec Verification And CMRR/PSRR Removal
+
+### Scope
+
+Made spec pass/fail stricter and removed CMRR/PSRR from the active optimization problem until proper measurement testbenches are added.
+
+### Major Changes
+
+1. `agent_diagnostics.json` now marks priority-1 targets as `unverified` when they are not backed by ngspice measurements.
+2. `status.spec_pass` is true only when there are no failed targets and no unverified priority-1 targets.
+3. Each target now includes:
+   - `source`
+   - `requires_ngspice`
+   - `model_status`
+   - absolute and relative margins
+4. Removed CMRR and PSRR targets/losses from:
+   - default five-transistor OTA builder
+   - default two-stage OTA builder
+   - `ir/schema.yaml`
+   - `ir/schema_two_stage.yaml`
+   - tracked schema backup
+5. Removed CMRR/PSRR estimates from optimizer performance dictionaries so they do not appear as optimization metrics.
+
+### Validation
+
+```text
+python -m py_compile main.py optimizer/nsga2.py
+python3 -m pytest tests/test_frontends.py tests/test_asir.py -q
+10 passed
+```
+
+No-ngspice smoke output:
+
+```text
+runs/iter_034/agent_diagnostics.json
+```
+
+The smoke run correctly reported:
+
+```text
+spec_pass: false
+unverified_targets: [dc_gain, unity_gain_bandwidth, phase_margin]
+```

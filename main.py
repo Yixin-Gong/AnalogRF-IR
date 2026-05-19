@@ -273,8 +273,6 @@ def build_five_transistor_ota_ptm130(
         "unity_gain_bandwidth": Target(min=40e6, unit="Hz", priority=1),
         "phase_margin":         Target(min=45, unit="deg", priority=1),
         "power":                Target(max=0.3e-3, unit="W", priority=2),
-        "cmrr":                 Target(min=44, unit="dB", priority=3),
-        "psrr_plus":            Target(min=20, unit="dB", priority=3),
     }
 
     # ── L2: 约束（搜索空间, Agent 可覆盖）──
@@ -343,12 +341,6 @@ def build_five_transistor_ota_ptm130(
             formula="realized.power / max(targets.power.max, 1e-9)",
             weight=0.5,
             description="Power consumption penalty"
-        ),
-        LossTerm(
-            id="cmrr_deficit",
-            formula="relu(targets.cmrr.min - realized.cmrr) / max(targets.cmrr.min, 1)",
-            weight=0.4,
-            description="CMRR penalty"
         ),
     ]
 
@@ -441,8 +433,6 @@ def build_two_stage_ota_ptm130(
         "unity_gain_bandwidth": Target(min=80e6, unit="Hz", priority=1),
         "phase_margin":         Target(min=60, unit="deg", priority=1),
         "power":                Target(max=0.5e-3, unit="W", priority=2),
-        "cmrr":                 Target(min=30, unit="dB", priority=9),
-        "psrr_plus":            Target(min=20, unit="dB", priority=9),
     }
 
     state.constraints = Constraints(
@@ -937,6 +927,7 @@ def build_agent_diagnostics(
     loss_breakdown = best_meta.get("loss_breakdown", {}) or {}
     target_status = _target_status(state, measurements, perf_est)
     failed_targets = [name for name, item in target_status.items() if item["status"] == "fail"]
+    unverified_targets = [name for name, item in target_status.items() if item["status"] == "unverified"]
     top_losses = _top_items(loss_breakdown, limit=8)
     top_model_mismatch = _comparison_mismatch(comparison)
     device_status = _device_status(state)
@@ -957,8 +948,9 @@ def build_agent_diagnostics(
         "status": {
             "ngspice_success": bool(sim_result.success),
             "return_code": sim_result.return_code,
-            "spec_pass": bool(target_status) and not failed_targets,
+            "spec_pass": bool(target_status) and not failed_targets and not unverified_targets,
             "failed_targets": failed_targets,
+            "unverified_targets": unverified_targets,
             "best_loss": best_meta.get("total_loss", 0.0),
         },
         "targets": target_status,
@@ -998,6 +990,7 @@ def _target_status(state: DesignState, measurements: dict, perf_est: dict) -> di
         source = "ngspice" if metric in measurements else "optimizer_estimate"
         value = measurements.get(metric, perf_est.get(name))
         status = "unknown"
+        model_status = "unknown"
         margin_abs = None
         margin_rel = None
         if value is not None:
@@ -1015,9 +1008,14 @@ def _target_status(state: DesignState, measurements: dict, perf_est: dict) -> di
                     margin_rel = max_margin_rel
                 if max_margin < 0:
                     status = "fail"
+            model_status = status
+            if int(target.priority or 1) <= 1 and source != "ngspice":
+                status = "unverified"
         out[name] = {
             "status": status,
+            "model_status": model_status,
             "source": source,
+            "requires_ngspice": int(target.priority or 1) <= 1,
             "measurement_key": metric,
             "value": value,
             "min": target.min,
@@ -1088,19 +1086,26 @@ def _device_status(state: DesignState) -> dict:
 def _diagnosis_items(targets: dict, losses: list[dict], mismatches: list[dict], devices: dict) -> list[dict]:
     items = []
     for name, target in targets.items():
-        if target["status"] != "fail":
-            continue
-        if name in {"unity_gain_bandwidth", "ugbw"}:
-            hint = "Increase speed by raising bias current, reducing compensation/load capacitance, or shortening high-capacitance devices."
-        elif name in {"phase_margin"}:
-            hint = "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
-        elif name in {"dc_gain"}:
-            hint = "Increase intrinsic gain by lengthening output/load devices or reducing output conductance."
-        elif name in {"power"}:
-            hint = "Reduce bias currents or device widths on non-critical paths."
-        else:
-            hint = "Inspect the target-specific measurement and its related loss term."
-        items.append({"type": "target_failure", "metric": name, "severity": "error", "hint": hint, "target": target})
+        if target["status"] == "fail":
+            if name in {"unity_gain_bandwidth", "ugbw"}:
+                hint = "Increase speed by raising bias current, reducing compensation/load capacitance, or shortening high-capacitance devices."
+            elif name in {"phase_margin"}:
+                hint = "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
+            elif name in {"dc_gain"}:
+                hint = "Increase intrinsic gain by lengthening output/load devices or reducing output conductance."
+            elif name in {"power"}:
+                hint = "Reduce bias currents or device widths on non-critical paths."
+            else:
+                hint = "Inspect the target-specific measurement and its related loss term."
+            items.append({"type": "target_failure", "metric": name, "severity": "error", "hint": hint, "target": target})
+        elif target["status"] == "unverified":
+            items.append({
+                "type": "target_unverified",
+                "metric": name,
+                "severity": "warning",
+                "hint": "Priority-1 targets require ngspice measurements before they can be counted as passing.",
+                "target": target,
+            })
 
     for loss in losses:
         if loss["value"] <= 0:

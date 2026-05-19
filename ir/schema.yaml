@@ -6,8 +6,6 @@ targets:
   unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
   power:                {max: 3.0e-04, unit: W, priority: 9}
-  cmrr:                 {min: 10, unit: dB, priority: 9}
-  psrr_plus:            {min: 10, unit: dB, priority: 9}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
@@ -45,8 +43,6 @@ loss_terms:
   - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 2.0, description: "BW shortfall"}
   - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 0.5, description: "PM penalty"}
   - {id: power_ratio,  formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.3, description: "Power ratio"}
-  - {id: cmrr_deficit, formula: "relu(targets.cmrr.min - realized.cmrr)/max(targets.cmrr.min, 1)", weight: 0.2, description: "CMRR penalty"}
-  - {id: psrr_deficit, formula: "relu(targets.psrr_plus.min - realized.psrr_plus)/max(targets.psrr_plus.min, 1)", weight: 0.2, description: "PSRR+ penalty"}
 
 evaluations:
   - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}

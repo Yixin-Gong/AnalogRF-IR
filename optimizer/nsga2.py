@@ -434,17 +434,11 @@ class CircuitEvaluator:
             vdd_current = tp[tail_dev_id].get("id", 0)
         power = (vdd - vss) * vdd_current
 
-        # -- CMRR / PSRR --
-        cmrr = dc_gain_db * 0.5
-        psrr = dc_gain_db * 0.3
-
         return {
             "dc_gain": dc_gain_db,
             "unity_gain_bandwidth": gbw,
             "phase_margin": pm,
             "power": power,
-            "cmrr": cmrr,
-            "psrr_plus": psrr,
         }
 
     def _estimate_two_stage_performance(
@@ -534,16 +528,11 @@ class CircuitEvaluator:
         i_stage2 = max(M6.get("id", 0.0), M7.get("id", 0.0))
         power = (vdd - vss) * (i_tail + i_stage2)
 
-        cmrr = dc_gain_db * 0.55
-        psrr = dc_gain_db * 0.35
-
         return {
             "dc_gain": dc_gain_db,
             "unity_gain_bandwidth": ugbw,
             "phase_margin": pm,
             "power": power,
-            "cmrr": cmrr,
-            "psrr_plus": psrr,
             "Cc": cc,
             "Rz": rz,
             "zero_target_rz": inv_gm6,

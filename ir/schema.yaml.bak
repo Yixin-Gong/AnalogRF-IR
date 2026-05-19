@@ -102,19 +102,11 @@ loss_terms:
     formula: realized.power/max(targets.power.max, 1e-9)
     weight: 0.5
     description: Power consumption penalty
-  - id: cmrr_deficit
-    formula: relu(targets.cmrr.min - realized.cmrr)/max(targets.cmrr.min, 1)
-    weight: 0.6
-    description: CMRR penalty
-  - id: psrr_deficit
-    formula: relu(targets.psrr_plus.min - realized.psrr_plus)/max(targets.psrr_plus.min, 1)
-    weight: 0.4
-    description: PSRR penalty
 
 # ═══════════════════════════════════════════════════════════════
 # L3: 评估声明 (测什么、怎么测, Agent 可修改)
 #
-# type 取值: ac_gain | ugbw | phase_margin | dc_power | cmrr | psrr | operating_region
+# type 取值: ac_gain | ugbw | phase_margin | dc_power | operating_region
 # ═══════════════════════════════════════════════════════════════
 evaluations:
   - name: dc_gain
@@ -132,9 +124,3 @@ evaluations:
   - name: total_power
     type: dc_power
     target_ref: power
-  - name: cmrr
-    type: cmrr
-    target_ref: cmrr
-  - name: psrr_plus
-    type: psrr
-    target_ref: psrr_plus
