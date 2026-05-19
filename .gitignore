@@ -5,6 +5,7 @@ runs/iter_*/
 runs/debug_*/
 runs/pareto_*/
 runs/pareto_comp_*/
+runs/feasibility_*/
 runs/ihp_*/
 runs/tmp_*/
 runs/tmp_probe_*/

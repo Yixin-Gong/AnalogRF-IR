@@ -589,3 +589,56 @@ runs/iter_066/
 ### Notes
 
 The lowered spec is now reachable with the all-current-mirror IHP topology. Remaining warnings are mainly conservative stack/headroom and inversion preference diagnostics on the tail branch; they do not block the current target pass.
+
+## 2026-05-20 Feasibility Check Flow
+
+### Scope
+
+Added a standalone physics-informed feasibility checker. Its purpose is not final W/L optimization; it estimates whether a topology/process/spec combination has a plausible high-level design region before launching expensive optimizer/ngspice loops.
+
+### Major Changes
+
+1. Added `feasibility.two_stage_miller.TwoStageMillerFeasibilityChecker`.
+2. Added CLI entrypoint `scripts/run_feasibility_check.py`.
+3. The checker searches high-level variables only:
+   - `gmID_in`, `gmID_stage2`, `gmID_load`
+   - `L_in`, `L_load`, `L_stage2`
+   - `Cc/CL`
+   - `Rz_factor`, where `Rz = Rz_factor / gm2`
+4. The model uses gm/ID lookup tables when present and falls back to the analytical EKV-like adapter when tables are missing. Reports explicitly mark the source.
+5. The two-stage Miller model checks GBW-gm1, SR, PM/second-pole separation, power lower bound, gm/gds gain, headroom, estimated parasitics, ft reserve, and validation risk.
+6. Reports are written as:
+   - `feasibility_report.json`
+   - `feasibility_report.md`
+   - `best_candidates.csv`
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+17 passed
+
+python3 scripts/run_feasibility_check.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --samples 6000 --seed 41
+
+runs/feasibility_005/
+  classification: roughly feasible
+  evaluated: 6000
+  best candidate:
+    gmID_in: 18
+    gmID_stage2: 10
+    gmID_load: 10
+    IC_in / IC_stage2: 2.36 / 7.64
+    L_in/L_load/L_stage2: 0.65um / 0.65um / 0.50um
+    Cc: 150 fF
+    Itail: 10.47 uA
+    I2: 28.98 uA
+    predicted gain: 54.98 dB
+    predicted GBW: 100.0 MHz
+    predicted PM: 65.56 deg
+    predicted SR+/SR-: 69.81 / 138.23 V/us
+    predicted power: 57.76 uW
+```
+
+### Notes
+
+The feasibility report correctly classifies the relaxed IHP two-stage OTA spec as roughly feasible, matching the later ngspice-passing optimizer result. The report still flags Middlebrook return-ratio loop-gain verification as mandatory because analytical PM is only a screening metric.

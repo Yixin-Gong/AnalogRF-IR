@@ -1,10 +1,12 @@
 import json
 
 from core.environment import default_environment
+from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
 from outputs.artifacts import ArtifactWriter
+from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import SimulationResult
 from specs.models import SpecRegistry
 
@@ -100,3 +102,27 @@ def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
     )
 
     assert state.transistors["M1"].parameters.region == "saturation"
+
+
+def test_two_stage_feasibility_report_has_required_sections(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    checker = TwoStageMillerFeasibilityChecker(
+        state,
+        create_pygmid_adapter(),
+        FeasibilityConfig(samples=120, seed=3, top_count=4),
+    )
+
+    report = checker.run()
+    checker.write_report(tmp_path, report)
+
+    assert report["classification"]["label"] in {
+        "roughly feasible",
+        "near-feasible",
+        "likely infeasible",
+        "infeasible due to hard physical bounds",
+    }
+    assert report["best_candidates"]
+    assert report["bottleneck_ranking"]
+    assert report["validation_plan"]
+    assert (tmp_path / "feasibility_report.json").exists()
+    assert (tmp_path / "feasibility_report.md").exists()
