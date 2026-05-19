@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple, Any
 import numpy as np
 
+from core.regions import compact_operating_region, inversion_region_from_gm_id, normalize_spice_region
 from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
 
@@ -275,9 +276,10 @@ class CircuitEvaluator:
                 vds = max(vdd - 0.5, 0.2)
             mirror_factor = _mirror_copy_factor(role, vds, phys)
 
-            # 工作区判断 — 基于 gm_id 经验值
+            # Keep SPICE operating region and gm/ID inversion level separate.
             gm_id_eff = phys.get("gm_id", gm_id)
-            region = "saturation" if gm_id_eff < 15 else ("moderate" if gm_id_eff < 22 else "subthreshold")
+            region = compact_operating_region(vds, phys.get("vdsat", 0.0), id_val)
+            inversion_region = inversion_region_from_gm_id(gm_id_eff)
 
             # 透传 pygmid 查表所得的全部物理参数 (含精确的 GDS_W → gds)
             # 不覆盖 gds — pygmid.forward() 已从 BSIM4 查表给出真实输出导纳
@@ -288,6 +290,7 @@ class CircuitEvaluator:
                 "mirror_copy_factor": mirror_factor,
                 "model_width_factor": width_factor,
                 "region": region,
+                "inversion_region": inversion_region,
                 "role": role, "type": dev_type,
             }
 
@@ -649,7 +652,6 @@ class CircuitEvaluator:
             L_val = p.get("L", 0)
             vds = p.get("vds", 0)
             vgs = p.get("vgs", 0)
-            region = p.get("region", "")
             role = p.get("role", "")
             dev_type = p.get("type", "nmos")
 
@@ -1285,6 +1287,11 @@ def round_and_update_state(
             ts.parameters.vgs = rp.get("vgs", ts.parameters.vgs)
             ts.parameters.vds = rp.get("vds", ts.parameters.vds)
             ts.parameters.vdsat = rp.get("vdsat", ts.parameters.vdsat)
-            ts.parameters.region = rp.get("region", ts.parameters.region)
+            ts.parameters.region = normalize_spice_region(
+                rp.get("region", ts.parameters.region),
+                vds=ts.parameters.vds,
+                vdsat=ts.parameters.vdsat,
+                current=ts.parameters.id,
+            )
 
     return rounded

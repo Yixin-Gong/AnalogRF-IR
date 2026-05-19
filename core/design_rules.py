@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from core.regions import SPICE_OPERATING_REGIONS
 from schemas.design_state import DesignState, ProcessInfo, TransistorParameters
 from core.rule_registry import register_rule, ValidationReport, DiagnosisResult
 
@@ -337,8 +338,6 @@ def check_saturation_margin(state: DesignState) -> ValidationReport:
     return report
 
 
-STATUS_REGION_VALID_VALUES = {"saturation", "linear", "subthreshold", "off", "unknown"}
-
 @register_rule("check_region_validity", layer=4,
                description="region 字段是有效 SPICE 工作区值且非豁免器件在饱和区")
 def check_region_validity(state: DesignState) -> ValidationReport:
@@ -356,7 +355,7 @@ def check_region_validity(state: DesignState) -> ValidationReport:
         role = dev_def.role if dev_def else ""
 
         # 0. 有效性
-        if p.region not in STATUS_REGION_VALID_VALUES:
+        if p.region not in SPICE_OPERATING_REGIONS:
             report.add(DiagnosisResult(
                 check_name="dr:region_valid", passed=False, severity="error",
                 message=f"{tid}: region='{p.region}' is not a valid SPICE operating region",

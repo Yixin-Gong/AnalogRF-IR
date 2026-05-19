@@ -1,6 +1,7 @@
 import json
 
 from core.environment import default_environment
+from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
 from outputs.artifacts import ArtifactWriter
@@ -75,3 +76,27 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert artifacts.netlist.exists()
     payload = json.loads(artifacts.result_json.read_text(encoding="utf-8"))
     assert payload["status"]["spec_pass"] is True
+
+
+def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"M1": {"gm_id": 18.0, "L": 500e-9}, "__global__": {}},
+            "transistor_params": {
+                "M1": {
+                    "W": 2e-6,
+                    "L": 500e-9,
+                    "id": 20e-6,
+                    "vds": 0.4,
+                    "vdsat": 0.12,
+                    "gm_id": 18.0,
+                    "region": "moderate",
+                    "inversion_region": "moderate",
+                }
+            },
+        },
+    )
+
+    assert state.transistors["M1"].parameters.region == "saturation"

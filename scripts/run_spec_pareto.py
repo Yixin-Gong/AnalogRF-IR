@@ -20,19 +20,18 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from main import (  # noqa: E402
-    _existing_project_path,
-    _resolve_project_path,
-    backfill_state_from_ngspice,
-    balance_two_stage_output,
-    build_design_state,
-    generate_netlist,
-    improve_tail_headroom,
+from core.environment import (  # noqa: E402
+    existing_project_path as _existing_project_path,
     load_environment,
+    resolve_project_path as _resolve_project_path,
 )
+from netlist.generator import generate_netlist  # noqa: E402
 from optimizer.nsga2 import CircuitEvaluator, NSGA2Config, NSGA2Optimizer, round_and_update_state  # noqa: E402
+from postprocess.common import backfill_state_from_ngspice  # noqa: E402
+from postprocess.two_stage import balance_two_stage_output, improve_tail_headroom  # noqa: E402
 from schemas.design_state import DesignState, Target, TransistorParameters  # noqa: E402
 from simulator.ngspice import NgspiceSimulator  # noqa: E402
+from topologies.legacy import build_design_state  # noqa: E402
 from pygmid.adapter import create_pygmid_adapter  # noqa: E402
 
 

@@ -8,8 +8,8 @@
 #   L3 (evaluations)         — Agent 可修改
 #   L4 (transistors)         — 仅脚本可写，不在此文件
 #
-# 此文件通过 main.py 的 apply_schema_overrides() 生效。
-# Agent 修改此文件后运行 python main.py 触发新一轮内层循环。
+# 此文件通过 YAML frontend 或 topologies.legacy compatibility builder 生效。
+# Agent 修改此文件后运行 python main.py 触发新一轮模块化流程。
 #
 # 约束格式 (新):
 #   支持两种格式:

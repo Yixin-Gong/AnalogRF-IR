@@ -474,3 +474,54 @@ runs/iter_059/
 ```
 
 This smoke run was intentionally tiny and not performance-oriented. It verified the full data chain: schema/env input, ASIR-safe frontend, gm/ID plugin, optimizer update, schema validation, netlist emission, ngspice simulation, state backfill, and JSON artifact output.
+
+## 2026-05-20 Legacy Migration and Main Slimming
+
+### Scope
+
+Completed the migration that the previous modular refactor prepared: `main.py` is now only a CLI adapter, legacy topology synthesis lives outside the runner, and external scripts/tests no longer import implementation helpers from `main.py`.
+
+### Major Changes
+
+1. Replaced the old monolithic `main.py` with a thin CLI that builds `FlowConfig` and delegates to `ObjectiveIRFlowRunner`.
+2. Added `topologies.legacy` for compatibility with old five-transistor and two-stage schema files that do not yet carry explicit `topology.devices`.
+3. Updated Pareto and frontend tests to depend on stable modules (`core.environment`, `netlist.generator`, `postprocess`, `topologies.legacy`) instead of `main.py`.
+4. Added `core.regions` so compact-model inversion labels (`weak`, `moderate`, `strong`) are not written into the SPICE operating-region field (`saturation`, `linear`, `off`, etc.).
+5. Added a regression test covering that region/inversion split during optimizer-to-schema update.
+6. Updated stale legacy schema comments to point at the YAML frontend and compatibility builder.
+
+### Validation
+
+```text
+python3 -m py_compile main.py core/regions.py core/design_rules.py optimizer/nsga2.py flow/state_update.py topologies/legacy.py scripts/run_spec_pareto.py tests/test_modular_flow.py tests/test_frontends.py
+python3 -m pytest tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+16 passed
+```
+
+Legacy five-transistor smoke:
+
+```text
+python3 main.py --generations 1 --pop-size 4 --seed 5 --skip-dc-repair --skip-comp-tune --no-asir
+
+runs/iter_060/
+  ngspice_success: true
+  dc_gain_db: 33.9 dB
+  unity_gain_bandwidth: 220.8 MHz
+  phase_margin: 77.3 deg
+  total_power: 49.3 uW
+```
+
+IHP two-stage explicit-YAML smoke:
+
+```text
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 1 --pop-size 4 --seed 9 --skip-dc-repair --skip-comp-tune
+
+runs/iter_061/
+  ngspice_success: true
+  dc_gain_db: 25.6 dB
+  unity_gain_bandwidth: 12.7 MHz
+  phase_margin: 86.0 deg
+  total_power: 182.2 uW
+```
+
+The IHP smoke is intentionally tiny, so it is a wiring/data-chain check rather than a performance run. The structured diagnostics correctly report remaining gain/bandwidth target failures and the output/tail current-source headroom warnings.
