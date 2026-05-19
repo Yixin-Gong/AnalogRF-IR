@@ -825,6 +825,7 @@ def save_simulation_log(
         "design_name": state.design_name,
         "process": state.process.process_name,
         "supply_vdd": state.simulation.supply.get("vdd", 1.2),
+        "flow_options": best_meta.get("flow_options", {}),
 
         "optimizer": {
             "convergence": True,
@@ -945,6 +946,7 @@ def build_agent_diagnostics(
             "technology_node_um": state.process.technology_node,
             "vdd": state.simulation.supply.get("vdd", 1.2),
         },
+        "flow_options": best_meta.get("flow_options", {}),
         "status": {
             "ngspice_success": bool(sim_result.success),
             "return_code": sim_result.return_code,
@@ -1496,6 +1498,21 @@ def _parse_args(argv=None):
     parser.add_argument("--generations", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--ngspice-bin", default=None)
+    parser.add_argument(
+        "--skip-dc-repair",
+        action="store_true",
+        help="Skip ngspice-driven DC balance/headroom repair before final verification",
+    )
+    parser.add_argument(
+        "--skip-comp-tune",
+        action="store_true",
+        help="Skip ngspice-driven Cc/Rz compensation sweep before final verification",
+    )
+    parser.add_argument(
+        "--tail-current-mirror",
+        action="store_true",
+        help="Generate a diode-connected NMOS current mirror for vbias_tail instead of a voltage source",
+    )
     return parser.parse_args(argv)
 
 
@@ -1595,6 +1612,11 @@ def main(argv=None):
     t0 = time.time()
     best_x, best_meta = optimizer.optimize()
     opt_elapsed = time.time() - t0
+    best_meta["flow_options"] = {
+        "skip_dc_repair": bool(args.skip_dc_repair),
+        "skip_comp_tune": bool(args.skip_comp_tune),
+        "tail_current_mirror": bool(args.tail_current_mirror),
+    }
 
     perf_est = best_meta.get("performance", {})
     print(f"\n       Optimizer completed in {opt_elapsed:.1f}s")
@@ -1611,6 +1633,8 @@ def main(argv=None):
     state.global_parameters = {
         k: float(v) for k, v in decoded.get("__global__", {}).items()
     }
+    if args.tail_current_mirror:
+        state.global_parameters["tail_current_mirror_bias"] = 1.0
 
     # 更新 state.transistors 的物理参数
     for dev_id, vars_dict in decoded.items():
@@ -1674,49 +1698,55 @@ def main(argv=None):
     # 将网表写入仿真工作目录
     output_dir = RUNS_DIR / f"iter_{iteration_id:03d}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    balance_info = balance_two_stage_output(state, sim, output_dir)
-    if balance_info:
-        netlist_str = generate_netlist(state)
-        scale = balance_info.get("scale")
-        sink_scale = balance_info.get("sink_scale", 1.0)
-        vout = balance_info.get("vout")
-        print(
-            "       Stage-2 DC balance: "
-            f"M6_W scale={scale:.3f}, M7_W scale={sink_scale:.3f}, vout≈{vout:.3f}V"
-        )
-
-    headroom_info = improve_tail_headroom(state, sim, output_dir)
-    if headroom_info:
-        netlist_str = generate_netlist(state)
-        print(
-            "       Tail headroom repair: "
-            f"M1/M2_W scale={headroom_info['scale']:.3f}, "
-            f"M5 VDS-VDSAT≈{headroom_info['margin']:.3f}V"
-        )
-        rebalance_info = balance_two_stage_output(state, sim, output_dir)
-        if rebalance_info:
+    if args.skip_dc_repair:
+        print("       Skipping ngspice DC repair; final simulation will verify optimizer sizing directly.")
+    else:
+        balance_info = balance_two_stage_output(state, sim, output_dir)
+        if balance_info:
             netlist_str = generate_netlist(state)
-            scale = rebalance_info.get("scale")
-            sink_scale = rebalance_info.get("sink_scale", 1.0)
-            vout = rebalance_info.get("vout")
+            scale = balance_info.get("scale")
+            sink_scale = balance_info.get("sink_scale", 1.0)
+            vout = balance_info.get("vout")
             print(
-                "       Stage-2 re-balance: "
+                "       Stage-2 DC balance: "
                 f"M6_W scale={scale:.3f}, M7_W scale={sink_scale:.3f}, vout≈{vout:.3f}V"
             )
 
-    comp_info = tune_two_stage_compensation(state, sim, output_dir)
-    if comp_info:
-        netlist_str = generate_netlist(state)
-        best_meta.setdefault("decoded", {})["__global__"] = dict(state.global_parameters)
-        best_meta.setdefault("performance", {})["Cc"] = state.global_parameters.get("Cc", 0.0)
-        best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
-        meas = comp_info.get("measurements", {})
-        print(
-            "       Compensation tune: "
-            f"Cc={comp_info['Cc']:.3e}F, Rz={comp_info['Rz']:.1f}Ω, "
-            f"PM≈{meas.get('phase_margin', 0):.1f}°, "
-            f"UGBW≈{meas.get('unity_gain_bandwidth', 0):.3e}Hz"
-        )
+        headroom_info = improve_tail_headroom(state, sim, output_dir)
+        if headroom_info:
+            netlist_str = generate_netlist(state)
+            print(
+                "       Tail headroom repair: "
+                f"M1/M2_W scale={headroom_info['scale']:.3f}, "
+                f"M5 VDS-VDSAT≈{headroom_info['margin']:.3f}V"
+            )
+            rebalance_info = balance_two_stage_output(state, sim, output_dir)
+            if rebalance_info:
+                netlist_str = generate_netlist(state)
+                scale = rebalance_info.get("scale")
+                sink_scale = rebalance_info.get("sink_scale", 1.0)
+                vout = rebalance_info.get("vout")
+                print(
+                    "       Stage-2 re-balance: "
+                    f"M6_W scale={scale:.3f}, M7_W scale={sink_scale:.3f}, vout≈{vout:.3f}V"
+                )
+
+    if args.skip_comp_tune:
+        print("       Skipping ngspice compensation tune; using optimizer-selected Cc/Rz.")
+    else:
+        comp_info = tune_two_stage_compensation(state, sim, output_dir)
+        if comp_info:
+            netlist_str = generate_netlist(state)
+            best_meta.setdefault("decoded", {})["__global__"] = dict(state.global_parameters)
+            best_meta.setdefault("performance", {})["Cc"] = state.global_parameters.get("Cc", 0.0)
+            best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
+            meas = comp_info.get("measurements", {})
+            print(
+                "       Compensation tune: "
+                f"Cc={comp_info['Cc']:.3e}F, Rz={comp_info['Rz']:.1f}Ω, "
+                f"PM≈{meas.get('phase_margin', 0):.1f}°, "
+                f"UGBW≈{meas.get('unity_gain_bandwidth', 0):.3e}Hz"
+            )
 
     result = sim.run(netlist_str, work_dir=str(output_dir))
 

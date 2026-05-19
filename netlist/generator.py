@@ -193,9 +193,47 @@ class NetlistGenerator:
         fallback = getattr(self.state.simulation, "bias_voltage", None)
         if fallback is None or fallback <= 0:
             fallback = vdd * 0.5
+        handled_ports = set()
+
+        params = getattr(self.state, "global_parameters", {}) or {}
+        if float(params.get("tail_current_mirror_bias", 0.0) or 0.0) > 0.5:
+            for dev in self.state.topology.devices:
+                if dev.role != "tail_current_source" or dev.type != "nmos":
+                    continue
+                gate = dev.connections.get("gate", "")
+                source = dev.connections.get("source", "0")
+                body = dev.connections.get("body", source)
+                if not gate:
+                    continue
+                ts = self.state.transistors.get(dev.id)
+                W = ts.parameters.W if ts and ts.parameters.W > 0 else self._proc.min_W
+                L = ts.parameters.L if ts and ts.parameters.L > 0 else self._proc.min_L
+                iref = self._get_global_param(
+                    "I_tail",
+                    ts.parameters.id if ts and ts.parameters.id > 0 else 10e-6,
+                )
+                model = dev.model or self._proc.nmos_model or "nmos"
+                lines.append("* Diode-connected NMOS mirror for tail bias")
+                lines.append(f"Iref_tail vdd {gate} DC {self._fmt_si(float(iref), 'A')}")
+                if getattr(self._proc, "device_style", "mos") == "subckt":
+                    lines.append(
+                        f"XBIAS{dev.id} {gate} {gate} {source} {body} {model} "
+                        f"W={self._eng(W, self._proc.W_precision)} "
+                        f"L={self._eng(L, self._proc.L_precision)}"
+                    )
+                else:
+                    lines.append(
+                        f"MBIAS{dev.id} {gate} {gate} {source} {body} {model} "
+                        f"W={self._eng(W, self._proc.W_precision)} "
+                        f"L={self._eng(L, self._proc.L_precision)}"
+                    )
+                handled_ports.add(gate)
+                break
 
         for port in self.state.topology.ports:
             if port.direction != "bias":
+                continue
+            if port.id in handled_ports:
                 continue
             vbias_v = fallback
             for dev in self.state.topology.devices:
