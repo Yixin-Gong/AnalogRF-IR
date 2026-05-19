@@ -77,6 +77,13 @@ class NgspiceSimulator:
         merged.raw_stdout = result_ac.raw_stdout + "\n" + result_dc.raw_stdout
         merged.raw_stderr = result_ac.raw_stderr + "\n" + result_dc.raw_stderr
 
+        pass_codes = [
+            code for code in (result_ac.return_code, result_dc.return_code)
+            if code is not None and code >= 0
+        ]
+        if pass_codes:
+            merged.return_code = 0 if all(code == 0 for code in pass_codes) else max(pass_codes)
+
         merged.success = bool(merged.measurements)  # 有测量值即成功
 
         return merged
