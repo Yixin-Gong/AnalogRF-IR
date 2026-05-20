@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from asir.profiles import select_circuit_profile
 from schemas.design_state import (
     Constraints,
     CorrectionFactors,
@@ -70,7 +71,7 @@ def build_design_state_from_yaml(data: dict[str, Any], env: dict[str, Any]) -> D
     state.corrections = _parse_corrections(data.get("corrections") or {})
     state.loss_terms = _parse_loss_terms(data.get("loss_terms") or [])
     if not state.loss_terms:
-        state.loss_terms = _loss_terms_from_targets(state.targets)
+        state.loss_terms = select_circuit_profile(state).build_loss_terms_from_targets(state.targets)
     state.evaluations = _parse_evaluations(data.get("evaluations") or [])
     state.global_parameters = {
         str(k): _num(v)
@@ -262,28 +263,7 @@ def _parse_loss_terms(raw: list[Any]) -> list[LossTerm]:
 
 
 def _loss_terms_from_targets(targets: dict[str, Target]) -> list[LossTerm]:
-    terms: list[LossTerm] = []
-    for name, target in targets.items():
-        weight = 1.0 / max(int(target.priority or 1), 1)
-        if target.min is not None:
-            terms.append(
-                LossTerm(
-                    id=f"{name}_shortfall",
-                    formula=f"relu((targets.{name}.min - realized.{name}) / max(targets.{name}.min, 1e-12))",
-                    weight=weight,
-                    description=f"Auto-generated from targets.{name}.min",
-                )
-            )
-        if target.max is not None:
-            terms.append(
-                LossTerm(
-                    id=f"{name}_excess",
-                    formula=f"relu((realized.{name} - targets.{name}.max) / max(targets.{name}.max, 1e-12))",
-                    weight=weight,
-                    description=f"Auto-generated from targets.{name}.max",
-                )
-            )
-    return terms
+    return select_circuit_profile(DesignState()).build_loss_terms_from_targets(targets)
 
 
 def _parse_evaluations(raw: list[Any]) -> list[Evaluation]:

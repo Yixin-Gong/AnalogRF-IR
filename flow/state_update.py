@@ -10,10 +10,12 @@ from schemas.design_state import DesignState, TransistorParameters
 def apply_optimizer_meta_to_state(state: DesignState, best_meta: dict[str, Any]) -> None:
     decoded = best_meta.get("decoded", {}) or {}
     transistor_params = best_meta.get("transistor_params", {}) or {}
-    state.global_parameters = {
+    merged_globals = dict(state.global_parameters or {})
+    merged_globals.update({
         str(k): float(v)
         for k, v in (decoded.get("__global__", {}) or {}).items()
-    }
+    })
+    state.global_parameters = merged_globals
     for dev_id, vars_dict in decoded.items():
         if str(dev_id).startswith("__") or dev_id not in state.transistors:
             continue

@@ -189,8 +189,8 @@ def build_simulation_log(
         ng_key = spec_model.measurement_key(key)
         ng_val = sim_result.measurements.get(ng_key)
         log["comparison"][key] = {
-            "optimizer_estimated": round(est_val, 3),
-            "ngspice_measured": round(ng_val, 4) if ng_val is not None else None,
+            "optimizer_estimated": _sig(est_val),
+            "ngspice_measured": _sig(ng_val) if ng_val is not None else None,
         }
     return log
 
@@ -399,10 +399,22 @@ def _target_hint(name: str, *, is_two_stage: bool = False) -> str:
         return "Improve input common-mode range by reducing input/tail/load headroom or changing input topology."
     if name in {"dc_gain", "gain"}:
         return "Increase intrinsic gain by lengthening output/load devices or reducing output conductance."
-    if name in {"delay", "regeneration_time"}:
-        return "Increase latch/input gm or reduce capacitive loading."
+    if name in {"delay", "decision_time", "propagation_delay", "regeneration_time"}:
+        return "Increase latch or input gm, reduce output/internal capacitance, or reduce required logic swing."
+    if name in {"reset_time"}:
+        return "Increase reset/precharge strength or reduce output capacitance."
     if name in {"offset", "input_referred_offset"}:
         return "Increase matching area or rebalance the input/latch devices."
-    if name in {"power", "energy"}:
-        return "Reduce bias currents or device widths on non-critical paths."
+    if name in {"noise", "input_referred_noise"}:
+        return "Increase sampling/input capacitance or input gm, then re-check delay and energy."
+    if name in {"kickback", "kickback_noise", "clock_feedthrough"}:
+        return "Reduce input-device Cgd, add input isolation, or increase effective input capacitance."
+    if name in {"input_capacitance", "cin"}:
+        return "Shrink input devices or reduce sampling capacitance while preserving noise and offset targets."
+    if name in {"metastability_margin", "decision_margin"}:
+        return "Increase input decision step or reduce combined input-referred offset and noise."
+    if name in {"max_sample_rate"}:
+        return "Reduce reset plus decision cycle time by raising reset/latch gm or reducing capacitive loading."
+    if name in {"power", "energy", "energy_per_comparison", "pdp", "edp"}:
+        return "Reduce switched capacitance, clock rate, supply swing, or non-critical evaluation current."
     return "Inspect the target-specific measurement and related loss term."

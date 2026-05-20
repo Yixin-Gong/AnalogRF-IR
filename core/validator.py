@@ -11,6 +11,7 @@ from schemas.design_state import (
     DeviceDefinition, Target, Range, DesignVariable, LossTerm,
     Constraints, DeviceConstraint, Topology, SimulationConfig, GlobalNet,
 )
+from asir.profiles import CircuitProfile, select_circuit_profile
 from util.units import Unit, Dimension, Length, Voltage, Current
 
 # Internal implementation note.
@@ -253,12 +254,14 @@ class PhysicalValidator:
     def validate(state: DesignState,
                   vdsat_margin: float = 0.05,
                   min_headroom: float = 0.15,
-                  symmetry_tolerance: float = 0.05) -> ValidationReport:
+                  symmetry_tolerance: float = 0.05,
+                  profile: CircuitProfile | None = None) -> ValidationReport:
         report = ValidationReport()
+        profile = profile or select_circuit_profile(state)
 
         # Internal implementation note.
         report.results.extend(
-            PhysicalValidator._check_saturation(state, vdsat_margin)
+            PhysicalValidator._check_saturation(state, vdsat_margin, profile)
         )
 
         # Internal implementation note.
@@ -268,7 +271,7 @@ class PhysicalValidator:
 
         # Internal implementation note.
         report.results.extend(
-            PhysicalValidator._check_voltage_stack(state, min_headroom)
+            PhysicalValidator._check_voltage_stack(state, min_headroom, profile)
         )
 
         # Internal implementation note.
@@ -281,7 +284,11 @@ class PhysicalValidator:
     # Internal implementation note.
 
     @staticmethod
-    def _check_saturation(state: DesignState, margin: float) -> List[DiagnosisResult]:
+    def _check_saturation(
+        state: DesignState,
+        margin: float,
+        profile: CircuitProfile,
+    ) -> List[DiagnosisResult]:
         results = []
         for tid, ts in state.transistors.items():
             p = ts.parameters
@@ -289,7 +296,7 @@ class PhysicalValidator:
                 continue
             dev_def = state.get_device_def(tid)
             role = dev_def.role if dev_def else ""
-            if role in PhysicalValidator.SATURATION_EXEMPT_ROLES:
+            if role in PhysicalValidator.SATURATION_EXEMPT_ROLES or profile.is_dynamic_role(role):
                 continue
 
             if p.vds < p.vdsat + margin:
@@ -388,9 +395,15 @@ class PhysicalValidator:
         return results
 
     @staticmethod
-    def _check_voltage_stack(state: DesignState, headroom: float) -> List[DiagnosisResult]:
+    def _check_voltage_stack(
+        state: DesignState,
+        headroom: float,
+        profile: CircuitProfile,
+    ) -> List[DiagnosisResult]:
         """AnalogRF-IR internal documentation."""
         results = []
+        if profile.skip_static_voltage_stack:
+            return results
         vdd = state.simulation.supply.get("vdd", 1.8)
         vss = state.simulation.supply.get("vss", 0.0)
         supply_span = vdd - vss
@@ -476,9 +489,11 @@ class Validator:
         if 3 in layers:
             report.results.extend(self.value_validator.validate(state).results)
         if 4 in layers:
-            report.results.extend(self.physical.validate(state).results)
+            profile = select_circuit_profile(state)
+            report.results.extend(self.physical.validate(state, profile=profile).results)
         if include_custom:
-            report.results.extend(run_registered_rules(state).results)
+            profile = select_circuit_profile(state)
+            report.results.extend(run_registered_rules(state, circuit_profile=profile.name).results)
 
         report.schema_valid = all(
             r.severity != "error" for r in report.results

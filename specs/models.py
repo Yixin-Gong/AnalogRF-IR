@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from asir.profiles import COMPARATOR_PROFILE, OTA_PROFILE, SAMPLE_HOLD_PROFILE, CircuitProfile, select_circuit_profile
 from schemas.design_state import DesignState, Target
 
 
@@ -14,14 +15,14 @@ class CircuitSpecModel:
     circuit_classes: tuple[str, ...] = ("generic",)
     architectures: tuple[str, ...] = ()
     metric_map: dict[str, str] = field(default_factory=dict)
+    profile: CircuitProfile | None = None
 
     def matches(self, state: DesignState) -> bool:
+        if self.profile is not None:
+            return select_circuit_profile(state).name == self.profile.name
         circuit_class = (state.topology.class_ or "").lower()
         architecture = (state.topology.architecture or "").lower()
-        return (
-            circuit_class in self.circuit_classes
-            or any(token in architecture for token in self.architectures)
-        )
+        return circuit_class in self.circuit_classes or any(token in architecture for token in self.architectures)
 
     def measurement_key(self, target_name: str) -> str:
         return self.metric_map.get(target_name, target_name)
@@ -88,61 +89,33 @@ class CircuitSpecModel:
 class OTASpecModel(CircuitSpecModel):
     def __init__(self) -> None:
         super().__init__(
-            name="ota",
-            circuit_classes=("ota", "opamp", "operational_amplifier"),
-            architectures=("ota", "opamp", "two-stage", "single-stage"),
-            metric_map={
-                "dc_gain": "dc_gain_db",
-                "unity_gain_bandwidth": "unity_gain_bandwidth",
-                "ugbw": "unity_gain_bandwidth",
-                "phase_margin": "phase_margin",
-                "slew_rate": "slew_rate",
-                "slew_rate_pos": "slew_rate_pos",
-                "slew_rate_neg": "slew_rate_neg",
-                "output_swing": "output_swing",
-                "swing": "output_swing",
-                "icmr": "icmr",
-                "icmr_range": "icmr",
-                "icmr_min": "icmr_min",
-                "input_common_mode_min": "icmr_min",
-                "icmr_max": "icmr_max",
-                "input_common_mode_max": "icmr_max",
-                "power": "total_power",
-            },
+            name=OTA_PROFILE.name,
+            circuit_classes=OTA_PROFILE.circuit_classes,
+            architectures=OTA_PROFILE.architectures,
+            metric_map=OTA_PROFILE.metric_map,
+            profile=OTA_PROFILE,
         )
 
 
 class ComparatorSpecModel(CircuitSpecModel):
     def __init__(self) -> None:
         super().__init__(
-            name="comparator",
-            circuit_classes=("comparator",),
-            architectures=("strongarm", "double-tail", "sense-amplifier", "comparator"),
-            metric_map={
-                "delay": "delay",
-                "offset": "offset",
-                "input_referred_offset": "offset",
-                "noise": "noise",
-                "energy": "energy",
-                "power": "total_power",
-            },
+            name=COMPARATOR_PROFILE.name,
+            circuit_classes=COMPARATOR_PROFILE.circuit_classes,
+            architectures=COMPARATOR_PROFILE.architectures,
+            metric_map=COMPARATOR_PROFILE.metric_map,
+            profile=COMPARATOR_PROFILE,
         )
 
 
 class SampleHoldSpecModel(CircuitSpecModel):
     def __init__(self) -> None:
         super().__init__(
-            name="sample_hold",
-            circuit_classes=("sample_hold", "sample-and-hold", "track_hold"),
-            architectures=("sample", "hold", "track"),
-            metric_map={
-                "settling_time": "settling_time",
-                "acquisition_time": "acquisition_time",
-                "hold_step": "hold_step",
-                "droop": "droop",
-                "snr": "snr",
-                "power": "total_power",
-            },
+            name=SAMPLE_HOLD_PROFILE.name,
+            circuit_classes=SAMPLE_HOLD_PROFILE.circuit_classes,
+            architectures=SAMPLE_HOLD_PROFILE.architectures,
+            metric_map=SAMPLE_HOLD_PROFILE.metric_map,
+            profile=SAMPLE_HOLD_PROFILE,
         )
 
 

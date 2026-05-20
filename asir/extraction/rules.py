@@ -224,10 +224,13 @@ class RuleBasedSemanticExtractor:
                     equations=[
                         "i_diff = gm_input * (vinp - vinn)",
                         "d(v_internal_diff)/dt = i_diff / Cint",
+                        "input_capacitance ~= Cgs_input + Cgd_input + Csample",
+                        "kickback_noise ~= alpha_kb * Vclock * Cgd_input / input_capacitance",
                     ],
                     constraints=[
                         "input pair devices must be symmetric",
                         "common source node must be phase-enabled by a tail device",
+                        "input capacitance and kickback must fit the previous-stage drive budget",
                     ],
                     active_phases=["amplify"],
                     state_variables=["v_internal_diff", "i_diff"],
@@ -263,15 +266,17 @@ class RuleBasedSemanticExtractor:
                 primitive_type="cross_coupled_latch",
                 role="positive feedback regeneration and digital decision",
                 member_devices=sorted(latch_devices),
-                equations=[
-                    "d(vout_diff)/dt = (gm_latch / CL) * vout_diff",
-                    "regeneration_time = (CL / gm_latch) * ln(Vlogic / v_initial_diff)",
-                ],
-                constraints=[
-                    "gm_latch must exceed effective load conductance",
-                    "cross-coupled devices must preserve output polarity",
-                    "output capacitances should be balanced",
-                ],
+                    equations=[
+                        "d(vout_diff)/dt = (gm_latch / CL) * vout_diff",
+                        "regeneration_time = (CL / gm_latch) * ln(Vlogic / v_initial_diff)",
+                        "metastability_margin = input_step / sqrt(offset^2 + noise^2)",
+                    ],
+                    constraints=[
+                        "gm_latch must exceed effective load conductance",
+                        "cross-coupled devices must preserve output polarity",
+                        "output capacitances should be balanced",
+                        "latch output swing must cross the downstream logic threshold",
+                    ],
                 active_phases=["regenerate", "saturate"],
                 state_variables=["vout_diff", "decision_polarity"],
                 input_nets=control_nets,

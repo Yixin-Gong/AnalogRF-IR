@@ -16,6 +16,9 @@ def test_strongarm_extracts_required_primitives():
     assert counts["reset_switch"] >= 1
     assert counts["tail_current_source"] == 1
     assert "delay" in design.dependency_graph.graph
+    assert "kickback_noise" in design.dependency_graph.graph
+    assert "metastability_margin" in design.dependency_graph.graph
+    assert "max_sample_rate" in design.dependency_graph.graph
     assert "reset" in design.phase_graph.graph
     assert design.topology_graph.graph.nodes["outp"]["net_type"] == "differential_output"
     assert design.topology_graph.graph.nodes["clk"]["net_type"] == "clock"
@@ -56,11 +59,24 @@ def test_dependency_forward_and_backward_reasoning():
             "kT_over_C": 1e-4,
             "bandwidth": 1e8,
             "VDD": 1.0,
+            "VSS": 0.0,
+            "Cgs_input": 5e-15,
+            "Cgd_input": 1e-15,
+            "Vclock_swing": 1.0,
+            "kickback_coupling": 0.02,
+            "input_step": 10e-3,
+            "icmr_min": 0.2,
+            "icmr_max": 0.9,
             "switching_activity": 2.0,
         }
     )
     assert values["regeneration_time"] > 0
     assert values["delay"] > values["regeneration_time"]
+    assert values["cycle_time"] > values["delay"]
+    assert values["kickback_noise"] > 0
+    assert values["input_capacitance"] > 0
+    assert values["metastability_margin"] > 0
+    assert values["max_sample_rate"] > 0
     trace = design.dependency_graph.backward_trace("delay")
     assert "gm_latch" in trace["source_symbols"]
     assert "CL" in trace["source_symbols"]

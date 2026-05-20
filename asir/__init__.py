@@ -6,6 +6,14 @@ from asir.examples.comparators import (
     build_sense_amplifier_comparator,
     build_strongarm_comparator,
 )
+from asir.profiles import (
+    CircuitProfile,
+    COMPARATOR_PROFILE,
+    GENERIC_PROFILE,
+    OTA_PROFILE,
+    SAMPLE_HOLD_PROFILE,
+    select_circuit_profile,
+)
 
 __all__ = [
     "ASIRDesign",
@@ -13,4 +21,10 @@ __all__ = [
     "build_double_tail_comparator",
     "build_sense_amplifier_comparator",
     "build_strongarm_comparator",
+    "CircuitProfile",
+    "COMPARATOR_PROFILE",
+    "GENERIC_PROFILE",
+    "OTA_PROFILE",
+    "SAMPLE_HOLD_PROFILE",
+    "select_circuit_profile",
 ]

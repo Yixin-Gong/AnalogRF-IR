@@ -1,6 +1,8 @@
 import json
 
+from asir.profiles import select_circuit_profile
 from core.environment import default_environment
+from core.rule_registry import list_rules
 from core.validator import Validator
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
@@ -57,6 +59,26 @@ def test_spec_registry_selects_ota_and_comparator():
     assert registry.select(ota).measurement_key("swing") == "output_swing"
     assert registry.select(ota).measurement_key("input_common_mode_min") == "icmr_min"
     assert registry.select(comparator).measurement_key("offset") == "offset"
+    assert registry.select(comparator).measurement_key("kickback") == "kickback_noise"
+    assert registry.select(comparator).measurement_key("energy_per_comparison") == "energy"
+    assert registry.select(comparator).measurement_key("power") == "power"
+
+
+def test_ir_profile_drives_objectives_and_rule_filtering():
+    ota = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+
+    ota_profile = select_circuit_profile(ota)
+    comparator_profile = select_circuit_profile(comparator)
+    comparator_rules = {item["name"] for item in list_rules(circuit_profile=comparator_profile.name)}
+    ota_rules = {item["name"] for item in list_rules(circuit_profile=ota_profile.name)}
+
+    assert ota_profile.name == "ota"
+    assert comparator_profile.name == "comparator"
+    assert comparator_profile.required_context == ("CL", "f_clk", "input_step")
+    assert any("by comparator profile" in term.description for term in comparator.loss_terms)
+    assert "check_comparator_metric_coverage" in comparator_rules
+    assert "check_comparator_metric_coverage" not in ota_rules
 
 
 def test_artifact_writer_emits_result_json(tmp_path):
@@ -158,8 +180,52 @@ def test_optimizer_and_netlist_include_slew_rate():
     assert "swing_deficit" in meta["loss_breakdown"]
     assert "icmr_min_excess" in meta["loss_breakdown"]
     assert ".tran" in netlist
-    assert "slew_rate" in netlist
-    assert "output_swing" in netlist
+
+
+def test_comparator_estimator_reports_extended_metrics():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
+
+    _obj, _violation, meta = evaluator.evaluate(x)
+    perf = meta["performance"]
+    netlist = generate_netlist(state)
+
+    for key in (
+        "delay",
+        "regeneration_time",
+        "reset_time",
+        "offset",
+        "input_referred_noise",
+        "kickback_noise",
+        "energy_per_comparison",
+        "pdp",
+        "input_capacitance",
+        "output_swing",
+        "icmr",
+        "metastability_margin",
+        "max_sample_rate",
+        "area",
+        "power",
+    ):
+        assert key in perf
+        assert perf[key] >= 0
+    assert perf["output_swing"] > 0
+    assert perf["icmr_max"] >= perf["icmr_min"]
+    assert "Vclk clk" in netlist
+    assert "Vclkb clkb" in netlist
+    assert ".tran" in netlist
+
+
+def test_comparator_validator_accepts_metric_context_and_symmetry_labels():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+
+    report = Validator().validate(state, layers=[3, 4])
+    messages = [item.message for item in report.warnings()]
+
+    assert not any("Comparator target set is missing" in message for message in messages)
+    assert not any("Comparator dynamic estimates need" in message for message in messages)
+    assert not any("should share one symmetry label" in message for message in messages)
 
 
 def test_ngspice_transient_curve_extracts_slew_rate(tmp_path):

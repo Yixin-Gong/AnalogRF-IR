@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from asir.profiles import COMPARATOR_PROFILE, select_circuit_profile
 from core.regions import SPICE_OPERATING_REGIONS
 from schemas.design_state import DesignState, ProcessInfo, TransistorParameters
 from core.rule_registry import register_rule, ValidationReport, DiagnosisResult
@@ -327,6 +328,8 @@ def check_saturation_margin(state: DesignState) -> ValidationReport:
             continue
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
+        if _is_dynamic_comparator_role(state, role):
+            continue
         if p.vds < p.vdsat * factor:
             report.add(DiagnosisResult(
                 check_name="dr:saturation_margin", passed=False, severity="warning",
@@ -348,6 +351,8 @@ def check_region_validity(state: DesignState) -> ValidationReport:
         p = ts.parameters
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
+        if _is_dynamic_comparator_role(state, role):
+            continue
 
         # Internal implementation note.
         if p.region not in SPICE_OPERATING_REGIONS:
@@ -409,6 +414,8 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
             continue
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
+        if _is_dynamic_comparator_role(state, role):
+            continue
         margin_v = p.vds - p.vdsat
         required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
         if required <= 0:
@@ -547,6 +554,8 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         if info["region"] == "unknown" or info["vdsat"] <= 0:
             continue
         role = info["role"]
+        if _is_dynamic_comparator_role(state, role):
+            continue
         margin = info["margin"]
 
         # Internal implementation note.
@@ -720,6 +729,9 @@ def check_VGS_safe_range(state: DesignState) -> ValidationReport:
             continue
         dev_def = state.get_device_def(tid)
         dev_type = dev_def.type if dev_def else "nmos"
+        role = dev_def.role if dev_def else ""
+        if _is_dynamic_comparator_role(state, role):
+            continue
         VTH = state.process.VTH_n if dev_type == "nmos" else state.process.VTH_p
         vov = vgs - VTH
         if vov < 0.05:
@@ -980,6 +992,114 @@ def check_process_config(state: DesignState) -> ValidationReport:
     return report
 
 
+def _is_comparator_state(state: DesignState) -> bool:
+    return select_circuit_profile(state).name == COMPARATOR_PROFILE.name
+
+
+def _is_dynamic_comparator_role(state: DesignState, role: str) -> bool:
+    return select_circuit_profile(state).is_dynamic_role(role)
+
+
+def _global_design_names(state: DesignState) -> set[str]:
+    names = set((state.global_parameters or {}).keys())
+    names.update(dv.variable for dv in state.design_variables if not dv.device)
+    return names
+
+
+@register_rule(
+    "check_comparator_metric_coverage",
+    layer=3,
+    description="Comparator schemas should declare the standard dynamic-comparator metric set.",
+    circuit_profiles=("comparator",),
+)
+def check_comparator_metric_coverage(state: DesignState) -> ValidationReport:
+    report = ValidationReport()
+    profile = select_circuit_profile(state)
+    missing = profile.missing_metric_groups(state.targets)
+    if missing:
+        report.add(DiagnosisResult(
+            check_name="dr:comparator_metric_coverage",
+            passed=False,
+            severity="warning",
+            message="Comparator target set is missing recommended metrics: " + ", ".join(missing),
+            layer=3,
+            details={"missing": missing},
+        ))
+    return report
+
+
+@register_rule(
+    "check_comparator_dynamic_context",
+    layer=3,
+    description="Dynamic comparator metrics need load, clock, and input-step context.",
+    circuit_profiles=("comparator",),
+)
+def check_comparator_dynamic_context(state: DesignState) -> ValidationReport:
+    report = ValidationReport()
+    profile = select_circuit_profile(state)
+    names = _global_design_names(state)
+    required = set(profile.required_context)
+    missing = sorted(required - names)
+    if missing:
+        report.add(DiagnosisResult(
+            check_name="dr:comparator_dynamic_context",
+            passed=False,
+            severity="warning",
+            message="Comparator dynamic estimates need global parameters: " + ", ".join(missing),
+            layer=3,
+            details={"missing": missing},
+        ))
+    return report
+
+
+@register_rule(
+    "check_comparator_symmetry_labels",
+    layer=4,
+    description="Strongly matched comparator branches should share symmetry labels.",
+    circuit_profiles=("comparator",),
+)
+def check_comparator_symmetry_labels(state: DesignState) -> ValidationReport:
+    report = ValidationReport()
+    role_groups: dict[str, list[str]] = {
+        "input_pair": [],
+        "latch_nmos": [],
+        "latch_pmos": [],
+        "reset_precharge": [],
+    }
+    for dev in state.topology.devices:
+        role = dev.role.lower()
+        if "input_pair" in role:
+            role_groups["input_pair"].append(dev.id)
+        elif "latch_nmos" in role:
+            role_groups["latch_nmos"].append(dev.id)
+        elif "latch_pmos" in role:
+            role_groups["latch_pmos"].append(dev.id)
+        elif "reset_precharge" in role:
+            role_groups["reset_precharge"].append(dev.id)
+
+    labels: dict[tuple[str, str], str] = {}
+    for dv in state.design_variables:
+        if dv.device and dv.symmetry_label:
+            labels[(dv.device, dv.variable)] = dv.symmetry_label
+
+    for group_name, dev_ids in role_groups.items():
+        if len(dev_ids) < 2:
+            continue
+        for variable in ("gm_id", "L"):
+            group_labels = {labels.get((dev_id, variable), "") for dev_id in dev_ids}
+            if "" in group_labels or len(group_labels) > 1:
+                report.add(DiagnosisResult(
+                    check_name="dr:comparator_symmetry_labels",
+                    passed=False,
+                    severity="warning",
+                    message=f"{group_name} {variable} variables should share one symmetry label",
+                    layer=4,
+                    device="/".join(dev_ids),
+                    details={"group": group_name, "variable": variable, "labels": sorted(group_labels)},
+                ))
+    return report
+
+
 # ===============================================================
 # Internal implementation note.
 # ===============================================================
@@ -1010,4 +1130,7 @@ ALL_RULES = [
     # Internal implementation note.
     check_temperature_range, check_supply_valid, check_power_density,
     check_process_config,
+    # Internal implementation note.
+    check_comparator_metric_coverage, check_comparator_dynamic_context,
+    check_comparator_symmetry_labels,
 ]

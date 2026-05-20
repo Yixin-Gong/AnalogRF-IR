@@ -100,13 +100,36 @@ def _print_optional_queries(args, design) -> None:
                 "kT_over_C": 1e-4,
                 "bandwidth": 1e8,
                 "VDD": 1.0,
+                "VSS": 0.0,
+                "Cgs_input": 5e-15,
+                "Cgd_input": 1e-15,
+                "Vclock_swing": 1.0,
+                "kickback_coupling": 0.02,
+                "input_step": 10e-3,
+                "icmr_min": 0.2,
+                "icmr_max": 0.9,
                 "switching_activity": 2.0,
             }
         )
         interesting = {
             key: values[key]
             for key in sorted(values)
-            if key in {"delay", "offset", "noise", "regeneration_time", "sampling_time", "energy"}
+            if key in {
+                "delay",
+                "cycle_time",
+                "offset",
+                "noise",
+                "regeneration_time",
+                "sampling_time",
+                "energy",
+                "energy_per_comparison",
+                "kickback_noise",
+                "input_capacitance",
+                "metastability_margin",
+                "max_sample_rate",
+                "output_swing",
+                "icmr",
+            }
         }
         print(json.dumps(interesting, indent=2))
     if args.compare:

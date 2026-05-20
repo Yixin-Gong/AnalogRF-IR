@@ -8,6 +8,7 @@ from typing import Any, Callable
 from core.environment import load_environment, resolve_project_path
 from core.validator import Validator
 import core.design_rules  # noqa: F401
+from asir.profiles import select_circuit_profile
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import StateBuilder, load_design_input
 from netlist.generator import generate_netlist
@@ -243,7 +244,9 @@ class AnalogRFIRFlowRunner:
 
     def _print_state_summary(self, state: DesignState, spec_model: str) -> None:
         self.emit(f"       Topology: {state.topology.name} ({state.topology.architecture})")
+        profile = select_circuit_profile(state)
         self.emit(f"       Class/spec model: {state.topology.class_} / {spec_model}")
+        self.emit(f"       IR profile: {profile.name}")
         self.emit(f"       Process:  {state.process.process_name} ({state.process.technology_node}um)")
         self.emit(f"       Vdd:      {state.simulation.supply.get('vdd', 1.2)}V")
         self.emit(f"       Devices:  {len(state.topology.devices)}")
@@ -262,7 +265,7 @@ class AnalogRFIRFlowRunner:
         self.emit("       Estimated performance:")
         for key, value in perf_est.items():
             unit = state.targets.get(key, Target()).unit
-            self.emit(f"         {key:>22s}: {value:>10.3f} {unit}")
+            self.emit(f"         {key:>22s}: {self._format_metric_value(value):>12s} {unit}")
 
     def _print_postprocess_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
@@ -320,6 +323,15 @@ class AnalogRFIRFlowRunner:
                 "icmr",
                 "icmr_min",
                 "icmr_max",
+                "delay",
+                "regeneration_time",
+                "reset_time",
+                "energy",
+                "pdp",
+                "kickback_noise",
+                "input_capacitance",
+                "metastability_margin",
+                "max_sample_rate",
                 "total_power",
                 "i_vdd",
             }
@@ -355,11 +367,19 @@ class AnalogRFIRFlowRunner:
             ng_key = spec_model.measurement_key(key)
             ng_val = result.measurements.get(ng_key)
             unit = state.targets.get(key, Target()).unit
-            est_str = f"{est_val:.2e} {unit}" if abs(est_val) < 0.01 else f"{est_val:.1f} {unit}"
+            est_str = f"{self._format_metric_value(est_val)} {unit}"
             ng_str = (
-                f"{ng_val:.2e} {unit}"
-                if ng_val is not None and abs(ng_val) < 0.01
-                else (f"{ng_val:.1f} {unit}" if ng_val is not None else "N/A")
+                f"{self._format_metric_value(ng_val)} {unit}"
+                if ng_val is not None
+                else "N/A"
             )
             delta_str = f"{ng_val - est_val:+.2e}" if ng_val is not None else ""
             self.emit(f"       {key:>22s}: {est_str:>12s} {ng_str:>12s} {delta_str:>10s}")
+
+    @staticmethod
+    def _format_metric_value(value: float) -> str:
+        if value == 0:
+            return "0"
+        if abs(value) < 1e-2 or abs(value) >= 1e4:
+            return f"{value:.4e}"
+        return f"{value:.4f}"

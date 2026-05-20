@@ -10,13 +10,19 @@ from typing import Dict, List, Optional, Callable, Any
 _rule_registry: Dict[str, dict] = {}
 
 
-def register_rule(name: str, layer: int = 4, description: str = "") -> Callable:
+def register_rule(
+    name: str,
+    layer: int = 4,
+    description: str = "",
+    circuit_profiles: Optional[tuple[str, ...]] = None,
+) -> Callable:
     """AnalogRF-IR internal documentation."""
     def decorator(fn: Callable) -> Callable:
         _rule_registry[name] = {
             "fn": fn,
             "layer": layer,
             "description": description or fn.__doc__ or "",
+            "circuit_profiles": tuple(circuit_profiles or ()),
         }
         return fn
     return decorator
@@ -27,19 +33,30 @@ def get_rule(name: str) -> Optional[Callable]:
     return entry["fn"] if entry else None
 
 
-def list_rules(layer: Optional[int] = None) -> List[dict]:
+def list_rules(layer: Optional[int] = None, circuit_profile: Optional[str] = None) -> List[dict]:
     rules = []
     for name, entry in _rule_registry.items():
         if layer is None or entry["layer"] == layer:
+            profile_filter = entry.get("circuit_profiles", ())
+            if circuit_profile and profile_filter and circuit_profile not in profile_filter:
+                continue
             rules.append({"name": name, "layer": entry["layer"],
-                          "description": entry["description"]})
+                          "description": entry["description"],
+                          "circuit_profiles": profile_filter})
     return sorted(rules, key=lambda r: (r["layer"], r["name"]))
 
 
-def run_registered_rules(state, layer: Optional[int] = None) -> "ValidationReport":
+def run_registered_rules(
+    state,
+    layer: Optional[int] = None,
+    circuit_profile: Optional[str] = None,
+) -> "ValidationReport":
     report = ValidationReport()
     for name, entry in _rule_registry.items():
         if layer is not None and entry["layer"] != layer:
+            continue
+        profile_filter = entry.get("circuit_profiles", ())
+        if circuit_profile and profile_filter and circuit_profile not in profile_filter:
             continue
         try:
             result = entry["fn"](state)

@@ -82,9 +82,66 @@ topology:
       role: output_load
       capacitance: CL
       connections: {plus: outn, minus: vss}
+global_parameters:
+  I_tail: 12e-6
+  I_latch: 8e-6
+  CL: 60e-15
+  f_clk: 100e6
+  input_step: 10e-3
+  C_sample: 30e-15
+  V_logic: 1.2
+  mismatch_sigma: 0.5e-3
+  offset_avt: 1.5e-3
+  kickback_coupling: 0.015
+  switching_activity: 1.0
+  eval_duty: 0.35
 targets:
-  delay: {max: 100e-12, unit: s, priority: 1}
-  offset: {max: 2e-3, unit: V, priority: 1}
-  noise: {max: 500e-6, unit: V_rms, priority: 2}
+  delay: {max: 200e-12, unit: s, priority: 2}
+  regeneration_time: {max: 150e-12, unit: s, priority: 2}
+  reset_time: {max: 150e-12, unit: s, priority: 2}
+  offset: {max: 3e-3, unit: V, priority: 2}
+  input_referred_noise: {max: 800e-6, unit: V_rms, priority: 2}
+  kickback_noise: {max: 3e-3, unit: V, priority: 2}
+  clock_feedthrough: {max: 2e-3, unit: V, priority: 3}
+  energy_per_comparison: {max: 500e-15, unit: J, priority: 2}
+  pdp: {max: 50e-24, unit: J_s, priority: 3}
+  input_capacitance: {max: 80e-15, unit: F, priority: 2}
+  output_swing: {min: 1.0, unit: V, priority: 2}
+  icmr: {min: 0.2, unit: V, priority: 2}
+  icmr_min: {max: 0.95, unit: V, priority: 3}
+  icmr_max: {min: 1.0, unit: V, priority: 3}
+  metastability_margin: {min: 4.0, unit: ratio, priority: 2}
+  decision_margin: {min: 5e-3, unit: V, priority: 3}
+  max_sample_rate: {min: 1e9, unit: Hz, priority: 2}
+  area: {max: 5e-10, unit: m2, priority: 3}
+  power: {max: 80e-6, unit: W, priority: 2}
+design_variables:
+  - {device: M_INP, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_input_pair}
+  - {device: M_INN, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_input_pair}
+  - {device: M_INP, variable: L, range: {min: 130e-9, max: 900e-9}, initial: 360e-9, symmetry_label: sym_input_pair}
+  - {device: M_INN, variable: L, range: {min: 130e-9, max: 900e-9}, initial: 360e-9, symmetry_label: sym_input_pair}
+  - {device: M_TAIL, variable: gm_id, range: {min: 5, max: 16}, initial: 9}
+  - {device: M_TAIL, variable: L, range: {min: 130e-9, max: 700e-9}, initial: 260e-9}
+  - {device: M_NL_P, variable: gm_id, range: {min: 5, max: 18}, initial: 10, symmetry_label: sym_latch_nmos}
+  - {device: M_NL_N, variable: gm_id, range: {min: 5, max: 18}, initial: 10, symmetry_label: sym_latch_nmos}
+  - {device: M_NL_P, variable: L, range: {min: 130e-9, max: 600e-9}, initial: 220e-9, symmetry_label: sym_latch_nmos}
+  - {device: M_NL_N, variable: L, range: {min: 130e-9, max: 600e-9}, initial: 220e-9, symmetry_label: sym_latch_nmos}
+  - {device: M_PL_P, variable: gm_id, range: {min: 4, max: 15}, initial: 8, symmetry_label: sym_latch_pmos}
+  - {device: M_PL_N, variable: gm_id, range: {min: 4, max: 15}, initial: 8, symmetry_label: sym_latch_pmos}
+  - {device: M_PL_P, variable: L, range: {min: 130e-9, max: 700e-9}, initial: 240e-9, symmetry_label: sym_latch_pmos}
+  - {device: M_PL_N, variable: L, range: {min: 130e-9, max: 700e-9}, initial: 240e-9, symmetry_label: sym_latch_pmos}
+  - {device: M_RST_P, variable: gm_id, range: {min: 4, max: 14}, initial: 7, symmetry_label: sym_reset_precharge}
+  - {device: M_RST_N, variable: gm_id, range: {min: 4, max: 14}, initial: 7, symmetry_label: sym_reset_precharge}
+  - {device: M_RST_P, variable: L, range: {min: 130e-9, max: 600e-9}, initial: 220e-9, symmetry_label: sym_reset_precharge}
+  - {device: M_RST_N, variable: L, range: {min: 130e-9, max: 600e-9}, initial: 220e-9, symmetry_label: sym_reset_precharge}
+  - {device: M_EQ, variable: gm_id, range: {min: 4, max: 14}, initial: 7}
+  - {device: M_EQ, variable: L, range: {min: 130e-9, max: 600e-9}, initial: 220e-9}
+  - {variable: I_tail, range: {min: 2e-6, max: 80e-6}, initial: 12e-6, unit: A}
+  - {variable: I_latch, range: {min: 1e-6, max: 80e-6}, initial: 8e-6, unit: A}
+  - {variable: CL, range: {min: 20e-15, max: 300e-15}, initial: 60e-15, unit: F}
+evaluations:
+  - {name: delay, type: delay, probe: outp, target_ref: delay}
+  - {name: total_power, type: dc_power, target_ref: power}
+  - {name: output_swing, type: output_swing, probe: outp, target_ref: output_swing}
 constraints:
   phase_order: [reset, amplify, regenerate, saturate]

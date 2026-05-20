@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 from pathlib import Path
+from asir.profiles import select_circuit_profile
 from schemas.design_state import DesignState
 
 
@@ -13,6 +14,7 @@ class NetlistGenerator:
     def __init__(self, state: DesignState):
         self.state = state
         self._proc = state.process
+        self._profile = select_circuit_profile(state)
 
     def generate(self, include_header: bool = True) -> str:
         lines = []
@@ -118,6 +120,9 @@ class NetlistGenerator:
                     return dv.initial
                 return 0.5 * (dv.range.min + dv.range.max)
         return default
+
+    def _is_comparator(self) -> bool:
+        return self._profile.name == "comparator"
 
     def _fmt_si(self, val: float, suffix: str) -> str:
         if suffix == "F":
@@ -271,21 +276,47 @@ class NetlistGenerator:
         inputs = [p for p in self.state.topology.ports if p.direction == "input"]
         lines = ["* -- Stimuli --"]
         if len(inputs) >= 2:
-            lines.append(f"* Common-mode = {vcm:.2f}V, diff AC=0.5")
-            lines.append(f"Vinp {inputs[0].id} 0 DC {vcm} AC 0.5")
-            lines.append(f"Vinn {inputs[1].id} 0 DC {vcm} AC -0.5")
+            if self._is_comparator():
+                diff = float(self._get_global_param("input_step", 10e-3) or 10e-3)
+                lines.append(f"* Common-mode = {vcm:.2f}V, differential input = {diff:.6g}V")
+                lines.append(f"Vinp {inputs[0].id} 0 DC {vcm + 0.5 * diff:.6g} AC 0.5")
+                lines.append(f"Vinn {inputs[1].id} 0 DC {vcm - 0.5 * diff:.6g} AC -0.5")
+            else:
+                lines.append(f"* Common-mode = {vcm:.2f}V, diff AC=0.5")
+                lines.append(f"Vinp {inputs[0].id} 0 DC {vcm} AC 0.5")
+                lines.append(f"Vinn {inputs[1].id} 0 DC {vcm} AC -0.5")
         elif len(inputs) == 1:
             lines.append(f"Vin {inputs[0].id} 0 DC {vcm} AC 1")
+        if self._is_comparator():
+            f_clk = float(self._get_global_param("f_clk", 100e6) or 100e6)
+            period = 1.0 / max(f_clk, 1.0)
+            tr = max(period * 0.01, 1e-12)
+            tf = tr
+            delay = period * 0.20
+            high_time = period * 0.45
+            gate_nets = {dev.connections.get("gate", "").lower() for dev in self.state.topology.devices}
+            if "clk" in gate_nets:
+                lines.append(f"Vclk clk 0 DC 0 PULSE(0 {vdd:.6g} {delay:.6g} {tr:.6g} {tf:.6g} {high_time:.6g} {period:.6g})")
+            if "clkb" in gate_nets:
+                lines.append(f"Vclkb clkb 0 DC {vdd:.6g} PULSE({vdd:.6g} 0 {delay:.6g} {tr:.6g} {tf:.6g} {high_time:.6g} {period:.6g})")
         lines.append("")
         return lines
 
     def _gen_load(self) -> List[str]:
-        cl = self.state.simulation.cload
+        cl = self._get_global_param("CL", self.state.simulation.cload) if self._is_comparator() else self.state.simulation.cload
         if cl and cl > 0:
             outs = [p for p in self.state.topology.ports if p.direction == "output"]
             if outs:
                 cl_ff = cl * 1e15
-                return ["* -- Load --", f"Cload {outs[0].id} 0 {cl_ff:.1f}f", ""]
+                lines = ["* -- Load --"]
+                if self._is_comparator():
+                    for idx, port in enumerate(outs):
+                        name = "Cload" if idx == 0 else f"Cload_{port.id}"
+                        lines.append(f"{name} {port.id} 0 {cl_ff:.1f}f")
+                else:
+                    lines.append(f"Cload {outs[0].id} 0 {cl_ff:.1f}f")
+                lines.append("")
+                return lines
         return []
 
     # Analyses
@@ -304,6 +335,18 @@ class NetlistGenerator:
         return lines
 
     def _needs_transient(self) -> bool:
+        if self._is_comparator():
+            comparator_tran_targets = {
+                "delay",
+                "decision_time",
+                "propagation_delay",
+                "regeneration_time",
+                "reset_time",
+                "energy",
+                "pdp",
+            }
+            if comparator_tran_targets & set(self.state.targets):
+                return True
         if any(str(name).lower() in {"tran", "transient"} for name in self.state.simulation.analyses):
             return True
         if any(name in self.state.targets for name in ("slew_rate", "slew_rate_pos", "slew_rate_neg")):
@@ -311,6 +354,13 @@ class NetlistGenerator:
         return any(ev.type in {"slew_rate", "slew_rate_pos", "slew_rate_neg"} for ev in self.state.evaluations)
 
     def _transient_timing(self) -> tuple[float, float, float]:
+        if self._is_comparator():
+            f_clk = float(self._get_global_param("f_clk", 100e6) or 100e6)
+            period = 1.0 / max(f_clk, 1.0)
+            tstop = 2.5 * period
+            tstep = max(period / 2000.0, 1.0e-12)
+            tmax = max(period / 4000.0, 1.0e-12)
+            return tstep, tstop, tmax
         gbw_target = None
         for key in ("unity_gain_bandwidth", "ugbw"):
             target = self.state.targets.get(key)
@@ -361,6 +411,10 @@ class NetlistGenerator:
                     lines.append(f".meas dc {ev.name} MAX par('{vdd}*abs(i(Vdd))')")
                 elif ev.type in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
                     lines.append(f"* .meas tran {ev.name}: computed from exported transient waveform in simulator")
+                elif ev.type in {"delay", "decision_time", "propagation_delay", "regeneration_time", "reset_time"}:
+                    lines.append(f"* .meas tran {ev.name}: computed from exported transient waveform in simulator")
+                elif ev.type in {"energy", "energy_per_comparison", "pdp", "edp"}:
+                    lines.append(f"* .meas tran {ev.name}: compact-model metric recorded by optimizer")
                 elif ev.type in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
                     lines.append(f"* .meas dc {ev.name}: computed from operating-point headroom in simulator")
                 elif ev.type == "cmrr":
@@ -382,6 +436,8 @@ class NetlistGenerator:
                 lines.append(f".meas ac pm find vp({out}) when vdb({out})=0")
             if any(name in targets for name in ("slew_rate", "slew_rate_pos", "slew_rate_neg")):
                 lines.append("* .meas tran slew_rate: computed from exported transient waveform in simulator")
+            if self._is_comparator() and any(name in targets for name in ("delay", "decision_time", "propagation_delay", "regeneration_time", "reset_time")):
+                lines.append("* .meas tran delay: computed from exported transient waveform in simulator")
             if any(name in targets for name in ("output_swing", "swing", "icmr", "icmr_min", "icmr_max")):
                 lines.append("* .meas dc headroom metrics: output_swing and ICMR computed in simulator")
             if "power" in targets:

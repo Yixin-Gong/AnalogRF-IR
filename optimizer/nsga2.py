@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple, Any
 import numpy as np
 
+from asir.profiles import select_circuit_profile
 from core.regions import compact_operating_region, inversion_region_from_gm_id, normalize_spice_region
 from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
@@ -59,6 +60,7 @@ class CircuitEvaluator:
     def __init__(self, schema: DesignState, pygmid_adapter=None):
         self.schema = schema
         self.pygmid = pygmid_adapter or create_pygmid_adapter()
+        self.profile = select_circuit_profile(schema)
         # Internal implementation note.
         self._var_map = {}
         self._build_var_map()
@@ -140,15 +142,19 @@ class CircuitEvaluator:
                 power_max = self.schema.targets["power"].max or 1e-3
             i_tail_est = power_max / (vdd - vss) / 3
         i_stage2_est = globals_decoded.get("I_stage2", globals_decoded.get("I_out", i_tail_est))
+        i_latch_est = globals_decoded.get("I_latch", i_tail_est / 2.0)
 
         has_tail_mirror = any(dev.role == "tail_bias_mirror" for dev in self.schema.topology.devices)
         has_output_mirror = any(dev.role == "output_bias_mirror" for dev in self.schema.topology.devices)
 
         def _role_current(role: str) -> float:
+            role_l = role.lower()
             if role in ("tail_current_source", "tail_bias_mirror"):
                 return i_tail_est
-            if role == "input_pair":
+            if role == "input_pair" or "input_pair" in role_l:
                 return i_tail_est / 2
+            if any(token in role_l for token in ("latch", "reset", "precharge", "equalize")):
+                return i_latch_est
             if "current_mirror" in role:
                 return i_tail_est / 2
             if role in ("second_stage_gain", "second_stage_load", "output_current_source", "output_bias_mirror"):
@@ -279,9 +285,14 @@ class CircuitEvaluator:
         tp: Dict[str, Dict[str, float]],
         global_vars: Optional[Dict[str, float]] = None,
     ) -> Dict[str, float]:
+        if self.profile.name == "comparator":
+            return self._estimate_comparator_performance(tp, global_vars or {})
         if self._is_two_stage():
             return self._estimate_two_stage_performance(tp, global_vars or {})
         return self._estimate_five_transistor_performance(tp)
+
+    def _is_comparator(self) -> bool:
+        return self.profile.name == "comparator"
 
     def _is_two_stage(self) -> bool:
         arch = (self.schema.topology.architecture or "").lower()
@@ -292,12 +303,192 @@ class CircuitEvaluator:
     def _global_value(self, name: str, default: float, global_vars: Dict[str, float]) -> float:
         if name in global_vars:
             return float(global_vars[name])
+        if name in (self.schema.global_parameters or {}):
+            return float(self.schema.global_parameters[name])
         for dv in self.schema.design_variables:
             if not dv.device and dv.variable == name:
                 if dv.initial is not None:
                     return float(dv.initial)
                 return 0.5 * (dv.range.min + dv.range.max)
         return default
+
+    def _estimate_comparator_performance(
+        self,
+        tp: Dict[str, Dict[str, float]],
+        global_vars: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Compact dynamic comparator model for sizing-space optimization."""
+        corr = self.schema.corrections
+        gm_corr = corr.gm_factor
+        gds_corr = corr.gds_factor
+        c_corr = corr.c_factor
+
+        def roles_with(*tokens: str) -> list[str]:
+            out = []
+            for dev in self.schema.topology.devices:
+                role = dev.role.lower()
+                if any(token in role for token in tokens):
+                    out.append(dev.id)
+            return out
+
+        input_ids = roles_with("input_pair")
+        latch_ids = roles_with("latch")
+        reset_ids = roles_with("reset", "precharge", "equalize")
+        tail_ids = roles_with("tail")
+        if len(input_ids) < 2 or not latch_ids:
+            return {
+                "delay": 0.0,
+                "regeneration_time": 0.0,
+                "offset": 1.0,
+                "noise": 1.0,
+                "energy": 0.0,
+                "power": 0.0,
+                "total_power": 0.0,
+            }
+
+        def avg_param(ids: list[str], key: str, default: float = 0.0) -> float:
+            vals = [tp.get(did, {}).get(key, default) for did in ids if tp.get(did, {}).get(key, default) > 0]
+            return sum(vals) / len(vals) if vals else default
+
+        def sum_param(ids: list[str], key: str) -> float:
+            return sum(tp.get(did, {}).get(key, 0.0) for did in ids)
+
+        def cap_sum(ids: list[str]) -> float:
+            return sum(
+                tp.get(did, {}).get("cgs", 0.0) + tp.get(did, {}).get("cgd", 0.0)
+                for did in ids
+            ) * c_corr
+
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        span = max(vdd - vss, 1e-9)
+        cl = self._global_value("CL", self.schema.simulation.cload or 50e-15, global_vars)
+        f_clk = self._global_value("f_clk", 100e6, global_vars)
+        input_step = self._global_value("input_step", 10e-3, global_vars)
+        sample_cap = self._global_value("C_sample", 30e-15, global_vars)
+        logic_swing = self._global_value("V_logic", span, global_vars)
+        mismatch_sigma = self._global_value("mismatch_sigma", 0.5e-3, global_vars)
+        offset_avt = self._global_value("offset_avt", 1.5e-3, global_vars)
+        kickback_coupling = self._global_value("kickback_coupling", 0.015, global_vars)
+        switching_activity = self._global_value("switching_activity", 1.0, global_vars)
+        eval_duty = min(max(self._global_value("eval_duty", 0.35, global_vars), 0.0), 1.0)
+
+        gm_input = avg_param(input_ids, "gm") * gm_corr
+        gm_latch = max(0.5 * sum_param(latch_ids, "gm") * gm_corr, 1e-12)
+        gm_reset = max(sum_param(reset_ids, "gm") * gm_corr, 1e-12)
+        gds_latch = max(sum_param(latch_ids, "gds") * gds_corr, 1e-15)
+        gm_regen = max(gm_latch - gds_latch, 0.2 * gm_latch, 1e-12)
+
+        c_input = max(cap_sum(input_ids), 1e-18)
+        c_latch = cap_sum(latch_ids)
+        c_reset = cap_sum(reset_ids)
+        c_tail = cap_sum(tail_ids)
+        c_internal = max(c_input + 0.5 * c_latch + 0.5 * c_tail, 1e-18)
+        c_out = max(cl + 0.25 * c_latch + 0.5 * c_reset, 1e-18)
+        c_total_switched = max(2.0 * c_out + c_internal + c_reset, 1e-18)
+
+        preamp_gain = max(gm_input / gm_regen, 0.05)
+        initial_delta_v = max(abs(input_step) * preamp_gain, 1e-6)
+        regen_ratio = max(logic_swing / max(initial_delta_v, 1e-9), 1.000001)
+        regeneration_time = c_out / gm_regen * math.log(regen_ratio)
+        amplification_time = c_internal / max(gm_input, 1e-12) * math.log(2.0)
+        reset_time = 3.0 * c_out / gm_reset
+        delay = amplification_time + regeneration_time
+        cycle_time = delay + reset_time
+
+        input_area_m2 = sum(
+            max(tp.get(did, {}).get("W", 0.0), 0.0) * max(tp.get(did, {}).get("L", 0.0), 0.0)
+            for did in input_ids
+        )
+        latch_area_m2 = sum(
+            max(tp.get(did, {}).get("W", 0.0), 0.0) * max(tp.get(did, {}).get("L", 0.0), 0.0)
+            for did in latch_ids
+        )
+        device_area = max(input_area_m2 + 0.5 * latch_area_m2, 1e-18)
+        device_area_um2 = max(device_area * 1e12, 1e-6)
+        offset_area = offset_avt / math.sqrt(device_area_um2)
+        input_referred_offset = math.sqrt(mismatch_sigma ** 2 + offset_area ** 2)
+
+        k_b = 1.380649e-23
+        temperature_k = 273.15 + self.schema.simulation.temperature
+        noise_cap = max(c_input + sample_cap, 1e-18)
+        input_referred_noise = math.sqrt(k_b * temperature_k / noise_cap)
+        cgd_input = max(sum_param(input_ids, "cgd") * c_corr, 0.0)
+        kickback_noise = kickback_coupling * logic_swing * cgd_input / max(c_input + sample_cap, 1e-18)
+        clock_feedthrough = 0.5 * kickback_noise
+
+        energy = switching_activity * c_total_switched * span * span
+        i_eval = max([tp.get(did, {}).get("id_effective", tp.get(did, {}).get("id", 0.0)) for did in tail_ids] or [0.0])
+        average_power = energy * max(f_clk, 0.0) + span * i_eval * eval_duty
+        pdp = energy * delay
+        edp = energy * delay * delay
+        max_sample_rate = 1.0 / max(cycle_time, 1e-15)
+
+        uncertainty = math.sqrt(input_referred_offset ** 2 + input_referred_noise ** 2)
+        metastability_margin = abs(input_step) / max(uncertainty, 1e-12)
+        decision_margin = abs(input_step) - uncertainty
+
+        input_ref = tp.get(input_ids[0], {})
+        tail_ref = tp.get(tail_ids[0], {}) if tail_ids else {}
+        vgs_in = abs(input_ref.get("vgs", 0.0))
+        vdsat_in = abs(input_ref.get("vdsat", 0.0))
+        vdsat_tail = abs(tail_ref.get("vdsat", 0.0))
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+        icmr_min = vss + vgs_in + factor * vdsat_tail
+        icmr_max = vdd - 0.5 * factor * vdsat_in
+        if icmr_max < icmr_min:
+            icmr_max = icmr_min
+        icmr = max(0.0, icmr_max - icmr_min)
+
+        area = sum(
+            max(p.get("W", 0.0), 0.0) * max(p.get("L", 0.0), 0.0)
+            for p in tp.values()
+        )
+        output_swing = max(logic_swing, 0.0)
+
+        return {
+            "delay": delay,
+            "decision_time": delay,
+            "propagation_delay": delay,
+            "cycle_time": cycle_time,
+            "amplification_time": amplification_time,
+            "regeneration_time": regeneration_time,
+            "reset_time": reset_time,
+            "offset": input_referred_offset,
+            "input_referred_offset": input_referred_offset,
+            "noise": input_referred_noise,
+            "input_referred_noise": input_referred_noise,
+            "kickback_noise": kickback_noise,
+            "kickback": kickback_noise,
+            "clock_feedthrough": clock_feedthrough,
+            "energy": energy,
+            "energy_per_comparison": energy,
+            "pdp": pdp,
+            "power_delay_product": pdp,
+            "edp": edp,
+            "power": average_power,
+            "average_power": average_power,
+            "total_power": average_power,
+            "input_capacitance": c_input,
+            "cin": c_input,
+            "output_swing": output_swing,
+            "logic_swing": output_swing,
+            "output_swing_low": vss,
+            "output_swing_high": vss + output_swing,
+            "icmr": icmr,
+            "input_common_mode_range": icmr,
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
+            "metastability_margin": metastability_margin,
+            "decision_margin": decision_margin,
+            "max_sample_rate": max_sample_rate,
+            "area": area,
+            "device_area": device_area,
+            "gm_input": gm_input,
+            "gm_latch": gm_latch,
+            "gm_reset": gm_reset,
+            "CL": cl,
+        }
 
     def _estimate_five_transistor_performance(self, tp: Dict[str, Dict[str, float]]) -> Dict[str, float]:
         """AnalogRF-IR internal documentation."""
@@ -648,6 +839,7 @@ class CircuitEvaluator:
             vds = p.get("vds", 0)
             vgs = p.get("vgs", 0)
             role = p.get("role", "")
+            role_l = role.lower()
             dev_type = p.get("type", "nmos")
 
             # Internal implementation note.
@@ -665,7 +857,13 @@ class CircuitEvaluator:
                 breakdown[f"soft:L_max_{did}"] = PENALTY_WARN * (L_val - proc.max_L)
 
             # Internal implementation note.
-            if role not in ("current_mirror_load", "tail_bias_mirror", "output_bias_mirror") and vds > 0 and "vdsat" in p:
+            switch_like = any(token in role_l for token in ("reset", "precharge", "equalize"))
+            if (
+                not switch_like
+                and role not in ("current_mirror_load", "tail_bias_mirror", "output_bias_mirror")
+                and vds > 0
+                and "vdsat" in p
+            ):
                 vdsat = p.get("vdsat", 0)
                 if vdsat > 0 and vds < vdsat * proc.VDSAT_headroom_factor:
                     shortage = vdsat * proc.VDSAT_headroom_factor - vds
@@ -922,7 +1120,7 @@ class NSGA2Optimizer:
             return self.rng.uniform(low, high)
         dv = self.schema.design_variables[index]
         wide = high / low >= 50.0
-        log_vars = {"I_tail", "I_stage2", "I_out", "Cc", "Rz"}
+        log_vars = {"I_tail", "I_stage2", "I_out", "I_latch", "Cc", "Rz", "CL", "f_clk", "C_sample"}
         if wide or dv.variable in log_vars:
             return float(math.exp(self.rng.uniform(math.log(low), math.log(high))))
         return self.rng.uniform(low, high)

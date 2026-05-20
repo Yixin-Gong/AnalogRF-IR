@@ -2,30 +2,25 @@
 
 Version: v0.1
 
-Schema-driven analog and RF circuit optimization with an intermediate representation, gm/ID sizing, physics-informed feasibility checks, and ngspice validation.
+AnalogRF-IR is a schema-driven analog and RF circuit optimization flow. It uses an intermediate representation (IR), ASIR semantic extraction, gm/ID sizing, physics-informed validation, NSGA-II optimization, and ngspice-backed measurements to iterate on analog circuit designs.
 
-AnalogRF-IR is a reusable Analog/RF IR and optimization flow that can ingest circuit schemas or SPICE netlists, diagnose feasibility, generate design candidates, and verify them with simulator-backed measurements.
+The project is intended for reusable circuit-family workflows: OTA, comparator, sample-and-hold, and future RF blocks should each select their own IR profile, rule checks, constraints, and objectives.
 
-## Current Status
+## Core Capabilities
 
-The project is an active research prototype. The strongest path today is the two-stage Miller OTA flow on IHP SG13G2 130 nm and PTM 130 nm style schemas. Comparator ASIR examples are available, and the frontend can also parse simple SPICE netlists into schema-like input.
-
-Current capabilities include:
-
-- Schema-first circuit description. The YAML schema is treated as the source of truth.
-- ASIR semantic representation for OTA and comparator topology reasoning.
+- YAML-first circuit descriptions with structured devices, variables, targets, and simulation requests.
+- ASIR semantic extraction for topology roles, symmetry groups, compensation networks, and dynamic comparator structure.
+- IR-level circuit profiles that select family-specific metrics, required context, rule checks, constraints, and auto-generated objectives.
 - gm/ID-based compact sizing and NSGA-II optimization.
-- IHP SG13G2 and PTM lookup-table support.
-- Physics-informed feasibility checking for two-stage Miller OTAs.
-- ngspice-backed AC, DC, transient slew-rate, and operating-point headroom validation.
-- Structured JSON outputs for agents and downstream tools.
-- OP-first post-processing for two-stage DC repair, Miller compensation tuning, and local current recovery.
+- Physics-informed validation for operating regions, bias feasibility, symmetry, compensation, and dynamic comparator context.
+- ngspice-backed AC, DC, transient, slew-rate, headroom, and operating-point checks.
+- Structured run artifacts for agents, scripts, and manual review.
 
 ## Repository Layout
 
 ```text
-asir/                 Semantic IR prototype and comparator examples
-core/                 Validation, design rules, regions, environment models
+asir/                 Semantic IR, profile selection, and extraction helpers
+core/                 Validation, design rules, regions, and environment models
 feasibility/          Physics-informed feasibility estimators
 flow/                 End-to-end orchestration
 frontends/            YAML and SPICE input frontends
@@ -45,87 +40,172 @@ docs/                 Development notes and method reports
 
 ## Requirements
 
-- Python 3.10+
-- NumPy
-- pytest for tests
+- Ubuntu Linux
+- Python 3.10 or newer
+- `python3-venv` and `pip`
+- NumPy and the Python packages listed in `requirements.txt`
+- pytest for regression tests
 - ngspice for simulator-backed validation
-- IHP SG13G2 PDK files if using `environment_ihp_sg13g2.yaml`
+- Process model files or lookup tables for the target technology
 
-The current development environment uses Ubuntu 26.04 under WSL with ngspice installed in the Linux environment.
-
-Recreate the Python environment and install dependencies:
+Install common Ubuntu packages:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip ngspice
+```
+
+Create a fresh Python environment:
+
+```bash
+cd <path/to/your/AnalogRF-IR>
 rm -rf .venv
 python3 -m venv .venv
 . .venv/bin/activate
+python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-For WSL-based runs from this workspace:
+## Inputs
+
+The main inputs are:
+
+- Environment YAML: technology, supply, simulator, model paths, and lookup-table configuration.
+- Circuit schema YAML: topology, devices, roles, design variables, targets, loss terms, and evaluation requests.
+- Optional SPICE netlist: imported before optimization when `--spice` is provided.
+
+Use explicit paths in production runs. Do not rely on CLI defaults:
 
 ```bash
-wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; rm -rf .venv; python3 -m venv .venv; . .venv/bin/activate; python3 -m pip install -r requirements.txt'
+--env <path/to/your/environment.yaml>
+--schema <path/to/your/circuit_schema.yaml>
+--spice <path/to/your/input_netlist.spice>
 ```
 
-## Quick Start
+## IR Profiles
 
-Run the PTM two-stage OTA flow:
+Circuit-family behavior is selected in the IR layer through `asir/profiles.py`.
+
+Each profile maps circuit class and architecture to:
+
+- Metric aliases and metric groups.
+- Required context parameters.
+- Dynamic-device role policy.
+- Static validation behavior.
+- Auto-generated objective terms.
+- Rule filters used by the validator.
+
+The validator, spec registry, optimizer, and netlist generator consume the selected profile instead of hard-coding OTA or comparator behavior locally. To add a new circuit family, define a profile first, then attach only the rules, constraints, objectives, estimators, and simulator measurements that belong to that profile.
+
+Example profile-driven behavior:
+
+- OTA profiles use static operating-region checks, symmetry checks, compensation objectives, and two-stage stability diagnostics.
+- Comparator profiles use dynamic-role checks, comparator metric coverage, clock/load context checks, and comparator-specific compact metrics.
+- Sample-and-hold profiles can add acquisition, hold, droop, charge-injection, and settling objectives without changing OTA or comparator code paths.
+
+## Running Optimization
+
+Run a two-stage OTA optimization:
 
 ```bash
-wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python main.py \
-  --env environment.yaml \
-  --schema ir/schema_two_stage.yaml \
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python main.py \
+  --env <path/to/your/environment.yaml> \
+  --schema <path/to/your/two_stage_ota.yaml> \
   --topology yaml \
-  --generations 16 \
-  --pop-size 32 \
-  --seed 11'
+  --generations <number_of_generations> \
+  --pop-size <population_size> \
+  --seed <integer_seed>
 ```
 
-Run a fast smoke test without post-processing:
+Run a dynamic comparator optimization:
 
 ```bash
-wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python main.py \
-  --env environment.yaml \
-  --schema ir/schema_two_stage.yaml \
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python main.py \
+  --env <path/to/your/environment.yaml> \
+  --schema <path/to/your/comparator.yaml> \
+  --topology yaml \
+  --generations <number_of_generations> \
+  --pop-size <population_size> \
+  --seed <integer_seed> \
+  --skip-dc-repair \
+  --skip-comp-tune
+```
+
+Run a fast smoke test:
+
+```bash
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python main.py \
+  --env <path/to/your/environment.yaml> \
+  --schema <path/to/your/circuit_schema.yaml> \
   --topology yaml \
   --generations 3 \
   --pop-size 10 \
-  --seed 31 \
+  --seed <integer_seed> \
   --skip-dc-repair \
-  --skip-comp-tune'
+  --skip-comp-tune
 ```
 
-Run the feasibility checker:
+Import a SPICE netlist and write the generated schema:
 
 ```bash
-wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python scripts/run_feasibility_check.py \
-  --env environment.yaml \
-  --schema ir/schema_two_stage.yaml \
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python main.py \
+  --env <path/to/your/environment.yaml> \
+  --spice <path/to/your/input_netlist.spice> \
+  --spice-yaml-out <path/to/your/generated_schema.yaml> \
+  --schema <path/to/your/generated_schema.yaml> \
+  --topology yaml
+```
+
+## Feasibility Check
+
+Run the physics-informed feasibility checker before a full optimization:
+
+```bash
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python scripts/run_feasibility_check.py \
+  --env <path/to/your/environment.yaml> \
+  --schema <path/to/your/circuit_schema.yaml> \
   --topology yaml \
-  --samples 300 \
-  --seed 41'
+  --samples <number_of_samples> \
+  --seed <integer_seed>
 ```
 
-Run the test suite:
+## Validation Semantics
 
-```bash
-wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python -m pytest -q'
+The flow validates the operating point before trusting higher-level metrics.
+
+For two-stage Miller OTAs:
+
+- Confirm bias and operating regions first.
+- Preserve device symmetry for matched pairs and mirror/reference groups.
+- Pull the dominant pole lower with `Cc` when diagnosing two-stage stability failures.
+- Place the compensation zero with `Rz ~= 1/gm2`, where `gm2` is the second-stage transconductance.
+- Use ngspice AC and operating-point measurements as the final authority after compact optimization.
+
+For dynamic comparators:
+
+- Check clock, load, input step, and dynamic role context.
+- Measure or estimate delay, regeneration time, reset time, offset, input-referred noise, kickback, energy, PDP/EDP, input capacitance, output swing, ICMR, metastability margin, maximum sample rate, area, and average dynamic power.
+- Treat compact estimates as optimizer guidance until dedicated transient, noise, and Monte Carlo testbenches are available.
+
+## Outputs
+
+Each run writes a new directory under:
+
+```text
+<path/to/your/AnalogRF-IR>/runs/iter_###/
 ```
 
-## Inputs And Outputs
-
-Input is primarily schema YAML. The schema describes:
-
-- topology and device roles
-- process/environment data
-- design variables such as `gm_id`, `L`, `I_tail`, `I_stage2`, `Cc`, and `Rz`
-- target specs
-- loss terms and evaluation requests
-
-For two-stage Miller OTAs, ASIR models the series `Rz` and `Cc` network explicitly. The zero-cancellation target is `Rz ~= 1/gm2`, where `gm2` is the second-stage transconductance. Stability diagnostics first pull the dominant pole lower with `Cc`, then verify second-pole separation and `Rz` placement.
-
-The flow writes one run directory under `runs/iter_###/`:
+Typical artifacts:
 
 ```text
 design_state.yaml          Updated schema and transistor state
@@ -135,65 +215,44 @@ agent_diagnostics.json     Agent-oriented diagnostics and suggestions
 result.json                Compact final status and measured specs
 ```
 
-## Development Progress
+## Tests
 
-Recent milestones:
+Run the regression suite:
 
-- Merged the ASIR-style semantic frontend into the schema-driven flow.
-- Added IHP SG13G2 support with lookup tables and subcircuit-style MOS netlisting.
-- Converted the two-stage OTA topology to explicit tail and output current mirrors.
-- Added slew-rate estimation and transient ngspice validation.
-- Added output swing and input common-mode range estimates and ngspice headroom extraction.
-- Added a physics-informed feasibility checker for two-stage Miller OTAs.
-- Reworked two-stage compensation tuning with candidate budgets, per-candidate timeouts, stability rescue points, current recovery, and robust early-stop behavior.
-- Added OTA ASIR primitives for input pair, mirror load, tail bias, second-stage inverter, and Miller compensation.
-- Added explicit symmetry-label validation for mirror/reference device pairs.
-
-Recent PTM two-stage OTA validation after OP-first repair and robust compensation tuning:
-
-```text
-runs/iter_003/
-  dc_gain_db:             79.47 dB
-  unity_gain_bandwidth:   101.90 MHz
-  phase_margin:           48.35 deg
-  slew_rate:              81.44 V/us
-  output_swing:           0.822 V
-  ICMR:                   0.598 V to 1.315 V
-  total_power:            190.6 uW
-  Cc:                     510.8 fF
-  Rz:                     4.298 kohm
+```bash
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python -m pytest -q
 ```
 
-This point passes gain, unity-gain bandwidth, phase margin, slew rate, output swing, ICMR, and power targets. The final ngspice operating point keeps all nine MOS devices in saturation. Width/length symmetry is preserved for `M1/M2`, `M3/M4`, `M5/M8`, and `M7/M9`; mirror copy/reference devices can still show gm and VDS differences because they sit at different operating voltages.
+Run a syntax check over the main packages:
+
+```bash
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python -m compileall asir core flow frontends netlist optimizer specs tests
+```
+
+## Extending The Flow
+
+Recommended order for adding a new circuit type:
+
+1. Add or update an IR profile in `asir/profiles.py`.
+2. Add schema examples with clear device roles, symmetry labels, variables, targets, and evaluations.
+3. Register profile-specific rules with `circuit_profiles=(...)`.
+4. Add compact estimator support in the optimizer only for metrics that have defensible analytical models.
+5. Add simulator measurements for final validation.
+6. Add tests that prove the selected profile triggers the expected rules, constraints, and objectives.
+
+Keep profile-specific behavior behind the IR profile boundary. Generic validation should stay generic; OTA, comparator, sample-and-hold, and RF-specific behavior should be activated by the selected profile.
 
 ## Known Limitations
 
-- The compact optimizer can still overestimate speed for some two-stage OTA points, so ngspice remains the final authority.
-- PM is now verified from exported ngspice AC sweep data, but loop-gain return-ratio validation is not yet fully integrated.
-- Output swing and ICMR are currently operating-point headroom estimates, not full DC sweep signoff.
-- Two-stage post-processing can repair bias and compensation locally, but very poor compact-model choices may still need a larger optimizer run.
-- The ASIR comparator path is semantic and structural; comparator sizing objectives are not yet connected to the full optimizer loop.
-- RF-specific blocks are not yet modeled. RF extensions should add noise figure, S-parameters, impedance matching, linearity, stability factor, and PSS/PAC-style workflows where supported.
-
-## Roadmap
-
-Near-term:
-
-- Strengthen the two-stage optimizer around `I_stage2`, `gm2`, compensation capacitance, PM, UGBW, and slew-rate lower bounds.
-- Add stricter swing and ICMR sweep testbenches.
-- Add Middlebrook loop-gain validation for compensated OTAs.
-- Improve schema diagnostics so feasibility failures directly suggest minimal spec relaxations.
-
-Longer-term:
-
-- Add RF building blocks such as LNAs, mixers, VCOs, RF amplifiers, matching networks, and filters.
-- Extend the schema and ASIR layers with RF-specific specs and constraints.
-- Add S-parameter, noise, linearity, compression, and stability metrics.
-- Make optimizer, simulator, feasibility, and post-processing plugins independently swappable.
-- Build a reusable analog/RF design-agent backend around structured JSON diagnostics.
+- Compact estimates are optimizer guidance, not signoff.
+- Output swing and ICMR are currently operating-point headroom estimates unless explicit sweeps are added.
+- Comparator offset, noise, kickback, energy, and metastability need dedicated transient, noise, or Monte Carlo testbenches for signoff-grade validation.
+- RF-specific blocks still require profile, schema, estimator, and simulator extensions for S-parameters, noise figure, matching, compression, linearity, and stability metrics.
 
 ## Project Vision
 
-AnalogRF-IR aims to become a bridge between human-readable circuit intent and simulator-backed analog/RF design automation. The goal is not to replace expert circuit design judgment. The goal is to encode enough topology, physics, feasibility reasoning, and measurement structure that an engineer or agent can iterate faster, diagnose failures more clearly, and reuse optimization logic across circuit families.
-
-The long-term target is a flow where designers edit a schema or provide a SPICE netlist, the system builds a semantic representation, estimates feasibility, proposes initial values, optimizes in a high-level design-variable space, validates with ngspice or other simulators, and writes structured artifacts that can be inspected by both humans and agents.
+AnalogRF-IR aims to bridge human-readable circuit intent and simulator-backed analog/RF design automation. The goal is to encode enough topology, physics, feasibility reasoning, and measurement structure that an engineer or agent can iterate faster, diagnose failures more clearly, and reuse optimization logic across circuit families.

@@ -257,6 +257,8 @@ class NgspiceSimulator:
         return "vout"
 
     def _inject_slew_stimulus(self, netlist: str) -> str:
+        if "comparator" in netlist.lower() or re.search(r"^\s*Vclk\s+", netlist, flags=re.IGNORECASE | re.MULTILINE):
+            return netlist
         lines = netlist.splitlines()
         tstop = self._tran_stop_time(netlist)
         vdd = self._infer_vdd(netlist)
@@ -317,6 +319,11 @@ class NgspiceSimulator:
 
     def _add_tran_curve_export(self, netlist: str, probe: str) -> str:
         lines = netlist.splitlines()
+        probes = [probe]
+        if "comparator" in netlist.lower() or re.search(r"^\s*Vclk\s+", netlist, flags=re.IGNORECASE | re.MULTILINE):
+            load_nodes = re.findall(r"^\s*Cload(?:_\S+)?\s+(\S+)\s+0\s+", netlist, flags=re.IGNORECASE | re.MULTILINE)
+            probes = list(dict.fromkeys(load_nodes or [probe]))
+        probe_expr = " ".join(f"v({item})" for item in probes)
         control = [
             "",
             ".control",
@@ -324,7 +331,7 @@ class NgspiceSimulator:
             "  set wr_singlescale",
             "  set wr_vecnames",
             "  run",
-            f"  wrdata tran_sweep.dat v({probe})",
+            f"  wrdata tran_sweep.dat {probe_expr}",
             ".endc",
         ]
         for idx in range(len(lines) - 1, -1, -1):
@@ -462,7 +469,7 @@ class NgspiceSimulator:
                 if k.startswith("slew_rate") or k.startswith("tran_")
             }
             tran_path = Path(os.path.dirname(cir_path)) / "tran_sweep.dat"
-            result.measurements.update(self._extract_tran_curve_performance(tran_path))
+            result.measurements.update(self._extract_tran_curve_performance(tran_path, netlist))
 
         # Internal implementation note.
         if suffix == "dc":
@@ -671,7 +678,7 @@ class NgspiceSimulator:
             crossings.append((freq, phase))
         return crossings
 
-    def _extract_tran_curve_performance(self, path: Path) -> Dict[str, float]:
+    def _extract_tran_curve_performance(self, path: Path, netlist: str = "") -> Dict[str, float]:
         rows = self._read_numeric_table(path)
         if len(rows) < 4:
             return {}
@@ -721,7 +728,7 @@ class NgspiceSimulator:
                 pos = slope
             if -slope > neg:
                 neg = -slope
-        return {
+        metrics = {
             "slew_rate": min(pos, neg),
             "slew_rate_pos": pos,
             "slew_rate_neg": neg,
@@ -730,6 +737,73 @@ class NgspiceSimulator:
             "tran_t_start": times[0],
             "tran_t_stop": times[-1],
         }
+        comparator_like = "comparator" in netlist.lower() or re.search(
+            r"^\s*Vclk\s+", netlist, flags=re.IGNORECASE | re.MULTILINE
+        )
+        if comparator_like:
+            delay_metrics = self._extract_comparator_timing(times, volts, netlist)
+            metrics.update(delay_metrics)
+        return metrics
+
+    def _extract_comparator_timing(
+        self,
+        times: List[float],
+        volts: List[float],
+        netlist: str,
+    ) -> Dict[str, float]:
+        span = max(volts) - min(volts)
+        required_span = 0.25 * max(self._infer_vdd(netlist), 1e-9)
+        if span <= max(required_span, 1e-6):
+            return {}
+        v0 = volts[0]
+        vf = volts[-1]
+        rising = vf >= v0
+        v_min = min(volts)
+        v_max = max(volts)
+        mid = v_min + 0.5 * span
+        lo = v_min + 0.1 * span
+        hi = v_min + 0.9 * span
+
+        def crossing(threshold: float) -> Optional[float]:
+            for idx in range(1, len(times)):
+                a = volts[idx - 1]
+                b = volts[idx]
+                if rising:
+                    hit = a <= threshold <= b
+                else:
+                    hit = a >= threshold >= b
+                if not hit or a == b:
+                    continue
+                frac = (threshold - a) / (b - a)
+                return times[idx - 1] + frac * (times[idx] - times[idx - 1])
+            return None
+
+        t_mid = crossing(mid)
+        if t_mid is None:
+            return {}
+        reference = self._infer_clock_edge(netlist)
+        out: Dict[str, float] = {"delay": max(t_mid - reference, 0.0)}
+        t_lo = crossing(lo)
+        t_hi = crossing(hi)
+        if t_lo is not None and t_hi is not None:
+            out["regeneration_time"] = abs(t_hi - t_lo)
+        return out
+
+    def _infer_clock_edge(self, netlist: str) -> float:
+        m = re.search(
+            r"^\s*Vclk\s+\S+\s+\S+\s+(?:DC\s+\S+\s+)?PULSE\(([^)]*)\)",
+            netlist,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if not m:
+            return 0.0
+        parts = m.group(1).replace(",", " ").split()
+        if len(parts) < 3:
+            return 0.0
+        try:
+            return self._spice_number(parts[2])
+        except ValueError:
+            return 0.0
 
     def _select_tran_columns(self, rows: List[List[float]]) -> Optional[Tuple[int, int]]:
         width = min(len(row) for row in rows)

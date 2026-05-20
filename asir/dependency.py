@@ -153,6 +153,7 @@ def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> Depe
     input_refs = [p.id for p in semantics.by_type("differential_pair")]
     reset_refs = [p.id for p in semantics.by_type("reset_switch")]
     sampling_refs = [p.id for p in semantics.by_type("sampling_switch")]
+    tail_refs = [p.id for p in semantics.by_type("tail_current_source")]
 
     graph.add_dependency(
         "regeneration_time",
@@ -178,8 +179,8 @@ def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> Depe
         primitive_refs=reset_refs,
         constraints=["reset phase must be long enough for output common-mode recovery"],
     )
-    delay_inputs = ["reset_time", "amplification_time", "regeneration_time"]
-    delay_expression = "reset_time + amplification_time + regeneration_time"
+    delay_inputs = ["amplification_time", "regeneration_time"]
+    delay_expression = "amplification_time + regeneration_time"
     if sampling_refs:
         graph.add_dependency(
             "sampling_time",
@@ -189,15 +190,23 @@ def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> Depe
             primitive_refs=sampling_refs,
             constraints=["sampling switch on-resistance must settle within sample phase"],
         )
-        delay_inputs.insert(1, "sampling_time")
-        delay_expression = "reset_time + sampling_time + amplification_time + regeneration_time"
+        delay_inputs.insert(0, "sampling_time")
+        delay_expression = "sampling_time + amplification_time + regeneration_time"
     graph.add_dependency(
         "delay",
         delay_inputs,
         delay_expression,
-        "Comparator decision latency is the active path through reset, amplify, and regeneration.",
+        "Comparator decision latency is the active path from sampling or amplification through regeneration.",
         primitive_refs=primitive_refs,
         constraints=["phase ordering reset -> amplify -> regenerate must be preserved"],
+    )
+    graph.add_dependency(
+        "cycle_time",
+        ["reset_time", "delay"],
+        "reset_time + delay",
+        "Full comparator cycle time includes reset recovery plus active decision latency.",
+        primitive_refs=primitive_refs,
+        constraints=["reset recovery must complete before the next comparison"],
     )
     graph.add_dependency(
         "offset",
@@ -216,12 +225,102 @@ def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> Depe
         constraints=["larger sampling capacitance reduces kT/C noise but increases delay"],
     )
     graph.add_dependency(
+        "input_capacitance",
+        ["Cgs_input", "Cgd_input", "Csample"],
+        "Cgs_input + Cgd_input + Csample",
+        "Input capacitance combines input-pair gate capacitance, Miller feedthrough capacitance, and sampling capacitance.",
+        primitive_refs=input_refs + sampling_refs,
+        constraints=["input loading trades off against kickback and noise"],
+    )
+    graph.add_dependency(
+        "kickback_noise",
+        ["Cgd_input", "input_capacitance", "Vclock_swing", "kickback_coupling"],
+        "kickback_coupling * Vclock_swing * Cgd_input / max(input_capacitance, 1e-30)",
+        "Kickback is modeled as clock/regeneration charge feedthrough reflected to the input.",
+        primitive_refs=input_refs + latch_refs,
+        constraints=["reduce input Cgd or add input isolation when kickback exceeds the front-end budget"],
+    )
+    graph.add_dependency(
+        "clock_feedthrough",
+        ["kickback_noise"],
+        "0.5 * kickback_noise",
+        "Clock feedthrough is tracked separately as the common-mode portion of kickback.",
+        primitive_refs=input_refs + latch_refs + reset_refs,
+        constraints=["clock feedthrough should remain below the receiver input disturbance budget"],
+    )
+    graph.add_dependency(
         "energy",
         ["CL", "VDD", "switching_activity"],
         "CL * VDD * VDD * switching_activity",
         "Dynamic comparator energy is dominated by charging and discharging capacitive nodes.",
         primitive_refs=primitive_refs,
         constraints=["lower CL improves energy and regeneration time together"],
+    )
+    graph.add_dependency(
+        "energy_per_comparison",
+        ["energy"],
+        "energy",
+        "Comparator energy is reported per comparison for clocked operation.",
+        primitive_refs=primitive_refs,
+    )
+    graph.add_dependency(
+        "pdp",
+        ["energy", "delay"],
+        "energy * delay",
+        "Power-delay product captures the energy and latency trade-off.",
+        primitive_refs=primitive_refs,
+    )
+    graph.add_dependency(
+        "edp",
+        ["energy", "delay"],
+        "energy * delay * delay",
+        "Energy-delay-squared emphasizes very slow low-energy points.",
+        primitive_refs=primitive_refs,
+    )
+    graph.add_dependency(
+        "max_sample_rate",
+        ["cycle_time"],
+        "1 / max(cycle_time, 1e-30)",
+        "Maximum sample rate is bounded by reset plus active decision time.",
+        primitive_refs=primitive_refs,
+    )
+    graph.add_dependency(
+        "metastability_margin",
+        ["input_step", "offset", "noise"],
+        "input_step / max(sqrt(offset * offset + noise * noise), 1e-30)",
+        "Metastability margin compares available input step to offset and noise uncertainty.",
+        primitive_refs=input_refs + latch_refs,
+        constraints=["increase input-referred decision margin for low-error operation"],
+    )
+    graph.add_dependency(
+        "decision_margin",
+        ["input_step", "offset", "noise"],
+        "input_step - sqrt(offset * offset + noise * noise)",
+        "Positive decision margin means the input step exceeds modeled uncertainty.",
+        primitive_refs=input_refs + latch_refs,
+    )
+    graph.add_dependency(
+        "output_swing",
+        ["VDD", "VSS"],
+        "VDD - VSS",
+        "Regenerative latch outputs should resolve close to the available logic swing.",
+        primitive_refs=latch_refs + reset_refs,
+        constraints=["output swing must meet the downstream digital threshold budget"],
+    )
+    graph.add_dependency(
+        "icmr",
+        ["icmr_min", "icmr_max"],
+        "max(icmr_max - icmr_min, 0.0)",
+        "Input common-mode range is the valid interval for the input pair and tail stack.",
+        primitive_refs=input_refs + tail_refs,
+        constraints=["common-mode target must fit the input pair and tail headroom"],
+    )
+    graph.add_dependency(
+        "area",
+        ["device_area"],
+        "device_area",
+        "Total active device area is tracked as a layout and mismatch proxy.",
+        primitive_refs=primitive_refs,
     )
     return graph
 
