@@ -38,7 +38,7 @@ def load_state(env: dict, schema_path: Path, topology: str):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run physics-informed feasibility check")
     parser.add_argument("--env", default="environment.yaml")
-    parser.add_argument("--schema", default="ir/schema_two_stage.yaml")
+    parser.add_argument("--schema", default="inputs/ota/two_stage_miller/two_stage_miller_ota.yaml")
     parser.add_argument("--topology", choices=("auto", "five", "two_stage", "yaml"), default="auto")
     parser.add_argument("--samples", type=int, default=6000)
     parser.add_argument("--seed", type=int, default=19)

@@ -1,0 +1,105 @@
+schema_version: '0.1'
+design_name: two_stage_miller_ota
+
+topology:
+  name: two_stage_miller_ota
+  class: ota
+  architecture: two-stage
+  biasing:
+    tail: current_mirror
+    stage2: current_mirror
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: gnd, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: vout, direction: output}
+    - {id: vbias_tail, direction: bias}
+    - {id: vbias_stage2, direction: bias}
+  devices:
+    - {id: M1, role: input_pair,          stage: input,  type: nmos, connections: {drain: net1, gate: vinn,        source: tail, body: gnd}}
+    - {id: M2, role: input_pair,          stage: input,  type: nmos, connections: {drain: n1,   gate: vinp,        source: tail, body: gnd}}
+    - {id: M3, role: current_mirror_load, stage: load,   type: pmos, connections: {drain: net1, gate: net1,        source: vdd,  body: vdd}}
+    - {id: M4, role: current_mirror_load, stage: load,   type: pmos, connections: {drain: n1,   gate: net1,        source: vdd,  body: vdd}}
+    - {id: M5, role: tail_current_source, stage: bias,   type: nmos, connections: {drain: tail, gate: vbias_tail,  source: gnd,  body: gnd}}
+    - {id: M8, role: tail_bias_mirror,    stage: bias,   type: nmos, connections: {drain: vbias_tail, gate: vbias_tail, source: gnd, body: gnd}}
+    - {id: M6, role: second_stage_gain,   stage: output, type: pmos, connections: {drain: vout, gate: n1,          source: vdd,  body: vdd}}
+    - {id: M7, role: output_current_source, stage: output, type: nmos, connections: {drain: vout, gate: vbias_stage2, source: gnd, body: gnd}}
+    - {id: M9, role: output_bias_mirror,  stage: bias,   type: nmos, connections: {drain: vbias_stage2, gate: vbias_stage2, source: gnd, body: gnd}}
+
+targets:
+  dc_gain:              {min: 50, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
+  phase_margin:         {min: 45, unit: deg, priority: 1}
+  slew_rate:            {min: 5.0e+07, unit: V/s, priority: 1}
+  output_swing:         {min: 5.0e-01, unit: V, priority: 1}
+  icmr_min:             {max: 9.0e-01, unit: V, priority: 1}
+  icmr_max:             {min: 6.0e-01, unit: V, priority: 1}
+  power:                {max: 5.0e-04, unit: W, priority: 2}
+
+design_variables:
+  - {device: M1, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_M1_M2}
+  - {device: M1, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M3, variable: gm_id, range: {min: 5, max: 12}, initial: 7, symmetry_label: sym_load_M3_M4}
+  - {device: M3, variable: L,     range: {min: 3.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: gm_id, range: {min: 5, max: 12}, initial: 7, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: L,     range: {min: 3.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M5, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_tail_M5_M8}
+  - {device: M5, variable: L,     range: {min: 2.0e-07, max: 1.5e-06}, initial: 5.0e-07, symmetry_label: sym_tail_M5_M8}
+  - {device: M8, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_tail_M5_M8}
+  - {device: M8, variable: L,     range: {min: 2.0e-07, max: 1.5e-06}, initial: 5.0e-07, symmetry_label: sym_tail_M5_M8}
+  - {device: M6, variable: gm_id, range: {min: 6, max: 18}, initial: 10}
+  - {device: M6, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 8.0e-07}
+  - {device: M7, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_outbias_M7_M9}
+  - {device: M7, variable: L,     range: {min: 6.0e-07, max: 1.5e-06}, initial: 8.0e-07, symmetry_label: sym_outbias_M7_M9}
+  - {device: M9, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_outbias_M7_M9}
+  - {device: M9, variable: L,     range: {min: 6.0e-07, max: 1.5e-06}, initial: 8.0e-07, symmetry_label: sym_outbias_M7_M9}
+  - {device: "", variable: I_tail,   range: {min: 5.0e-06, max: 8.0e-05}, initial: 2.0e-05, unit: A}
+  - {device: "", variable: I_stage2, range: {min: 1.0e-05, max: 2.5e-04}, initial: 8.0e-05, unit: A}
+  - {device: "", variable: Cc,       range: {min: 1.0e-13, max: 2.5e-12}, initial: 4.0e-13, unit: F}
+  - {device: "", variable: Rz,       range: {min: 1.0e+02, max: 2.0e+04}, initial: 1.0e+03, unit: ohm}
+
+corrections:
+  gm_factor: 0.85
+  gds_factor: 1.0
+  c_factor: 1.15
+  description: "Conservative two-stage estimator; ngspice remains final authority"
+
+constraints:
+  gm_id: {min: 5, max: 25}
+  L: {min: 1.3e-07, max: 2.0e-06}
+  devices:
+    M1: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
+    M2: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
+    M3: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 2.0e-06}}
+    M4: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 2.0e-06}}
+    M5: {gm_id: {min: 6, max: 14},  L: {min: 2.0e-07, max: 1.5e-06}}
+    M8: {gm_id: {min: 6, max: 14},  L: {min: 2.0e-07, max: 1.5e-06}}
+    M6: {gm_id: {min: 6, max: 18},  L: {min: 5.0e-07, max: 2.0e-06}}
+    M7: {gm_id: {min: 6, max: 14},  L: {min: 6.0e-07, max: 1.5e-06}}
+    M9: {gm_id: {min: 6, max: 14},  L: {min: 6.0e-07, max: 1.5e-06}}
+
+loss_terms:
+  - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 60.0}
+  - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 90.0}
+  - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 12.0}
+  - {id: sr_deficit,   formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 8.0}
+  - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 5.0}
+  - {id: icmr_min_excess, formula: "relu(realized.icmr_min - targets.icmr_min.max)/max(targets.icmr_min.max, 1)", weight: 3.0}
+  - {id: icmr_max_deficit, formula: "relu(targets.icmr_max.min - realized.icmr_max)/max(targets.icmr_max.min, 1)", weight: 3.0}
+  - {id: power_ratio,  formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.2}
+  - {id: stage2_balance, formula: "relu(0.85 - realized.stage2_balance_factor)/0.85", weight: 80.0}
+  - {id: zero_alignment, formula: "abs(realized.Rz - realized.zero_target_rz)/max(realized.zero_target_rz, 1)", weight: 0.08}
+
+evaluations:
+  - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}
+  - {name: unity_gain_bandwidth, type: ugbw, probe: vout, target_ref: unity_gain_bandwidth}
+  - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
+  - {name: slew_rate, type: slew_rate, probe: vout, target_ref: slew_rate}
+  - {name: output_swing, type: output_swing, probe: vout, target_ref: output_swing}
+  - {name: icmr_min, type: icmr_min, probe: vout, target_ref: icmr_min}
+  - {name: icmr_max, type: icmr_max, probe: vout, target_ref: icmr_max}
+  - {name: total_power, type: dc_power, target_ref: power}

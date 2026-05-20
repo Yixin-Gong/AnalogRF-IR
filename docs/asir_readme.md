@@ -48,19 +48,19 @@ python main.py all --out exports
 Compile an AnalogRF-IR YAML input and embed the layered ASIR output back into the YAML document:
 
 ```powershell
-python main.py from-yaml inputs/strongarm_v1.yaml --out exports/strongarm_v1_asir.yaml --summary
+python main.py from-yaml inputs/comparator/strongarm/strongarm_v1.yaml --out exports/strongarm_v1_asir.yaml --summary
 ```
 
 Write only the ASIR bundle:
 
 ```powershell
-python main.py from-yaml inputs/strongarm_v1.yaml --out exports/strongarm_asir_only.yaml --asir-only
+python main.py from-yaml inputs/comparator/strongarm/strongarm_v1.yaml --out exports/strongarm_asir_only.yaml --asir-only
 ```
 
 Embed `asir_output` directly back into the input YAML:
 
 ```powershell
-python main.py from-yaml inputs/strongarm_v1.yaml --in-place
+python main.py from-yaml inputs/comparator/strongarm/strongarm_v1.yaml --in-place
 ```
 
 Trace symbolic causes of delay:

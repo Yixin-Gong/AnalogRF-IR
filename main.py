@@ -11,7 +11,7 @@ from topologies.legacy import build_design_state
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="AnalogRF-IR v0.1 modular analog/RF optimizer")
     parser.add_argument("--env", default="environment.yaml", help="Environment YAML path")
-    parser.add_argument("--schema", default="ir/schema.yaml", help="Schema YAML path")
+    parser.add_argument("--schema", default="inputs/ota/five_transistor/five_transistor_ota.yaml", help="Schema YAML path")
     parser.add_argument("--spice", default="", help="Optional SPICE netlist to import before optimization")
     parser.add_argument("--spice-yaml-out", default="", help="YAML path generated from --spice")
     parser.add_argument("--topology", choices=("auto", "five", "two_stage", "yaml"), default="auto")

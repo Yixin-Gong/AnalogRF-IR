@@ -246,7 +246,7 @@ def plot_front(out_dir: Path, est_rows: List[Dict[str, Any]], meas_rows: List[Di
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run spec-level Pareto search")
     parser.add_argument("--env", default="environment.yaml")
-    parser.add_argument("--schema", default="ir/schema_two_stage.yaml")
+    parser.add_argument("--schema", default="inputs/ota/two_stage_miller/two_stage_miller_ota.yaml")
     parser.add_argument("--topology", choices=("auto", "five", "two_stage"), default="auto")
     parser.add_argument("--pop-size", type=int, default=180)
     parser.add_argument("--generations", type=int, default=80)

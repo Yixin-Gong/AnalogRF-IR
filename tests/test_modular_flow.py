@@ -36,7 +36,7 @@ def test_design_input_accepts_spice_and_writes_schema(tmp_path):
 
     bundle = load_design_input(
         env=default_environment(),
-        schema_path="ir/schema.yaml",
+        schema_path="inputs/ota/five_transistor/five_transistor_ota.yaml",
         spice_path=spice,
         spice_yaml_out=out,
     )
@@ -49,8 +49,8 @@ def test_design_input_accepts_spice_and_writes_schema(tmp_path):
 
 def test_spec_registry_selects_ota_and_comparator():
     registry = SpecRegistry()
-    ota = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
-    comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+    ota = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/comparator/strongarm/strongarm_v1.yaml"), default_environment())
 
     assert registry.select(ota).name == "ota"
     assert registry.select(comparator).name == "comparator"
@@ -65,8 +65,8 @@ def test_spec_registry_selects_ota_and_comparator():
 
 
 def test_ir_profile_drives_objectives_and_rule_filtering():
-    ota = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
-    comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+    ota = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/comparator/strongarm/strongarm_v1.yaml"), default_environment())
 
     ota_profile = select_circuit_profile(ota)
     comparator_profile = select_circuit_profile(comparator)
@@ -82,7 +82,7 @@ def test_ir_profile_drives_objectives_and_rule_filtering():
 
 
 def test_artifact_writer_emits_result_json(tmp_path):
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     result = SimulationResult(
         success=True,
         return_code=0,
@@ -128,7 +128,7 @@ def test_artifact_writer_emits_result_json(tmp_path):
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     apply_optimizer_meta_to_state(
         state,
         {
@@ -152,7 +152,7 @@ def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
 
 
 def test_validation_checks_explicit_cross_role_symmetry_labels():
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     state.transistors["M5"].parameters.W = 1.0e-6
     state.transistors["M8"].parameters.W = 2.0e-6
 
@@ -163,7 +163,7 @@ def test_validation_checks_explicit_cross_role_symmetry_labels():
 
 
 def test_optimizer_and_netlist_include_slew_rate():
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     evaluator = CircuitEvaluator(state, create_pygmid_adapter())
     x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
 
@@ -183,7 +183,7 @@ def test_optimizer_and_netlist_include_slew_rate():
 
 
 def test_comparator_estimator_reports_extended_metrics():
-    state = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/comparator/strongarm/strongarm_v1.yaml"), default_environment())
     evaluator = CircuitEvaluator(state, create_pygmid_adapter())
     x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
 
@@ -218,7 +218,7 @@ def test_comparator_estimator_reports_extended_metrics():
 
 
 def test_comparator_validator_accepts_metric_context_and_symmetry_labels():
-    state = build_design_state_from_yaml(load_yaml_mapping("inputs/strongarm_v1.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/comparator/strongarm/strongarm_v1.yaml"), default_environment())
 
     report = Validator().validate(state, layers=[3, 4])
     messages = [item.message for item in report.warnings()]
@@ -304,7 +304,7 @@ def test_compensation_tune_stops_after_passing_candidate(tmp_path):
                 },
             )
 
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     sim = PassingSimulator()
 
     result = tune_two_stage_compensation(
@@ -353,7 +353,7 @@ def test_compensation_tune_rejects_negative_phase_margin(tmp_path):
                 }
             return SimulationResult(success=True, return_code=0, measurements=measurements)
 
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     sim = SequenceSimulator()
 
     result = tune_two_stage_compensation(
@@ -372,7 +372,7 @@ def test_compensation_tune_rejects_negative_phase_margin(tmp_path):
 
 
 def test_two_stage_feasibility_report_has_required_sections(tmp_path):
-    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     checker = TwoStageMillerFeasibilityChecker(
         state,
         create_pygmid_adapter(),

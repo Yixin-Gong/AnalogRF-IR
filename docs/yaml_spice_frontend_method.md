@@ -83,7 +83,7 @@ flowchart TD
 Run from hand-edited YAML:
 
 ```bash
-python3 main.py --schema ir/schema_two_stage.yaml --topology yaml --generations 60 --pop-size 120 --seed 23
+python3 main.py --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml --topology yaml --generations 60 --pop-size 120 --seed 23
 ```
 
 Convert SPICE to YAML:
@@ -101,7 +101,7 @@ python3 main.py --spice runs/iter_024/netlist.cir --spice-yaml-out runs/tmp_spic
 Compile ASIR semantics from YAML:
 
 ```bash
-python3 -m asir from-yaml inputs/strongarm_v1.yaml --out runs/tmp_asir_smoke/strongarm_asir.yaml --summary
+python3 -m asir from-yaml inputs/comparator/strongarm/strongarm_v1.yaml --out runs/tmp_asir_smoke/strongarm_asir.yaml --summary
 ```
 
 ## Verification

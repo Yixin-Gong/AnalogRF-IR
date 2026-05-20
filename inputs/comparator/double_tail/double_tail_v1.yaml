@@ -1,0 +1,48 @@
+schema_version: '0.1'
+design_name: double_tail_comparator
+topology:
+  name: double_tail_comparator
+  class: comparator
+  architecture: double-tail
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: vss, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: outp, direction: output}
+    - {id: outn, direction: output}
+  nets:
+    clk: clock
+    clkb: clock
+    tail_input: dynamic_internal
+    tail_latch: dynamic_internal
+    fp: dynamic_internal
+    fn: dynamic_internal
+  clocks:
+    CLK: {drives: clk, phases: [amplify, regenerate]}
+    CLKB: {drives: clkb, phases: [reset]}
+  devices:
+    - {id: M_INP, role: input_pair_left, stage: input, type: nmos, connections: {drain: fp, gate: vinp, source: tail_input, body: vss}}
+    - {id: M_INN, role: input_pair_right, stage: input, type: nmos, connections: {drain: fn, gate: vinn, source: tail_input, body: vss}}
+    - {id: M_TAIL_IN, role: tail_current_source_input_stage, stage: input, type: nmos, connections: {drain: tail_input, gate: clk, source: vss, body: vss}}
+    - {id: M_RST_FP, role: reset_precharge_first_stage_left, stage: reset, type: pmos, connections: {drain: fp, gate: clkb, source: vdd, body: vdd}}
+    - {id: M_RST_FN, role: reset_precharge_first_stage_right, stage: reset, type: pmos, connections: {drain: fn, gate: clkb, source: vdd, body: vdd}}
+    - {id: M_ISO_P, role: latch_input_steering_left, stage: latch, type: nmos, connections: {drain: outp, gate: fn, source: tail_latch, body: vss}}
+    - {id: M_ISO_N, role: latch_input_steering_right, stage: latch, type: nmos, connections: {drain: outn, gate: fp, source: tail_latch, body: vss}}
+    - {id: M_TAIL_L, role: tail_current_source_latch_stage, stage: latch, type: nmos, connections: {drain: tail_latch, gate: clk, source: vss, body: vss}}
+    - {id: M_NL_P, role: latch_nmos_left, stage: latch, type: nmos, connections: {drain: outp, gate: outn, source: tail_latch, body: vss}}
+    - {id: M_NL_N, role: latch_nmos_right, stage: latch, type: nmos, connections: {drain: outn, gate: outp, source: tail_latch, body: vss}}
+    - {id: M_PL_P, role: latch_pmos_left, stage: latch, type: pmos, connections: {drain: outp, gate: outn, source: vdd, body: vdd}}
+    - {id: M_PL_N, role: latch_pmos_right, stage: latch, type: pmos, connections: {drain: outn, gate: outp, source: vdd, body: vdd}}
+    - {id: M_RST_OUTP, role: reset_precharge_output_left, stage: reset, type: pmos, connections: {drain: outp, gate: clkb, source: vdd, body: vdd}}
+    - {id: M_RST_OUTN, role: reset_precharge_output_right, stage: reset, type: pmos, connections: {drain: outn, gate: clkb, source: vdd, body: vdd}}
+    - {id: C_FP, kind: capacitor, role: first_stage_load, capacitance: Cint, connections: {plus: fp, minus: vss}}
+    - {id: C_FN, kind: capacitor, role: first_stage_load, capacitance: Cint, connections: {plus: fn, minus: vss}}
+    - {id: C_OUTP, kind: capacitor, role: output_load, capacitance: CL, connections: {plus: outp, minus: vss}}
+    - {id: C_OUTN, kind: capacitor, role: output_load, capacitance: CL, connections: {plus: outn, minus: vss}}
+targets:
+  delay: {max: 80e-12, unit: s, priority: 1}
+  offset: {max: 1.5e-3, unit: V, priority: 1}
+constraints:
+  phase_order: [reset, amplify, regenerate, saturate]

@@ -24,7 +24,7 @@ core/                 Validation, design rules, regions, and environment models
 feasibility/          Physics-informed feasibility estimators
 flow/                 End-to-end orchestration
 frontends/            YAML and SPICE input frontends
-ir/                   Example schema files
+inputs/               Circuit-family schema library
 netlist/              Schema-to-SPICE netlist generation
 optimizer/            NSGA-II and compact circuit evaluator
 outputs/              Structured result and diagnostic artifact writers
@@ -81,6 +81,26 @@ Use explicit paths in production runs. Do not rely on CLI defaults:
 --schema <path/to/your/circuit_schema.yaml>
 --spice <path/to/your/input_netlist.spice>
 ```
+
+Example schemas are organized by circuit family:
+
+```text
+inputs/
+  ota/
+    five_transistor/
+      five_transistor_ota.yaml
+    two_stage_miller/
+      two_stage_miller_ota.yaml
+  comparator/
+    strongarm/
+      strongarm_v1.yaml
+    double_tail/
+      double_tail_v1.yaml
+    sense_amplifier/
+      sense_amplifier_v1.yaml
+```
+
+`inputs/ota/two_stage_miller/two_stage_miller_ota.yaml` is the more complex OTA example. It models a five-transistor input OTA, a second-stage inverter, Miller capacitor `Cc`, zero-setting resistor `Rz`, and bias mirror devices.
 
 ## IR Profiles
 

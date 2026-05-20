@@ -91,10 +91,10 @@ def test_rewrite_reasoning_between_architectures():
 
 
 def test_v1_yaml_input_embeds_asir_output():
-    design = build_design_from_v1_yaml("inputs/strongarm_v1.yaml")
+    design = build_design_from_v1_yaml("inputs/comparator/strongarm/strongarm_v1.yaml")
     assert design.name == "strongarm_comparator"
     assert design.semantic_graph.primitive_type_counts()["cross_coupled_latch"] == 1
-    embedded = embed_asir_output(load_v1_yaml("inputs/strongarm_v1.yaml"), design)
+    embedded = embed_asir_output(load_v1_yaml("inputs/comparator/strongarm/strongarm_v1.yaml"), design)
     assert "topology" in embedded
     assert "asir_output" in embedded
     assert embedded["asir_output"]["layers"]["semantic_primitive_graph"]["layer"] == "semantic_primitives"
@@ -102,14 +102,14 @@ def test_v1_yaml_input_embeds_asir_output():
 
 def test_from_yaml_cli_writes_embedded_output(tmp_path):
     out = tmp_path / "compiled.yaml"
-    assert cli_main(["from-yaml", "inputs/strongarm_v1.yaml", "--out", str(out)]) == 0
+    assert cli_main(["from-yaml", "inputs/comparator/strongarm/strongarm_v1.yaml", "--out", str(out)]) == 0
     data = load_v1_yaml(out)
     assert "topology" in data
     assert "asir_output" in data
 
 
 def test_two_stage_ota_extracts_miller_semantics():
-    design = build_design_from_v1_yaml("ir/schema_two_stage.yaml")
+    design = build_design_from_v1_yaml("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml")
     payload = design.to_dict()
     counts = design.semantic_graph.primitive_type_counts()
 

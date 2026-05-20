@@ -28,7 +28,7 @@ Emit = Callable[[str], None]
 @dataclass
 class FlowConfig:
     env: str | Path = "environment.yaml"
-    schema: str | Path = "ir/schema.yaml"
+    schema: str | Path = "inputs/ota/five_transistor/five_transistor_ota.yaml"
     spice: str | Path | None = None
     spice_yaml_out: str | Path | None = None
     topology: str = "auto"

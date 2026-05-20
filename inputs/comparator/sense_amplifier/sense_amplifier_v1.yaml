@@ -1,0 +1,48 @@
+schema_version: '0.1'
+design_name: sense_amplifier_comparator
+topology:
+  name: sense_amplifier_comparator
+  class: comparator
+  architecture: sense-amplifier
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: vss, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: outp, direction: output}
+    - {id: outn, direction: output}
+  nets:
+    clk: clock
+    clkb: clock
+    sample: clock
+    sample_p: sampled_input
+    sample_n: sampled_input
+    tail: dynamic_internal
+  clocks:
+    CLK: {drives: clk, phases: [amplify, regenerate]}
+    CLKB: {drives: clkb, phases: [reset]}
+    SAMPLE: {drives: sample, phases: [reset, amplify]}
+  devices:
+    - {id: M_SAMP_P, role: sampling_switch_left, stage: sample, type: nmos, connections: {drain: sample_p, gate: sample, source: vinp, body: vss}}
+    - {id: M_SAMP_N, role: sampling_switch_right, stage: sample, type: nmos, connections: {drain: sample_n, gate: sample, source: vinn, body: vss}}
+    - {id: M_INP, role: input_pair_left, stage: input, type: nmos, connections: {drain: outp, gate: sample_p, source: tail, body: vss}}
+    - {id: M_INN, role: input_pair_right, stage: input, type: nmos, connections: {drain: outn, gate: sample_n, source: tail, body: vss}}
+    - {id: M_TAIL, role: tail_current_source, stage: evaluate, type: nmos, connections: {drain: tail, gate: clk, source: vss, body: vss}}
+    - {id: M_NL_P, role: latch_nmos_left, stage: latch, type: nmos, connections: {drain: outp, gate: outn, source: tail, body: vss}}
+    - {id: M_NL_N, role: latch_nmos_right, stage: latch, type: nmos, connections: {drain: outn, gate: outp, source: tail, body: vss}}
+    - {id: M_PL_P, role: latch_pmos_left, stage: latch, type: pmos, connections: {drain: outp, gate: outn, source: vdd, body: vdd}}
+    - {id: M_PL_N, role: latch_pmos_right, stage: latch, type: pmos, connections: {drain: outn, gate: outp, source: vdd, body: vdd}}
+    - {id: M_RST_P, role: reset_precharge_left, stage: reset, type: pmos, connections: {drain: outp, gate: clkb, source: vdd, body: vdd}}
+    - {id: M_RST_N, role: reset_precharge_right, stage: reset, type: pmos, connections: {drain: outn, gate: clkb, source: vdd, body: vdd}}
+    - {id: M_EQ, role: reset_equalize_outputs, stage: reset, type: pmos, connections: {drain: outp, gate: clkb, source: outn, body: vdd}}
+    - {id: C_SAMPLE_P, kind: capacitor, role: sampling_capacitance, capacitance: Csample, connections: {plus: sample_p, minus: vss}}
+    - {id: C_SAMPLE_N, kind: capacitor, role: sampling_capacitance, capacitance: Csample, connections: {plus: sample_n, minus: vss}}
+    - {id: C_OUTP, kind: capacitor, role: output_load, capacitance: CL, connections: {plus: outp, minus: vss}}
+    - {id: C_OUTN, kind: capacitor, role: output_load, capacitance: CL, connections: {plus: outn, minus: vss}}
+targets:
+  delay: {max: 120e-12, unit: s, priority: 1}
+  offset: {max: 1e-3, unit: V, priority: 1}
+  noise: {max: 300e-6, unit: V_rms, priority: 2}
+constraints:
+  phase_order: [reset, amplify, regenerate, saturate]

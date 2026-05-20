@@ -42,13 +42,13 @@ python3 pygmid/generate_tables.py --device both \
 Run IHP two-stage optimization:
 
 ```bash
-python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 80 --pop-size 160 --seed 41
+python3 main.py --env environment_ihp_sg13g2.yaml --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml --generations 80 --pop-size 160 --seed 41
 ```
 
 Run IHP spec Pareto:
 
 ```bash
-python3 scripts/run_spec_pareto.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --pop-size 160 --generations 80 --seed 41 --verify 8
+python3 scripts/run_spec_pareto.py --env environment_ihp_sg13g2.yaml --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml --pop-size 160 --generations 80 --seed 41 --verify 8
 ```
 
 ## Current IHP Findings
