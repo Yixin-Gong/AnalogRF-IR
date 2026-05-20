@@ -1,6 +1,7 @@
 import json
 
 from core.environment import default_environment
+from core.validator import Validator
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
@@ -128,6 +129,17 @@ def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
     assert state.transistors["M1"].parameters.region == "saturation"
 
 
+def test_validation_checks_explicit_cross_role_symmetry_labels():
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    state.transistors["M5"].parameters.W = 1.0e-6
+    state.transistors["M8"].parameters.W = 2.0e-6
+
+    report = Validator().validate(state, layers=[4], include_custom=False)
+    messages = [item.message for item in report.warnings()]
+
+    assert any("M5/M8" in message and "W mismatch" in message for message in messages)
+
+
 def test_optimizer_and_netlist_include_slew_rate():
     state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
     evaluator = CircuitEvaluator(state, create_pygmid_adapter())
@@ -240,7 +252,7 @@ def test_compensation_tune_stops_after_passing_candidate(tmp_path):
 
     assert sim.calls == 1
     assert result["spec_pass"] is True
-    assert result["early_stop_reason"] == "spec_pass"
+    assert result["early_stop_reason"] == "robust_spec_pass"
     assert result["evaluated_candidates"] == 1
 
 
@@ -285,6 +297,7 @@ def test_compensation_tune_rejects_negative_phase_margin(tmp_path):
         max_base_candidates=2,
         max_refine_candidates=0,
         max_load_candidates=0,
+        max_current_candidates=0,
         time_budget_sec=20,
     )
 

@@ -51,7 +51,7 @@ class SyntaxValidator:
         elif not state.topology.devices:
             report.add(DiagnosisResult(
                 check_name="syntax:required_field", passed=False, severity="error",
-                message="topology.devices is empty — at least one device required", layer=1
+                message="topology.devices is empty - at least one device required", layer=1
             ))
 
         # Internal implementation note.
@@ -71,7 +71,7 @@ class SyntaxValidator:
         if not state.loss_terms:
             report.add(DiagnosisResult(
                 check_name="syntax:required_field", passed=False, severity="warning",
-                message="loss_terms is empty — optimizer has no objective", layer=1
+                message="loss_terms is empty - optimizer has no objective", layer=1
             ))
 
         return report
@@ -88,7 +88,7 @@ class SemanticValidator:
         topo_ids = {dev.id for dev in state.topology.devices}
         transistor_ids = set(state.transistors.keys())
 
-        # ── devices ↔ transistors ──
+        # devices <-> transistors
         missing_in_transistors = topo_ids - transistor_ids
         for mid in missing_in_transistors:
             report.add(DiagnosisResult(
@@ -107,7 +107,7 @@ class SemanticValidator:
                 layer=2, device=eid
             ))
 
-        # ── devices ↔ constraints.per_device ──
+        # devices <-> constraints.per_device
         for dev_id in state.constraints.per_device:
             if dev_id not in topo_ids:
                 report.add(DiagnosisResult(
@@ -117,7 +117,7 @@ class SemanticValidator:
                     layer=2, device=dev_id
                 ))
 
-        # ── design_variables.device → devices ──
+        # design_variables.device -> devices
         for dv in state.design_variables:
             if not dv.device:
                 continue  # Internal implementation note.
@@ -185,7 +185,7 @@ class ValueValidator:
             report.add(DiagnosisResult(
                 check_name="value:temperature_range", passed=False,
                 severity="warning",
-                message=f"Temperature {sim.temperature}°C outside IC range (-50~200°C)",
+                message=f"Temperature {sim.temperature} degC outside IC range (-50~200 degC)",
                 layer=3
             ))
 
@@ -247,8 +247,7 @@ class ValueValidator:
 class PhysicalValidator:
     """AnalogRF-IR internal documentation."""
 
-    # Internal implementation note.
-    SATURATION_EXEMPT_ROLES: Set[str] = {"current_mirror_load"}  # diode-connected
+    SATURATION_EXEMPT_ROLES: Set[str] = set()
 
     @staticmethod
     def validate(state: DesignState,
@@ -291,7 +290,7 @@ class PhysicalValidator:
             dev_def = state.get_device_def(tid)
             role = dev_def.role if dev_def else ""
             if role in PhysicalValidator.SATURATION_EXEMPT_ROLES:
-                continue  # Internal implementation note.
+                continue
 
             if p.vds < p.vdsat + margin:
                 results.append(DiagnosisResult(
@@ -305,7 +304,7 @@ class PhysicalValidator:
                 results.append(DiagnosisResult(
                     check_name="physical:saturation", passed=True,
                     severity="info",
-                    message=f"{tid} ({role}): vds={p.vds:.3f}V ≥ vdsat={p.vdsat:.3f}V, margin={p.vds - p.vdsat:.3f}V",
+                    message=f"{tid} ({role}): vds={p.vds:.3f}V >= vdsat={p.vdsat:.3f}V, margin={p.vds - p.vdsat:.3f}V",
                     layer=4, device=tid
                 ))
         return results
@@ -314,7 +313,7 @@ class PhysicalValidator:
     def _check_symmetry(state: DesignState, tolerance: float) -> List[DiagnosisResult]:
         """AnalogRF-IR internal documentation."""
         results = []
-        # Internal implementation note.
+        seen: set[tuple[str, str]] = set()
         role_groups: Dict[str, List[str]] = {}
         for dev in state.topology.devices:
             role_groups.setdefault(dev.role, []).append(dev.id)
@@ -329,10 +328,30 @@ class PhysicalValidator:
                     a, b = dev_ids[i], dev_ids[j]
                     if a not in state.transistors or b not in state.transistors:
                         continue
+                    seen.add((a, b))
                     p1 = state.transistors[a].parameters
                     p2 = state.transistors[b].parameters
                     results.extend(
                         PhysicalValidator._compare_pair(a, b, p1, p2, tolerance, role)
+                    )
+        label_groups: Dict[str, List[str]] = {}
+        for dv in state.design_variables:
+            if dv.symmetry_label and dv.device:
+                label_groups.setdefault(dv.symmetry_label, []).append(dv.device)
+        for label, raw_ids in label_groups.items():
+            dev_ids = sorted(set(raw_ids))
+            if len(dev_ids) < 2:
+                continue
+            for i in range(len(dev_ids)):
+                for j in range(i + 1, len(dev_ids)):
+                    a, b = dev_ids[i], dev_ids[j]
+                    key = (a, b)
+                    if key in seen or a not in state.transistors or b not in state.transistors:
+                        continue
+                    p1 = state.transistors[a].parameters
+                    p2 = state.transistors[b].parameters
+                    results.extend(
+                        PhysicalValidator._compare_pair(a, b, p1, p2, tolerance, label)
                     )
         return results
 
@@ -343,7 +362,10 @@ class PhysicalValidator:
         results = []
         checks = {
             "W": (p1.W, p2.W),
+            "L": (p1.L, p2.L),
             "gm": (p1.gm, p2.gm),
+            "id": (p1.id, p2.id),
+            "gm_id": (p1.gm_id_realized, p2.gm_id_realized),
             "vgs": (p1.vgs, p2.vgs),
             "vds": (p1.vds, p2.vds),
         }

@@ -8,6 +8,7 @@ import networkx as nx
 
 MOS_TERMINALS = ("drain", "gate", "source", "bulk")
 CAP_TERMINALS = ("plus", "minus")
+RES_TERMINALS = ("plus", "minus")
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,15 @@ class CapacitorSpec:
     plus: str
     minus: str
     capacitance: str | float | None = None
+    role_hint: str = ""
+
+
+@dataclass(frozen=True)
+class ResistorSpec:
+    id: str
+    plus: str
+    minus: str
+    resistance: str | float | None = None
     role_hint: str = ""
 
 
@@ -119,6 +129,25 @@ class TopologyGraph:
             self.add_net(net)
             self.graph.add_edge(cap_id, net, terminal=terminal, relation="electrical_connection")
 
+    def add_resistor(
+        self,
+        res_id: str,
+        plus: str,
+        minus: str,
+        resistance: str | float | None = None,
+        role_hint: str = "",
+    ) -> None:
+        self.graph.add_node(
+            res_id,
+            kind="resistor",
+            role_hint=role_hint,
+            resistance=resistance,
+            label=res_id,
+        )
+        for terminal, net in {"plus": plus, "minus": minus}.items():
+            self.add_net(net)
+            self.graph.add_edge(res_id, net, terminal=terminal, relation="electrical_connection")
+
     def node_kind(self, node_id: str) -> str:
         return self.graph.nodes[node_id].get("kind", "")
 
@@ -127,6 +156,9 @@ class TopologyGraph:
 
     def capacitor_devices(self) -> list[str]:
         return sorted(n for n, d in self.graph.nodes(data=True) if d.get("kind") == "capacitor")
+
+    def resistor_devices(self) -> list[str]:
+        return sorted(n for n, d in self.graph.nodes(data=True) if d.get("kind") == "resistor")
 
     def nets(self) -> list[str]:
         return sorted(n for n, d in self.graph.nodes(data=True) if d.get("kind") == "net")
@@ -156,7 +188,7 @@ class TopologyGraph:
     def devices_on_net(self, net_id: str, terminal: str | None = None) -> list[str]:
         out: list[str] = []
         for dev, _, data in self.graph.edges(net_id, data=True):
-            if self.node_kind(dev) not in {"mos", "capacitor"}:
+            if self.node_kind(dev) not in {"mos", "capacitor", "resistor"}:
                 continue
             if terminal is None or data.get("terminal") == terminal:
                 out.append(str(dev))

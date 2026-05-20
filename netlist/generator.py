@@ -38,7 +38,7 @@ class NetlistGenerator:
         lines.append(".end")
         return "\n".join(lines)
 
-    # ── Library ──
+    # Library
 
     def _resolve_model_path(self, model_name: str) -> Path:
         model_path = Path(model_name)
@@ -67,7 +67,7 @@ class NetlistGenerator:
         lines.extend([f".temp {self.state.simulation.temperature}", ""])
         return lines
 
-    # ── Engineering formatting ──
+    # Engineering formatting
 
     @staticmethod
     def _eng(val_si: float, grid_si: float) -> str:
@@ -83,7 +83,7 @@ class NetlistGenerator:
         else:
             return f"{val_si * 1e12:.0f}p"
 
-    # ── Devices ──
+    # Devices
 
     def _gen_devices(self) -> List[str]:
         W_grid = getattr(self._proc, "W_precision", 10e-9)
@@ -167,7 +167,7 @@ class NetlistGenerator:
         lines.append("")
         return lines
 
-    # ── Supplies / Bias / Stimuli / Load ──
+    # Supplies, bias, stimuli, and load
 
     def _gen_supplies(self) -> List[str]:
         vdd = self.state.simulation.supply.get("vdd", 1.2)
@@ -288,7 +288,7 @@ class NetlistGenerator:
                 return ["* -- Load --", f"Cload {outs[0].id} 0 {cl_ff:.1f}f", ""]
         return []
 
-    # ── Analyses ──
+    # Analyses
 
     def _gen_analyses(self) -> List[str]:
         lines = ["* -- Analyses --"]
@@ -370,7 +370,7 @@ class NetlistGenerator:
                 elif ev.type == "operating_region":
                     lines.append(f"* {ev.name}: operating region check via print all")
                 else:
-                    lines.append(f"* .meas {ev.name}: unknown type '{ev.type}' — skipped")
+                    lines.append(f"* .meas {ev.name}: unknown type '{ev.type}' - skipped")
         else:
             # Internal implementation note.
             targets = self.state.targets
@@ -390,7 +390,7 @@ class NetlistGenerator:
         lines.append("")
         return lines
 
-    # ── Save ──
+    # Save
 
     def save(self, path: str) -> str:
         content = self.generate()

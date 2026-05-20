@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pygmid/generate_tables.py V2 — ngspice techsweep with full BSIM4 parameter extraction."""
+"""pygmid/generate_tables.py V2 - ngspice techsweep with full BSIM4 parameter extraction."""
 from __future__ import annotations
 import argparse, subprocess, os, sys, time, math, re, shutil
 from pathlib import Path
@@ -47,7 +47,7 @@ def generate_netlist(dev, L, vgs0, vgs1, vgs_step, vds, W=DEFAULT_W, lib=MODEL_L
     libs = _library_lines(lib, corner)
     op_exprs = _op_exprs(device_style, model)
     if dev == "pmos":
-        vdd, vs, vd = 1.2, 1.2, vds  # V(d) = vds, current flows from s→d→VDS_dummy→0
+        vdd, vs, vd = 1.2, 1.2, vds  # V(d) = vds, current flows from s to d to VDS_dummy to 0
         # PMOS needs negative VGS: V(g) < V(s) to turn on
         vstr_neg = " ".join(f"{-v:.4f}" for v in vlist)
         return "\n".join([

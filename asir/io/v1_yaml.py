@@ -51,6 +51,7 @@ def build_topology_from_v1_dict(data: dict[str, Any]) -> TopologyGraph:
     _add_extra_nets(topo, topology_data)
     _add_clocks(topo, topology_data, data)
     _add_devices(topo, topology_data)
+    _add_implicit_ota_compensation(topo, topology_data, data)
 
     if not topo.mos_devices() and not topo.capacitor_devices():
         raise ValueError("No MOS or capacitor devices found under topology.devices")
@@ -153,6 +154,18 @@ def _add_devices(topo: TopologyGraph, topology_data: dict[str, Any]) -> None:
                 role_hint=str(item.get("role_hint") or item.get("role") or ""),
             )
             continue
+        if device_kind in {"resistor", "res"}:
+            connections = item.get("connections") or {}
+            plus = item.get("plus") or connections.get("plus") or connections.get("p") or connections.get("top")
+            minus = item.get("minus") or connections.get("minus") or connections.get("n") or connections.get("bottom")
+            topo.add_resistor(
+                str(device_id),
+                plus=str(plus),
+                minus=str(minus),
+                resistance=item.get("resistance") or item.get("value"),
+                role_hint=str(item.get("role_hint") or item.get("role") or ""),
+            )
+            continue
 
         connections = _normalize_connections(item.get("connections") or item)
         missing = [terminal for terminal in ("drain", "gate", "source") if terminal not in connections]
@@ -170,6 +183,40 @@ def _add_devices(topo: TopologyGraph, topology_data: dict[str, Any]) -> None:
             model=item.get("model"),
             stage=item.get("stage"),
         )
+
+
+def _add_implicit_ota_compensation(topo: TopologyGraph, topology_data: dict[str, Any], data: dict[str, Any]) -> None:
+    circuit_class = str(topology_data.get("class") or topology_data.get("class_") or "").lower()
+    if circuit_class != "ota":
+        return
+    variable_names = {
+        str(item.get("variable"))
+        for item in data.get("design_variables") or []
+        if isinstance(item, dict)
+    }
+    global_names = set((data.get("global_parameters") or {}).keys())
+    has_cc = "Cc" in variable_names or "Cc" in global_names
+    has_rz = "Rz" in variable_names or "Rz" in global_names
+    if not has_cc:
+        return
+    if any(dev.lower() == "cc" or "compensation" in topo.role_hint(dev).lower() for dev in topo.capacitor_devices()):
+        return
+    comp_node = ""
+    for dev in topo.mos_devices():
+        if "second_stage_gain" in topo.role_hint(dev):
+            comp_node = topology_data.get("compensation_node") or topo.terminal_net(dev, "gate") or ""
+            break
+    output_nets = topo.output_nets()
+    output_node = str(topology_data.get("output_node") or (output_nets[0] if output_nets else "vout"))
+    if not comp_node:
+        return
+    if has_rz:
+        mid = str(topology_data.get("compensation_mid_node") or "ncc")
+        if not topo.resistor_devices():
+            topo.add_resistor("Rz", plus=comp_node, minus=mid, resistance="Rz", role_hint="compensation")
+        topo.add_capacitor("Cc", plus=mid, minus=output_node, capacitance="Cc", role_hint="compensation")
+    else:
+        topo.add_capacitor("Cc", plus=comp_node, minus=output_node, capacitance="Cc", role_hint="compensation")
 
 
 def _normalize_connections(raw: dict[str, Any]) -> dict[str, str]:

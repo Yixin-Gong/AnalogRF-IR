@@ -49,7 +49,7 @@ class _AnalyticalFallback:
         ft = gm / (2.0 * math.pi * (cgs + cgd)) if (cgs + cgd) > 0 else 0
 
         # Internal implementation note.
-        # VOV ≈ 2*UT*sqrt(IC) for strong inversion
+        # VOV ~= 2*UT*sqrt(IC) for strong inversion
         ic = max((vov / (2.0 * self.VT)) ** 2, 0.001)
 
         return {
@@ -80,7 +80,7 @@ class _AnalyticalFallback:
         }
 
 
-# ── Boris Murmann PygmidAdapter ────────────────────────────
+# Boris Murmann PygmidAdapter
 
 class PygmidAdapter:
     """AnalogRF-IR internal documentation."""
@@ -300,7 +300,7 @@ class PygmidAdapter:
                     kp_est = 2.0 * id_w * mid_L / (vov ** 2)
                 else:
                     kp_est = fallback.KP
-                # gm_gds → LAMBDA
+                # gm_gds to LAMBDA
                 gds_w = mid_result.get("GDS_W", 0)
                 gm_w = mid_result.get("GM_W", 0)
                 if gds_w > 0 and gm_w > 0:

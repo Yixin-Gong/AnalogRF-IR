@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from netlist.generator import generate_netlist
+from postprocess.common import backfill_state_from_ngspice
 from schemas.design_state import DesignState, Target
 from simulator.ngspice import NgspiceSimulator
 
@@ -43,6 +44,29 @@ def op_for_device(result, device_id: str) -> dict:
         if op:
             return op
     return {}
+
+
+def confirm_initial_operating_point(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    work_dir: Path,
+) -> dict:
+    if not is_two_stage_state(state):
+        return {}
+    result = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
+    if result.operating_points:
+        backfill_state_from_ngspice(state, result)
+    region_counts: dict[str, int] = {}
+    for ts in state.transistors.values():
+        region = ts.parameters.region or "unknown"
+        region_counts[region] = region_counts.get(region, 0) + 1
+    return {
+        "success": bool(result.success),
+        "return_code": result.return_code,
+        "operating_point_count": len(result.operating_points or {}),
+        "region_counts": region_counts,
+        "measurements": dict(result.measurements or {}),
+    }
 
 
 def balance_two_stage_output(
@@ -209,6 +233,7 @@ def tune_two_stage_compensation(
     max_base_candidates: int = 24,
     max_refine_candidates: int = 8,
     max_load_candidates: int = 8,
+    max_current_candidates: int = 16,
     time_budget_sec: float = 45.0,
     candidate_timeout_sec: float = 5.0,
 ) -> dict:
@@ -249,6 +274,15 @@ def tune_two_stage_compensation(
         for dev_id in load_ids
         if dev_id in state.transistors
     }
+    base_currents = {
+        "I_tail": float(state.global_parameters.get("I_tail", 0.0) or 0.0),
+        "I_stage2": float(state.global_parameters.get("I_stage2", 0.0) or 0.0),
+    }
+    current_ranges = {
+        name: _design_var_range(state, name)
+        for name in base_currents
+        if base_currents[name] > 0.0 and _design_var_range(state, name)
+    }
     proc = state.process
     min_w = getattr(proc, "min_W", 150e-9)
     max_w = getattr(proc, "max_W", 200e-6)
@@ -264,6 +298,14 @@ def tune_two_stage_compensation(
             scaled_l = min(max(_snap_to_grid(base_l * scale, l_grid), min_l), max_l)
             ts.parameters.L = scaled_l
             ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
+
+    def apply_current_scale(tail_scale: float, stage2_scale: float) -> None:
+        scale_by_name = {"I_tail": tail_scale, "I_stage2": stage2_scale}
+        for name, base_value in base_currents.items():
+            if base_value <= 0.0 or name not in current_ranges:
+                continue
+            low, high = current_ranges[name]
+            state.global_parameters[name] = min(max(base_value * scale_by_name[name], low), high)
 
     def spec_pass(meas: dict) -> bool:
         if meas.get("dc_gain_db", 0.0) < gain_min:
@@ -285,6 +327,12 @@ def tune_two_stage_compensation(
         if icmr_max_min is not None and ("icmr_max" not in meas or meas.get("icmr_max", 0.0) < icmr_max_min):
             return False
         return True
+
+    def robust_spec_pass(meas: dict) -> bool:
+        if not spec_pass(meas):
+            return False
+        pm_guard = 2.0 if pm_min > 0 else 0.0
+        return meas.get("phase_margin", 0.0) >= pm_min + pm_guard
 
     def score_measurements(meas: dict) -> float:
         gain = meas.get("dc_gain_db", 0.0)
@@ -320,19 +368,41 @@ def tune_two_stage_compensation(
         # expensive for PSP/ngspice AC convergence, while rarely fixing PM.
         return cc <= cc_low * 1.35 and rz >= rz_high * 0.70
 
-    def evaluate_candidate(best: dict, cc: float, rz: float, load_scale: float) -> dict:
+    def candidate_zero_target(result) -> float:
+        if gain_id:
+            op = op_for_device(result, gain_id)
+            gm = abs(float(op.get("gm", 0.0))) if op else 0.0
+            if gm > 1e-12:
+                return 1.0 / gm
+        return rz0
+
+    def evaluate_candidate(
+        best: dict,
+        cc: float,
+        rz: float,
+        load_scale: float,
+        tail_scale: float,
+        stage2_scale: float,
+    ) -> dict:
         apply_load_scale(load_scale)
+        apply_current_scale(tail_scale, stage2_scale)
         state.global_parameters["Cc"] = cc
         state.global_parameters["Rz"] = rz
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
         meas = dict(trial.measurements)
+        zero_target = candidate_zero_target(trial)
         score = score_measurements(meas)
         if score < best["score"]:
             return {
                 "score": score,
                 "Cc": cc,
                 "Rz": rz,
+                "Rz_target_1_over_gm2": zero_target,
                 "load_scale": load_scale,
+                "tail_current_scale": tail_scale,
+                "stage2_current_scale": stage2_scale,
+                "I_tail": state.global_parameters.get("I_tail", base_currents["I_tail"]),
+                "I_stage2": state.global_parameters.get("I_stage2", base_currents["I_stage2"]),
                 "measurements": meas,
             }
         return best
@@ -341,45 +411,76 @@ def tune_two_stage_compensation(
         "score": float("inf"),
         "Cc": current_cc,
         "Rz": current_rz,
+        "Rz_target_1_over_gm2": rz0,
         "load_scale": 1.0,
+        "tail_current_scale": 1.0,
+        "stage2_current_scale": 1.0,
+        "I_tail": base_currents["I_tail"],
+        "I_stage2": base_currents["I_stage2"],
         "measurements": {},
     }
     stats = {
         "evaluated_candidates": 0,
         "skipped_candidates": 0,
-        "candidate_budget": max_base_candidates + max_refine_candidates + max_load_candidates,
+        "candidate_budget": (
+            max_base_candidates
+            + max_refine_candidates
+            + max_load_candidates
+            + max_current_candidates
+        ),
         "early_stop": False,
         "early_stop_reason": "",
     }
     started = time.time()
-    evaluated: set[tuple[str, str, str]] = set()
+    evaluated: set[tuple[str, str, str, str, str]] = set()
     records: list[dict] = []
 
-    def candidate_key(cc: float, rz: float, load_scale: float) -> tuple[str, str, str]:
-        return (f"{cc:.12e}", f"{rz:.12e}", f"{load_scale:.6f}")
+    def candidate_key(
+        cc: float,
+        rz: float,
+        load_scale: float,
+        tail_scale: float,
+        stage2_scale: float,
+    ) -> tuple[str, str, str, str, str]:
+        return (
+            f"{cc:.12e}",
+            f"{rz:.12e}",
+            f"{load_scale:.6f}",
+            f"{tail_scale:.6f}",
+            f"{stage2_scale:.6f}",
+        )
 
     def add_candidate(
-        candidates: list[tuple[float, float, float, str]],
+        candidates: list[tuple[float, float, float, float, float, str]],
         cc: float,
         rz: float,
         load_scale: float = 1.0,
+        tail_scale: float = 1.0,
+        stage2_scale: float = 1.0,
         tag: str = "base",
     ) -> None:
         cc = min(max(float(cc), cc_low), cc_high)
         rz = min(max(float(rz), rz_low), rz_high)
         load_scale = float(load_scale)
-        key = candidate_key(cc, rz, load_scale)
-        if not any(candidate_key(old_cc, old_rz, old_scale) == key for old_cc, old_rz, old_scale, _ in candidates):
-            candidates.append((cc, rz, load_scale, tag))
+        tail_scale = float(tail_scale)
+        stage2_scale = float(stage2_scale)
+        key = candidate_key(cc, rz, load_scale, tail_scale, stage2_scale)
+        if not any(
+            candidate_key(old_cc, old_rz, old_load, old_tail, old_stage2) == key
+            for old_cc, old_rz, old_load, old_tail, old_stage2, _ in candidates
+        ):
+            candidates.append((cc, rz, load_scale, tail_scale, stage2_scale, tag))
 
-    def candidate_priority(item: tuple[float, float, float, str]) -> float:
-        cc, rz, load_scale, _tag = item
+    def candidate_priority(item: tuple[float, float, float, float, float, str]) -> float:
+        cc, rz, load_scale, tail_scale, stage2_scale, _tag = item
         cc_ref = max(current_cc, cc_low)
         rz_ref = max(rz0, rz_low)
         return (
             abs(math.log(max(cc, 1e-30) / max(cc_ref, 1e-30)))
             + 0.6 * abs(math.log(max(rz, 1e-30) / max(rz_ref, 1e-30)))
             + 0.3 * abs(load_scale - 1.0)
+            + 0.25 * abs(math.log(max(tail_scale, 1e-9)))
+            + 0.25 * abs(math.log(max(stage2_scale, 1e-9)))
         )
 
     def budget_exhausted() -> bool:
@@ -387,14 +488,14 @@ def tune_two_stage_compensation(
             return True
         return (time.time() - started) >= time_budget_sec
 
-    def run_candidates(candidates: list[tuple[float, float, float, str]], limit: int) -> bool:
+    def run_candidates(candidates: list[tuple[float, float, float, float, float, str]], limit: int) -> bool:
         nonlocal best
-        for cc, rz, load_scale, tag in candidates[: max(0, limit)]:
+        for cc, rz, load_scale, tail_scale, stage2_scale, tag in candidates[: max(0, limit)]:
             if budget_exhausted():
                 stats["early_stop"] = True
                 stats["early_stop_reason"] = "budget_exhausted"
                 return True
-            key = candidate_key(cc, rz, load_scale)
+            key = candidate_key(cc, rz, load_scale, tail_scale, stage2_scale)
             if key in evaluated:
                 continue
             if should_skip_candidate(cc, rz):
@@ -402,7 +503,7 @@ def tune_two_stage_compensation(
                 continue
             evaluated.add(key)
             before_score = best["score"]
-            best = evaluate_candidate(best, cc, rz, load_scale)
+            best = evaluate_candidate(best, cc, rz, load_scale, tail_scale, stage2_scale)
             stats["evaluated_candidates"] += 1
             if best["score"] < before_score:
                 records.append(
@@ -411,27 +512,30 @@ def tune_two_stage_compensation(
                         "Cc": best["Cc"],
                         "Rz": best["Rz"],
                         "load_scale": best["load_scale"],
+                        "tail_current_scale": best.get("tail_current_scale", 1.0),
+                        "stage2_current_scale": best.get("stage2_current_scale", 1.0),
                         "tag": tag,
                     }
                 )
-            if spec_pass(best["measurements"]):
+            if robust_spec_pass(best["measurements"]):
                 stats["early_stop"] = True
-                stats["early_stop_reason"] = "spec_pass"
+                stats["early_stop_reason"] = "robust_spec_pass"
                 return True
         return False
 
-    base_candidates: list[tuple[float, float, float, str]] = []
+    base_candidates: list[tuple[float, float, float, float, float, str]] = []
     add_candidate(base_candidates, current_cc, current_rz, tag="current")
 
-    high_rz_rescue = min(max(rz0 * 1.35, 12_000.0), rz_high)
-    mid_rz_rescue = min(max(rz0, 2_500.0), rz_high)
+    low_rz_rescue = min(max(rz0 * 0.85, rz_low), rz_high)
+    mid_rz_rescue = min(max(rz0, rz_low), rz_high)
+    high_rz_rescue = min(max(rz0 * 1.15, rz_low), rz_high)
     for cc, rz in (
         (cc_high, high_rz_rescue),
-        (cc_high, 12_000.0),
+        (cc_high, mid_rz_rescue),
         (cc_high * 0.8, high_rz_rescue),
-        (cc_high * 0.8, 12_000.0),
-        (max(current_cc * 3.0, cc_low * 10.0), 2_500.0),
-        (max(current_cc * 3.0, cc_low * 10.0), 5_000.0),
+        (cc_high * 0.8, mid_rz_rescue),
+        (max(current_cc * 3.0, cc_low * 10.0), low_rz_rescue),
+        (max(current_cc * 3.0, cc_low * 10.0), mid_rz_rescue),
         (max(current_cc * 4.0, cc_low * 15.0), mid_rz_rescue),
     ):
         add_candidate(base_candidates, cc, rz, tag="stability_rescue")
@@ -451,12 +555,9 @@ def tune_two_stage_compensation(
     )
     stability_rz_pool = _unique_preserve(
         [
+            rz0 * 0.85,
             rz0,
-            rz0 * 1.3,
-            2500.0,
-            5000.0,
-            10000.0,
-            12000.0,
+            rz0 * 1.15,
         ],
         rz_low,
         rz_high,
@@ -465,7 +566,7 @@ def tune_two_stage_compensation(
         for rz in stability_rz_pool:
             add_candidate(base_candidates, cc, rz, tag="stability_rescue")
 
-    coarse_candidates: list[tuple[float, float, float, str]] = []
+    coarse_candidates: list[tuple[float, float, float, float, float, str]] = []
     cc_pool = _unique_preserve(
         [
             current_cc,
@@ -484,16 +585,9 @@ def tune_two_stage_compensation(
     rz_pool = _unique_preserve(
         [
             current_rz,
-            rz0 * 0.6,
             rz0 * 0.8,
             rz0,
             rz0 * 1.2,
-            rz0 * 1.5,
-            1000.0,
-            2000.0,
-            3500.0,
-            5000.0,
-            8000.0,
         ],
         rz_low,
         rz_high,
@@ -502,8 +596,8 @@ def tune_two_stage_compensation(
         for rz in rz_pool:
             add_candidate(coarse_candidates, cc, rz, tag="coarse")
     coarse_candidates.sort(key=candidate_priority)
-    for cc, rz, load_scale, tag in coarse_candidates:
-        add_candidate(base_candidates, cc, rz, load_scale, tag)
+    for cc, rz, load_scale, tail_scale, stage2_scale, tag in coarse_candidates:
+        add_candidate(base_candidates, cc, rz, load_scale, tail_scale, stage2_scale, tag)
 
     original_timeout = getattr(sim, "timeout_sec", None)
     if original_timeout is not None and candidate_timeout_sec > 0:
@@ -512,7 +606,7 @@ def tune_two_stage_compensation(
         stopped = run_candidates(base_candidates, max_base_candidates)
 
         if not stopped and not spec_pass(best["measurements"]) and max_refine_candidates > 0:
-            refine_candidates: list[tuple[float, float, float, str]] = []
+            refine_candidates: list[tuple[float, float, float, float, float, str]] = []
             seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
             for seed in seeds:
                 for cc_factor in (0.75, 1.0, 1.25):
@@ -522,6 +616,8 @@ def tune_two_stage_compensation(
                             seed["Cc"] * cc_factor,
                             seed["Rz"] * rz_factor,
                             seed.get("load_scale", 1.0),
+                            seed.get("tail_current_scale", 1.0),
+                            seed.get("stage2_current_scale", 1.0),
                             tag="refine",
                         )
             refine_candidates.sort(key=candidate_priority)
@@ -533,7 +629,7 @@ def tune_two_stage_compensation(
             and not spec_pass(best["measurements"])
             and max_load_candidates > 0
         ):
-            load_candidates: list[tuple[float, float, float, str]] = []
+            load_candidates: list[tuple[float, float, float, float, float, str]] = []
             seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
             for seed in seeds:
                 for load_scale in (1.08, 1.16, 1.24):
@@ -543,18 +639,53 @@ def tune_two_stage_compensation(
                             seed["Cc"] * cc_factor,
                             seed["Rz"],
                             load_scale,
+                            seed.get("tail_current_scale", 1.0),
+                            seed.get("stage2_current_scale", 1.0),
                             tag="load_refine",
                         )
             load_candidates.sort(key=candidate_priority)
-            run_candidates(load_candidates, max_load_candidates)
+            stopped = run_candidates(load_candidates, max_load_candidates)
+
+        if (
+            not stopped
+            and current_ranges
+            and not spec_pass(best["measurements"])
+            and max_current_candidates > 0
+        ):
+            current_candidates: list[tuple[float, float, float, float, float, str]] = []
+            seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
+            recovery_steps = (
+                (1.08, 1.10, 1.00),
+                (1.12, 1.15, 1.05),
+                (1.12, 1.15, 1.10),
+                (1.15, 1.20, 1.05),
+                (1.15, 1.20, 1.10),
+                (1.20, 1.25, 1.10),
+                (1.08, 1.15, 1.05),
+                (1.12, 1.25, 1.10),
+            )
+            for seed in seeds:
+                for tail_scale, stage2_scale, cc_factor in recovery_steps:
+                    add_candidate(
+                        current_candidates,
+                        seed["Cc"] * cc_factor,
+                        seed["Rz"],
+                        seed.get("load_scale", 1.0),
+                        seed.get("tail_current_scale", 1.0) * tail_scale,
+                        seed.get("stage2_current_scale", 1.0) * stage2_scale,
+                        tag="current_recovery",
+                    )
+            run_candidates(current_candidates, max_current_candidates)
     finally:
         if original_timeout is not None:
             sim.timeout_sec = original_timeout
 
     apply_load_scale(best.get("load_scale", 1.0))
+    apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
     best.update(stats)
+    best["Rz_target_1_over_gm2"] = best.get("Rz_target_1_over_gm2", rz0)
     best["elapsed_sec"] = time.time() - started
     best["spec_pass"] = spec_pass(best["measurements"])
     return best
@@ -570,6 +701,9 @@ class TwoStagePostProcessor:
         self.events = []
         if not is_two_stage_state(state):
             return self.events
+        op = confirm_initial_operating_point(state, sim, work_dir)
+        if op:
+            self.events.append({"type": "initial_operating_point", **op})
         if not self.skip_dc_repair:
             info = balance_two_stage_output(state, sim, work_dir)
             if info:

@@ -107,3 +107,39 @@ def build_phase_graph(semantics: SemanticPrimitiveGraph) -> OperationalPhaseGrap
     graph.add_transition("regenerate", "saturate", "positive feedback reaches logic threshold")
     graph.add_transition("saturate", "reset", "next clock cycle")
     return graph
+
+
+def build_ota_phase_graph(semantics: SemanticPrimitiveGraph) -> OperationalPhaseGraph:
+    graph = OperationalPhaseGraph(f"{semantics.name}_phases")
+    phases = ["bias", "small_signal", "large_signal"]
+    invariants = {
+        "bias": [
+            "all bias mirrors and active devices have a valid operating point",
+            "gain and current-source devices remain in saturation",
+        ],
+        "small_signal": [
+            "Miller compensation sets dominant-pole splitting",
+            "Rz is referenced to the second-stage gm zero-cancellation target",
+        ],
+        "large_signal": [
+            "slew currents charge Cc and CL_eff without violating output headroom",
+            "output swing remains inside saturation limits",
+        ],
+    }
+    exit_conditions = {
+        "bias": "operating point is confirmed",
+        "small_signal": "AC loop metrics are measured",
+        "large_signal": "transient slew and swing checks complete",
+    }
+    for index, phase in enumerate(phases):
+        graph.add_phase(
+            phase,
+            index=index,
+            active_primitives=semantics.active_in_phase(phase),
+            invariants=invariants[phase],
+            exit_condition=exit_conditions[phase],
+        )
+    graph.add_transition("bias", "small_signal", "run AC after OP is valid")
+    graph.add_transition("small_signal", "large_signal", "run transient and swing checks after AC")
+    graph.add_transition("large_signal", "bias", "rebias if large-signal constraints fail")
+    return graph

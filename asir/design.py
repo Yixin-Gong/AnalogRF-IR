@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from asir.dependency import DependencyGraph, build_comparator_dependency_graph
+from asir.dependency import DependencyGraph, build_comparator_dependency_graph, build_ota_dependency_graph
 from asir.extraction import RuleBasedSemanticExtractor
 from asir.io.yaml_export import export_design_yaml
-from asir.phase import OperationalPhaseGraph, build_phase_graph
+from asir.phase import OperationalPhaseGraph, build_ota_phase_graph, build_phase_graph
 from asir.rewrite import RewriteReasoner, RewriteReport
 from asir.semantic import SemanticPrimitiveGraph
 from asir.topology import TopologyGraph
@@ -21,12 +21,15 @@ class ASIRDesign:
     semantic_graph: SemanticPrimitiveGraph
     dependency_graph: DependencyGraph
     phase_graph: OperationalPhaseGraph
+    circuit_class: str = "comparator"
 
     def to_dict(self) -> dict[str, Any]:
+        domain = "analog_ota" if self.circuit_class.lower() == "ota" else "analog_comparator"
         return {
             "asir_version": "0.1",
             "name": self.name,
-            "domain": "analog_comparator",
+            "domain": domain,
+            "circuit_class": self.circuit_class,
             "comparator_family": self.comparator_family,
             "principles": {
                 "separate_topology_from_semantics": True,
@@ -53,6 +56,7 @@ class ASIRDesign:
             "topology": {
                 "mos_count": len(self.topology_graph.mos_devices()),
                 "capacitor_count": len(self.topology_graph.capacitor_devices()),
+                "resistor_count": len(self.topology_graph.resistor_devices()),
                 "net_count": len(self.topology_graph.nets()),
                 "clock_count": len(self.topology_graph.clocks()),
             },
@@ -75,8 +79,12 @@ class ASIRDesign:
 def build_design(topology: TopologyGraph) -> ASIRDesign:
     extractor = RuleBasedSemanticExtractor()
     semantics = extractor.extract(topology)
-    dependencies = build_comparator_dependency_graph(semantics)
-    phases = build_phase_graph(semantics)
+    if topology.circuit_class.lower() == "ota":
+        dependencies = build_ota_dependency_graph(semantics)
+        phases = build_ota_phase_graph(semantics)
+    else:
+        dependencies = build_comparator_dependency_graph(semantics)
+        phases = build_phase_graph(semantics)
     return ASIRDesign(
         name=topology.name,
         comparator_family=topology.architecture,
@@ -84,4 +92,5 @@ def build_design(topology: TopologyGraph) -> ASIRDesign:
         semantic_graph=semantics,
         dependency_graph=dependencies,
         phase_graph=phases,
+        circuit_class=topology.circuit_class,
     )

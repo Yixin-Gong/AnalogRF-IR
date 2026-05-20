@@ -93,7 +93,7 @@ class NgspiceSimulator:
         low = netlist.lower()
         return ".tran" in low or ".meas tran" in low or "slew_rate" in low
 
-    # ── Pass 1: AC ──
+    # Pass 1: AC
 
     def _run_ac_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
         """AnalogRF-IR internal documentation."""
@@ -154,7 +154,7 @@ class NgspiceSimulator:
             out.append(line)
         return "\n".join(out)
 
-    # ── Pass 2: DC ──
+    # Pass 2: DC
 
     def _run_dc_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
         """AnalogRF-IR internal documentation."""
@@ -215,7 +215,7 @@ class NgspiceSimulator:
             lines.append(f"print {exprs}")
         return lines
 
-    # ── Pass 3: transient slew-rate ──
+    # Pass 3: transient slew-rate
 
     def _run_tran_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
         """Pass 3: transient step response + Python slew-rate extraction."""

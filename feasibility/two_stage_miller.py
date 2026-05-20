@@ -235,7 +235,8 @@ class TwoStageMillerFeasibilityChecker:
         gbw_pred = gm1 / (2.0 * math.pi * max(cc, 1e-30))
         wp2 = gm2 / max(cl_eff, 1e-30)
         pm_pred = 90.0 - math.degrees(math.atan(wu / max(wp2, 1e-30)))
-        rz = rz_factor / max(gm2, 1e-30)
+        rz_target = 1.0 / max(gm2, 1e-30)
+        rz = self._clip_global("Rz", rz_target)
         power = vdd * (itail + i2) * (1.0 + self._current_overhead())
         headroom = self._headroom_margin(vdd, n_in, p_load, n_tail, p_stage2, n_out)
         output_swing, output_low, output_high = self._output_swing(vdd, p_stage2, n_out)
@@ -320,7 +321,7 @@ class TwoStageMillerFeasibilityChecker:
             "L_load": self._length_values("current_mirror_load"),
             "L_stage2": self._length_values("second_stage_gain"),
             "Cc_over_CL": [0.05, 0.075, 0.1, 0.125, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0],
-            "Rz_factor": [0.7, 0.85, 1.0, 1.2, 1.5],
+            "Rz_factor": [1.0],
         }
 
     def _deterministic_seed_points(self, choices: dict[str, list[float]]) -> list[tuple[float, ...]]:
@@ -457,7 +458,10 @@ class TwoStageMillerFeasibilityChecker:
             "power_log": ("GBW-SR-power / PM-CL-GBW-power", "Power lower bound is tight against required Itail/I2."),
             "gbw_log": ("Av-GBW-speed conflict", "Unity-gain bandwidth is the active sizing boundary."),
             "gain_dB": ("Av-GBW-speed conflict", "Predicted gm/gds gain margin is tight."),
-            "pm_deg": ("PM-CL-GBW-power conflict", "Second-pole separation and phase-margin reserve are tight."),
+            "pm_deg": (
+                "PM-CL-GBW-power conflict",
+                "Dominant-pole placement and second-pole separation are tight; increase Cc to pull the dominant pole lower.",
+            ),
             "headroom_V": ("Headroom-swing conflict", "Estimated Vdsat stack is close to available supply margin."),
             "output_swing_V": ("Headroom-swing conflict", "Output swing is limited by output pull-up/pull-down saturation headroom."),
             "icmr_min_V": ("Headroom-swing conflict", "Input common-mode low end is limited by tail and input-pair headroom."),
@@ -540,7 +544,7 @@ class TwoStageMillerFeasibilityChecker:
                 "spec": "phase_margin",
                 "current_deg": self.spec["PM_deg"],
                 "suggested_max_deg": max(35.0, best.PM_pred_deg - 3.0),
-                "reason": "Second-stage gm or CL_eff cannot provide enough pole separation.",
+                "reason": "Pull the dominant pole lower with more Cc, then verify second-stage gm and CL_eff pole separation.",
             })
         if (best.slacks.get("headroom_V") or 0.0) < 0:
             suggestions.append({
@@ -585,6 +589,7 @@ class TwoStageMillerFeasibilityChecker:
                     "L_stage2": cand.L_stage2,
                     "Cc": cand.Cc,
                     "Rz": cand.Rz,
+                    "Rz_target_1_over_gm2": 1.0 / max(cand.gm2, 1e-30),
                     "Itail": cand.Itail,
                     "I2": cand.I2,
                 },

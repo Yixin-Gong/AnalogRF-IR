@@ -266,7 +266,14 @@ class AnalogRFIRFlowRunner:
 
     def _print_postprocess_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
-        if etype in {"stage2_balance", "stage2_rebalance"}:
+        if etype == "initial_operating_point":
+            regions = event.get("region_counts", {}) or {}
+            region_text = ", ".join(f"{name}={count}" for name, count in sorted(regions.items()))
+            self.emit(
+                f"       Initial OP check: devices={event.get('operating_point_count', 0)}, "
+                f"regions=({region_text or 'none'})"
+            )
+        elif etype in {"stage2_balance", "stage2_rebalance"}:
             label = "Stage-2 re-balance" if etype == "stage2_rebalance" else "Stage-2 DC balance"
             self.emit(
                 f"       {label}: M6_W scale={event.get('scale', 1.0):.3f}, "
@@ -287,6 +294,9 @@ class AnalogRFIRFlowRunner:
             self.emit(
                 f"       Compensation tune: Cc={event.get('Cc', 0.0):.3e}F, "
                 f"Rz={event.get('Rz', 0.0):.1f}ohm, "
+                f"Rz_target={event.get('Rz_target_1_over_gm2', 0.0):.1f}ohm, "
+                f"I_tail={event.get('I_tail', 0.0):.3e}A, "
+                f"I_stage2={event.get('I_stage2', 0.0):.3e}A, "
                 f"PM~{meas.get('phase_margin', 0.0):.1f}deg, "
                 f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
                 f"evals={event.get('evaluated_candidates', 0)}"

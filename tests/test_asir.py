@@ -90,3 +90,17 @@ def test_from_yaml_cli_writes_embedded_output(tmp_path):
     data = load_v1_yaml(out)
     assert "topology" in data
     assert "asir_output" in data
+
+
+def test_two_stage_ota_extracts_miller_semantics():
+    design = build_design_from_v1_yaml("ir/schema_two_stage.yaml")
+    payload = design.to_dict()
+    counts = design.semantic_graph.primitive_type_counts()
+
+    assert payload["domain"] == "analog_ota"
+    assert counts["differential_pair"] == 1
+    assert counts["second_stage_inverter"] == 1
+    assert counts["miller_compensation"] == 1
+    assert "dominant_pole_rad_s" in design.dependency_graph.graph
+    assert "zero_target_Rz" in design.dependency_graph.graph
+    assert "bias" in design.phase_graph.graph

@@ -224,3 +224,87 @@ def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> Depe
         constraints=["lower CL improves energy and regeneration time together"],
     )
     return graph
+
+
+def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyGraph:
+    graph = DependencyGraph(f"{semantics.name}_dependencies")
+    primitive_refs = [p.id for p in semantics.primitives()]
+    input_refs = [p.id for p in semantics.by_type("differential_pair")]
+    stage2_refs = [p.id for p in semantics.by_type("second_stage_inverter")]
+    comp_refs = [p.id for p in semantics.by_type("miller_compensation")]
+    load_refs = [p.id for p in semantics.by_type("current_mirror_load")]
+    tail_refs = [p.id for p in semantics.by_type("tail_current_source")]
+
+    graph.add_dependency(
+        "unity_gain_rad_s",
+        ["gm1", "Cc"],
+        "gm1 / max(Cc, 1e-30)",
+        "Two-stage Miller OTA unity-gain frequency is set primarily by gm1/Cc.",
+        primitive_refs=input_refs + comp_refs,
+        constraints=["Cc > 0", "gm1 > 0"],
+    )
+    graph.add_dependency(
+        "dominant_pole_rad_s",
+        ["ro1", "gm2", "ro2", "Cc"],
+        "1 / max(ro1 * gm2 * ro2 * Cc, 1e-30)",
+        "Miller multiplication pulls the first-stage dominant pole to a lower frequency.",
+        primitive_refs=input_refs + load_refs + stage2_refs + comp_refs,
+        constraints=["increase Cc to lower the dominant pole when phase margin is weak"],
+    )
+    graph.add_dependency(
+        "second_pole_rad_s",
+        ["gm2", "CL_eff"],
+        "gm2 / max(CL_eff, 1e-30)",
+        "The non-dominant output pole is set by second-stage transconductance over effective output load.",
+        primitive_refs=stage2_refs,
+        constraints=["gm2 should place p2 well above unity-gain frequency"],
+    )
+    graph.add_dependency(
+        "zero_target_Rz",
+        ["gm2"],
+        "1 / max(gm2, 1e-30)",
+        "A nulling resistor near 1/gm2 removes the right-half-plane Miller zero.",
+        primitive_refs=stage2_refs + comp_refs,
+        constraints=["Rz should track the measured or estimated second-stage gm"],
+    )
+    graph.add_dependency(
+        "miller_zero_rad_s",
+        ["Cc", "Rz", "gm2"],
+        "1 / max(Cc * abs(1 / max(gm2, 1e-30) - Rz), 1e-30)",
+        "Series Rz-Cc compensation places the zero according to 1/(Cc*(1/gm2 - Rz)).",
+        primitive_refs=comp_refs,
+        constraints=["Rz below 1/gm2 leaves a right-half-plane zero", "Rz above 1/gm2 creates a left-half-plane zero"],
+    )
+    graph.add_dependency(
+        "dc_gain",
+        ["gm1", "ro1", "gm2", "ro2"],
+        "gm1 * ro1 * gm2 * ro2",
+        "Two-stage open-loop gain is the product of first-stage and second-stage gains.",
+        primitive_refs=input_refs + load_refs + stage2_refs,
+        constraints=["all gain devices must remain in saturation at the operating point"],
+    )
+    graph.add_dependency(
+        "slew_rate_pos",
+        ["Itail", "Cc"],
+        "Itail / max(Cc, 1e-30)",
+        "Positive slew is bounded by first-stage tail current charging the compensation capacitor.",
+        primitive_refs=tail_refs + comp_refs,
+        constraints=["Itail must satisfy the requested large-signal slew rate"],
+    )
+    graph.add_dependency(
+        "slew_rate_neg",
+        ["I_stage2", "CL_eff"],
+        "I_stage2 / max(CL_eff, 1e-30)",
+        "Negative slew is bounded by the second-stage output current and effective load.",
+        primitive_refs=stage2_refs,
+        constraints=["I_stage2 must satisfy the requested output discharge slew rate"],
+    )
+    graph.add_dependency(
+        "phase_margin_risk",
+        ["unity_gain_rad_s", "second_pole_rad_s", "dominant_pole_rad_s"],
+        "unity_gain_rad_s / max(second_pole_rad_s, 1e-30)",
+        "Phase-margin risk rises when the non-dominant pole approaches unity gain.",
+        primitive_refs=primitive_refs,
+        constraints=["lower the dominant pole with Cc before chasing bandwidth when PM fails"],
+    )
+    return graph

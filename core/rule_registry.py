@@ -90,21 +90,21 @@ class ValidationReport:
         return [r for r in self.results if r.severity == "info"]
 
     def summary(self, by_layer: bool = False) -> str:
-        lines = [f"Validation Report — {'PASSED' if self.schema_valid else 'FAILED'} "
+        lines = [f"Validation Report - {'PASSED' if self.schema_valid else 'FAILED'} "
                  f"({len(self.errors())} errors, {len(self.warnings())} warnings)"]
         if by_layer:
             layers = sorted(set(r.layer for r in self.results))
             layer_names = {1: "Syntax", 2: "Semantic", 3: "Value", 4: "Physical"}
             for lyr in layers:
                 lyr_results = [r for r in self.results if r.layer == lyr]
-                lines.append(f"\n── Layer {lyr} ({layer_names.get(lyr, '?')}) ──")
+                lines.append(f"\n-- Layer {lyr} ({layer_names.get(lyr, '?')}) --")
                 for r in lyr_results:
-                    icon = "✓" if r.passed else "✗"
+                    icon = "OK" if r.passed else "FAIL"
                     dev = f" [{r.device}]" if r.device else ""
-                    lines.append(f"  {icon} [{r.severity}] {r.check_name}{dev}: {r.message}")
+                    lines.append(f"  [{icon}] [{r.severity}] {r.check_name}{dev}: {r.message}")
         else:
             for r in self.results:
-                icon = "✓" if r.passed else "✗"
+                icon = "OK" if r.passed else "FAIL"
                 dev = f" [{r.device}]" if r.device else ""
-                lines.append(f"  {icon} [{r.severity}][L{r.layer}] {r.check_name}{dev}: {r.message}")
+                lines.append(f"  [{icon}] [{r.severity}][L{r.layer}] {r.check_name}{dev}: {r.message}")
         return "\n".join(lines)

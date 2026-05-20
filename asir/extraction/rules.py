@@ -7,10 +7,16 @@ from asir.topology import TopologyGraph
 
 
 class RuleBasedSemanticExtractor:
-    """Rule-based semantic extraction for comparator topologies."""
+    """Rule-based semantic extraction for comparator and OTA topologies."""
 
     def extract(self, topology: TopologyGraph) -> SemanticPrimitiveGraph:
         semantics = SemanticPrimitiveGraph(f"{topology.name}_semantics")
+        if topology.circuit_class.lower() == "ota":
+            for primitive in self._extract_ota_primitives(topology):
+                semantics.add_primitive(primitive)
+            self._add_semantic_relations(topology, semantics)
+            return semantics
+
         for primitive in self._extract_differential_pairs(topology):
             semantics.add_primitive(primitive)
         for primitive in self._extract_cross_coupled_latches(topology):
@@ -23,6 +29,182 @@ class RuleBasedSemanticExtractor:
             semantics.add_primitive(primitive)
         self._add_semantic_relations(topology, semantics)
         return semantics
+
+    def _extract_ota_primitives(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        primitives: list[SemanticPrimitive] = []
+        primitives.extend(self._extract_ota_input_pairs(topology))
+        primitives.extend(self._extract_ota_current_mirror_loads(topology))
+        primitives.extend(self._extract_ota_tail_bias(topology))
+        primitives.extend(self._extract_ota_second_stage(topology))
+        primitives.extend(self._extract_ota_miller_compensation(topology))
+        return primitives
+
+    def _extract_ota_input_pairs(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        primitives: list[SemanticPrimitive] = []
+        for index, devices in enumerate(self._devices_by_role_token(topology, "input_pair"), start=1):
+            if len(devices) < 2:
+                continue
+            gates = sorted({topology.terminal_net(dev, "gate") or "" for dev in devices})
+            drains = sorted({topology.terminal_net(dev, "drain") or "" for dev in devices})
+            sources = sorted({topology.terminal_net(dev, "source") or "" for dev in devices})
+            primitives.append(
+                SemanticPrimitive(
+                    id=f"ota_diff_pair_{index}",
+                    primitive_type="differential_pair",
+                    role="input transconductance stage",
+                    member_devices=devices,
+                    equations=[
+                        "i_diff = gm1 * (vinp - vinn)",
+                        "omega_u ~= gm1 / Cc",
+                    ],
+                    constraints=[
+                        "input pair devices must be symmetric",
+                        "input pair devices must remain in saturation at the operating point",
+                    ],
+                    active_phases=["bias", "small_signal"],
+                    state_variables=["v_stage1", "i_diff"],
+                    input_nets=gates,
+                    output_nets=drains,
+                    internal_nets=sources,
+                )
+            )
+        return primitives
+
+    def _extract_ota_current_mirror_loads(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        devices = [
+            dev for dev in topology.mos_devices()
+            if "current_mirror_load" in topology.role_hint(dev)
+        ]
+        if not devices:
+            return []
+        drains = sorted({topology.terminal_net(dev, "drain") or "" for dev in devices})
+        gates = sorted({topology.terminal_net(dev, "gate") or "" for dev in devices})
+        sources = sorted({topology.terminal_net(dev, "source") or "" for dev in devices})
+        return [
+            SemanticPrimitive(
+                id="ota_active_load_1",
+                primitive_type="current_mirror_load",
+                role="single-ended active load for the first-stage differential pair",
+                member_devices=sorted(devices),
+                equations=[
+                    "A1 ~= gm1 / (gds_input + gds_load)",
+                    "p1 is lowered by Miller multiplication from the second-stage gain",
+                ],
+                constraints=[
+                    "mirror load devices should be matched",
+                    "mirror output device must remain in saturation at the operating point",
+                ],
+                active_phases=["bias", "small_signal"],
+                state_variables=["v_stage1"],
+                input_nets=gates,
+                output_nets=drains,
+                internal_nets=sources,
+            )
+        ]
+
+    def _extract_ota_tail_bias(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        devices = [
+            dev for dev in topology.mos_devices()
+            if any(token in topology.role_hint(dev) for token in ("tail_current_source", "tail_bias_mirror"))
+        ]
+        if not devices:
+            return []
+        return [
+            SemanticPrimitive(
+                id="ota_tail_bias_1",
+                primitive_type="tail_current_source",
+                role="continuous bias current for the input differential pair",
+                member_devices=sorted(devices),
+                equations=[
+                    "Itail sets gm1 through the selected gm/ID",
+                    "SR+ ~= Itail / Cc",
+                ],
+                constraints=[
+                    "tail source and tail reference devices should preserve the intended mirror ratio",
+                    "tail source must remain in saturation at the operating point",
+                ],
+                active_phases=["bias", "small_signal"],
+                state_variables=["Itail"],
+                input_nets=sorted({topology.terminal_net(dev, "gate") or "" for dev in devices}),
+                output_nets=sorted({topology.terminal_net(dev, "drain") or "" for dev in devices}),
+                internal_nets=sorted({topology.terminal_net(dev, "source") or "" for dev in devices}),
+            )
+        ]
+
+    def _extract_ota_second_stage(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        devices = [
+            dev for dev in topology.mos_devices()
+            if any(token in topology.role_hint(dev) for token in (
+                "second_stage_gain",
+                "second_stage_load",
+                "output_current_source",
+                "output_bias_mirror",
+            ))
+        ]
+        gain_devices = [dev for dev in devices if "second_stage_gain" in topology.role_hint(dev)]
+        if not gain_devices:
+            return []
+        output_nets = topology.output_nets() or sorted(
+            {topology.terminal_net(dev, "drain") or "" for dev in devices}
+        )
+        return [
+            SemanticPrimitive(
+                id="ota_second_stage_1",
+                primitive_type="second_stage_inverter",
+                role="common-source inverter gain stage",
+                member_devices=sorted(devices),
+                equations=[
+                    "A2 ~= gm2 / (gds_pullup + gds_pulldown)",
+                    "p2 ~= gm2 / CL_eff",
+                ],
+                constraints=[
+                    "second-stage pull-up and pull-down devices must remain in saturation at the operating point",
+                    "second-stage bias mirror should preserve the intended current ratio",
+                ],
+                active_phases=["bias", "small_signal"],
+                state_variables=["vout", "I_stage2", "gm2"],
+                input_nets=sorted({topology.terminal_net(dev, "gate") or "" for dev in gain_devices}),
+                output_nets=output_nets,
+                internal_nets=sorted({topology.terminal_net(dev, "source") or "" for dev in devices}),
+            )
+        ]
+
+    def _extract_ota_miller_compensation(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        comp_devices = [
+            dev for dev in topology.capacitor_devices() + topology.resistor_devices()
+            if "compensation" in topology.role_hint(dev).lower() or dev.lower() in {"cc", "rz"}
+        ]
+        if not comp_devices:
+            return []
+        touched_nets = sorted(
+            {
+                net
+                for dev in comp_devices
+                for terminal in ("plus", "minus")
+                if (net := topology.terminal_net(dev, terminal))
+            }
+        )
+        return [
+            SemanticPrimitive(
+                id="ota_miller_comp_1",
+                primitive_type="miller_compensation",
+                role="series Rz-Cc Miller compensation network",
+                member_devices=sorted(comp_devices),
+                equations=[
+                    "omega_u ~= gm1 / Cc",
+                    "omega_z = 1 / (Cc * (1/gm2 - Rz))",
+                    "zero_target_Rz = 1 / gm2",
+                ],
+                constraints=[
+                    "Cc pulls the dominant pole to lower frequency and pushes the output pole higher",
+                    "Rz should be set near 1/gm2 to remove the right-half-plane zero",
+                ],
+                active_phases=["small_signal"],
+                state_variables=["Cc", "Rz", "omega_z"],
+                input_nets=touched_nets,
+                output_nets=touched_nets,
+            )
+        ]
 
     def _extract_differential_pairs(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
         role_groups = self._devices_by_role_token(topology, "input_pair")

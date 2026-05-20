@@ -45,7 +45,7 @@ def compute_IC_from_gm_id(gm_id: float, n: float = 1.4,
         return 0.0
 
     # Internal implementation note.
-    # gm/ID ≈ 2/VOV, VOV = 2*UT*sqrt(IC)
+    # gm/ID ~= 2/VOV, VOV = 2*UT*sqrt(IC)
     # Internal implementation note.
 
     x = n * ut * gm_id
@@ -115,7 +115,7 @@ def ic_to_description(ic: float, gm_id: Optional[float] = None) -> str:
     if gm_id is not None:
         parts.append(f"gm/ID={gm_id:.1f}")
 
-    return " — ".join(parts)
+    return " - ".join(parts)
 
 
 # Internal implementation note.

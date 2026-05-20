@@ -253,7 +253,7 @@ def build_agent_diagnostics(
         },
         "model_mismatch": mismatches,
         "devices": devices,
-        "diagnosis": _diagnosis_items(target_status, top_losses, mismatches, devices),
+        "diagnosis": _diagnosis_items(state, target_status, top_losses, mismatches, devices),
         "artifacts": {
             "design_state": "design_state.yaml",
             "netlist": "netlist.cir",
@@ -327,11 +327,12 @@ def _device_status(state: DesignState) -> dict:
     return out
 
 
-def _diagnosis_items(targets: dict, losses: list[dict], mismatches: list[dict], devices: dict) -> list[dict]:
+def _diagnosis_items(state: DesignState, targets: dict, losses: list[dict], mismatches: list[dict], devices: dict) -> list[dict]:
     items = []
+    is_two_stage = _is_two_stage_ota(state)
     for name, target in targets.items():
         if target["status"] == "fail":
-            hint = _target_hint(name)
+            hint = _target_hint(name, is_two_stage=is_two_stage)
             items.append(
                 {
                     "type": "target_failure",
@@ -374,10 +375,21 @@ def _diagnosis_items(targets: dict, losses: list[dict], mismatches: list[dict], 
     return items
 
 
-def _target_hint(name: str) -> str:
+def _is_two_stage_ota(state: DesignState) -> bool:
+    arch = (state.topology.architecture or "").lower()
+    return state.topology.class_.lower() == "ota" and (
+        "two" in arch or any(dev.role == "second_stage_gain" for dev in state.topology.devices)
+    )
+
+
+def _target_hint(name: str, *, is_two_stage: bool = False) -> str:
     if name in {"unity_gain_bandwidth", "ugbw", "bandwidth"}:
+        if is_two_stage:
+            return "After OP is valid, retune gm1/Cc: reduce Cc only if phase margin has enough reserve, otherwise keep the dominant pole low."
         return "Increase speed by raising useful gm, reducing compensation/load capacitance, or shortening high-capacitance devices."
     if name in {"phase_margin"}:
+        if is_two_stage:
+            return "For a two-stage OTA, first pull the dominant pole to lower frequency by increasing Cc, then set Rz near 1/gm2 and verify p2 separation."
         return "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
     if name in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
         return "Increase available large-signal charging current or reduce compensation/load capacitance."

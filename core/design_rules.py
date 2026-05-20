@@ -10,9 +10,9 @@ from schemas.design_state import DesignState, ProcessInfo, TransistorParameters
 from core.rule_registry import register_rule, ValidationReport, DiagnosisResult
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_min_width", layer=4,
                description="W must be greater than or equal to process.min_W for every transistor.")
@@ -45,7 +45,7 @@ def check_max_width(state: DesignState) -> ValidationReport:
         if W > proc.max_W:
             report.add(DiagnosisResult(
                 check_name="dr:max_width", passed=False, severity="warning",
-                message=f"{tid}: W={W*1e6:.1f}um > max_W={proc.max_W*1e6:.1f}um — "
+                message=f"{tid}: W={W*1e6:.1f}um > max_W={proc.max_W*1e6:.1f}um - "
                         f"consider finger decomposition",
                 layer=4, device=tid
             ))
@@ -152,9 +152,9 @@ def check_W_L_ratio(state: DesignState) -> ValidationReport:
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_min_area", layer=4,
                description="W*L must exceed the process minimum device area.")
@@ -170,7 +170,7 @@ def check_min_area(state: DesignState) -> ValidationReport:
         if area < proc.min_area * 0.99:
             report.add(DiagnosisResult(
                 check_name="dr:min_area", passed=False, severity="error",
-                message=f"{tid}: area={area:.2e}m² < min={proc.min_area:.2e}m²",
+                message=f"{tid}: area={area:.2e}m^2 < min={proc.min_area:.2e}m^2",
                 layer=4, device=tid
             ))
     return report
@@ -189,15 +189,15 @@ def check_finger_width(state: DesignState) -> ValidationReport:
             report.add(DiagnosisResult(
                 check_name="dr:finger_width", passed=False, severity="info",
                 message=f"{tid}: W={W*1e6:.1f}um > {proc.max_finger_width*1e6:.0f}um/finger "
-                        f"→ suggest m={nf} fingers",
+                        f"-> suggest m={nf} fingers",
                 layer=4, device=tid, details={"nf": nf}
             ))
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 PAIR_TOLERANCE = 0.05  # Internal implementation note.
 
@@ -225,16 +225,26 @@ def _check_pair_param(state: DesignState, param_name: str, tolerance: float,
                        label: str, getter) -> ValidationReport:
     """AnalogRF-IR internal documentation."""
     report = ValidationReport()
-    # Internal implementation note.
+    checked: set[tuple[str, str]] = set()
     role_groups = {}
     for dev in state.topology.devices:
         role_groups.setdefault(dev.role, []).append(dev.id)
-    for role, dev_ids in role_groups.items():
+    label_groups: dict[str, list[str]] = {}
+    for dv in state.design_variables:
+        if dv.symmetry_label and dv.device:
+            label_groups.setdefault(dv.symmetry_label, []).append(dv.device)
+
+    all_groups = {**role_groups, **{k: sorted(set(v)) for k, v in label_groups.items()}}
+    for role, dev_ids in all_groups.items():
         if len(dev_ids) < 2:
             continue
         for i in range(len(dev_ids)):
             for j in range(i + 1, len(dev_ids)):
                 a, b = dev_ids[i], dev_ids[j]
+                pair_key = (a, b)
+                if pair_key in checked:
+                    continue
+                checked.add(pair_key)
                 if a not in state.transistors or b not in state.transistors:
                     continue
                 pa = state.transistors[a].parameters
@@ -264,9 +274,16 @@ def check_current_mirror_ratio(state: DesignState) -> ValidationReport:
     """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     mirror_groups = {}
+    mirror_roles = {
+        "current_mirror_load",
+        "tail_current_source",
+        "tail_bias_mirror",
+        "output_current_source",
+        "output_bias_mirror",
+        "second_stage_load",
+    }
     for dev in state.topology.devices:
-        if "current_mirror" in dev.role or "mirror" in dev.role.lower():
-            # Internal implementation note.
+        if dev.role in mirror_roles or "mirror" in dev.role.lower():
             gate_net = dev.connections.get("gate", "")
             mirror_groups.setdefault(gate_net, []).append(dev.id)
     for gate_net, dev_ids in mirror_groups.items():
@@ -293,9 +310,9 @@ def check_current_mirror_ratio(state: DesignState) -> ValidationReport:
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_saturation_margin", layer=4,
                description="Active devices should satisfy VDS >= VDSAT times the headroom factor.")
@@ -304,19 +321,16 @@ def check_saturation_margin(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
     factor = proc.VDSAT_headroom_factor
-    exempt = {"current_mirror_load"}  # Internal implementation note.
     for tid, ts in state.transistors.items():
         p = ts.parameters
         if p.region == "unknown" or p.vdsat <= 0:
             continue
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
-        if role in exempt:
-            continue
         if p.vds < p.vdsat * factor:
             report.add(DiagnosisResult(
                 check_name="dr:saturation_margin", passed=False, severity="warning",
-                message=f"{tid} ({role}): vds={p.vds:.3f}V < {factor}*vdsat={p.vdsat*factor:.3f}V — "
+                message=f"{tid} ({role}): vds={p.vds:.3f}V < {factor}*vdsat={p.vdsat*factor:.3f}V - "
                         f"not in saturation",
                 layer=4, device=tid,
                 details={"vds": p.vds, "vdsat": p.vdsat, "factor": factor}
@@ -330,7 +344,6 @@ def check_region_validity(state: DesignState) -> ValidationReport:
     """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     SATURATION_OK = {"saturation", "subthreshold"}
-    EXEMPT = {"current_mirror_load"}
     for tid, ts in state.transistors.items():
         p = ts.parameters
         dev_def = state.get_device_def(tid)
@@ -349,22 +362,17 @@ def check_region_validity(state: DesignState) -> ValidationReport:
         if p.region == "unknown":
             report.add(DiagnosisResult(
                 check_name="dr:region_valid", passed=False, severity="warning",
-                message=f"{tid}: region='unknown' — simulation may not have properly "
+                message=f"{tid}: region='unknown' - simulation may not have properly "
                         f"back-filled operating region",
                 layer=4, device=tid
             ))
             continue
 
-        # Internal implementation note.
-        if role in EXEMPT:
-            continue
-
-        # Internal implementation note.
         if p.region not in SATURATION_OK:
             report.add(DiagnosisResult(
                 check_name="dr:region_saturation", passed=False,
                 severity="warning" if p.region == "linear" else "error",
-                message=f"{tid} ({role}): region='{p.region}' — expected saturation, "
+                message=f"{tid} ({role}): region='{p.region}' - expected saturation, "
                         f"vds={p.vds:.3f}V, vdsat={p.vdsat:.3f}V",
                 layer=4, device=tid,
                 details={"region": p.region, "vds": p.vds, "vdsat": p.vdsat}
@@ -377,10 +385,15 @@ def check_region_validity(state: DesignState) -> ValidationReport:
 
 # Internal implementation note.
 _SATURATION_DEPTH_MARGIN: dict = {
-    "input_pair":         0.08,   # Internal implementation note.
-    "cascode":            0.20,   # Internal implementation note.
-    "tail_current_source": 0.05,  # Internal implementation note.
-    "current_mirror_load": 0.0,   # Internal implementation note.
+    "input_pair": 0.08,
+    "cascode": 0.20,
+    "tail_current_source": 0.05,
+    "tail_bias_mirror": 0.03,
+    "current_mirror_load": 0.03,
+    "second_stage_gain": 0.05,
+    "second_stage_load": 0.05,
+    "output_current_source": 0.05,
+    "output_bias_mirror": 0.03,
 }
 _DEFAULT_DEPTH_MARGIN = 0.05  # Internal implementation note.
 
@@ -396,9 +409,6 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
             continue
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
-        if role in ("current_mirror_load",):
-            continue  # Internal implementation note.
-
         margin_v = p.vds - p.vdsat
         required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
         if required <= 0:
@@ -409,7 +419,7 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
                 check_name="dr:saturation_depth", passed=False,
                 severity="warning",
                 message=f"{tid} ({role}): VDS-VDSAT={margin_v*1e3:.0f}mV "
-                        f"< required {required*1e3:.0f}mV — marginal saturation",
+                        f"< required {required*1e3:.0f}mV - marginal saturation",
                 layer=4, device=tid,
                 details={"vds": p.vds, "vdsat": p.vdsat,
                          "margin": margin_v, "required": required}
@@ -428,6 +438,11 @@ _INVERSION_EXPECTATION: dict = {
     "input_pair":         (0.3, 8.0,   "moderate inversion for gain-bandwidth efficiency"),
     "current_mirror_load": (2.0, 50.0, "moderate-to-strong inversion for mirror accuracy"),
     "tail_current_source": (5.0, 100.0, "strong inversion for stable bias current and high output resistance"),
+    "tail_bias_mirror": (5.0, 100.0, "strong inversion for stable bias reference current"),
+    "second_stage_gain": (2.0, 80.0, "moderate-to-strong inversion for gain and output drive"),
+    "second_stage_load": (5.0, 100.0, "strong inversion for output current source behavior"),
+    "output_current_source": (5.0, 100.0, "strong inversion for output current source behavior"),
+    "output_bias_mirror": (5.0, 100.0, "strong inversion for output bias reference current"),
     "cascode":            (5.0, 100.0, "strong inversion for high intrinsic gain"),
 }
 
@@ -442,7 +457,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
     except ImportError:
         report.add(DiagnosisResult(
             check_name="dr:inversion_region", passed=False, severity="error",
-            message="core.inversion module not available — cannot compute IC",
+            message="core.inversion module not available - cannot compute IC",
             layer=4
         ))
         return report
@@ -473,7 +488,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
             report.add(DiagnosisResult(
                 check_name="dr:inversion_region", passed=False,
                 severity="warning",
-                message=f"{tid} ({role}): IC={ic:.3f} < min={ic_min} — "
+                message=f"{tid} ({role}): IC={ic:.3f} < min={ic_min} - "
                         f"too weak (expected: {desc})",
                 layer=4, device=tid,
                 details={"ic": ic, "ic_min": ic_min, "ic_max": ic_max,
@@ -483,7 +498,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
             report.add(DiagnosisResult(
                 check_name="dr:inversion_region", passed=False,
                 severity="warning",
-                message=f"{tid} ({role}): IC={ic:.3f} > max={ic_max} — "
+                message=f"{tid} ({role}): IC={ic:.3f} > max={ic_max} - "
                         f"too strong (expected: {desc})",
                 layer=4, device=tid,
                 details={"ic": ic, "ic_min": ic_min, "ic_max": ic_max,
@@ -532,9 +547,6 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         if info["region"] == "unknown" or info["vdsat"] <= 0:
             continue
         role = info["role"]
-        if role in ("current_mirror_load",):
-            continue  # Internal implementation note.
-
         margin = info["margin"]
 
         # Internal implementation note.
@@ -580,7 +592,7 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         report.add(DiagnosisResult(
             check_name="dr:diagnose_saturation", passed=True, severity="info",
             message=f"{tid} ({role}): VDS-VDSAT={margin*1e3:.0f}mV "
-                    f"(required {required*1e3:.0f}mV) → {'; '.join(causes)}",
+                    f"(required {required*1e3:.0f}mV) -> {'; '.join(causes)}",
             layer=4, device=tid,
             details={"vds": info["vds"], "vdsat": info["vdsat"],
                      "margin": margin, "vds_ratio": vds_ratio,
@@ -588,16 +600,14 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         ))
 
     # Internal implementation note.
-    total_vds = sum(info["vds"] for info in devices_info.values()
-                    if info["vds"] > 0 and info["role"] != "current_mirror_load")
-    active_count = sum(1 for info in devices_info.values()
-                       if info["vds"] > 0 and info["role"] != "current_mirror_load")
+    total_vds = sum(info["vds"] for info in devices_info.values() if info["vds"] > 0)
+    active_count = sum(1 for info in devices_info.values() if info["vds"] > 0)
     if active_count > 0:
         avg_vds = total_vds / active_count
         if avg_vds < 0.15:
             report.add(DiagnosisResult(
                 check_name="dr:diagnose_headroom", passed=True, severity="info",
-                message=f"Average VDS/device = {avg_vds*1e3:.0f}mV (VDD={span:.2f}V) — "
+                message=f"Average VDS/device = {avg_vds*1e3:.0f}mV (VDD={span:.2f}V) - "
                         "stacked path is crowded; consider reducing stack depth or increasing VDD",
                 layer=4
             ))
@@ -715,13 +725,13 @@ def check_VGS_safe_range(state: DesignState) -> ValidationReport:
         if vov < 0.05:
             report.add(DiagnosisResult(
                 check_name="dr:VGS_safe", passed=False, severity="info",
-                message=f"{tid}: vov={vov*1e3:.1f}mV — deep subthreshold, noise may be high",
+                message=f"{tid}: vov={vov*1e3:.1f}mV - deep subthreshold, noise may be high",
                 layer=4, device=tid
             ))
         elif vov > 0.8:
             report.add(DiagnosisResult(
                 check_name="dr:VGS_safe", passed=False, severity="info",
-                message=f"{tid}: vov={vov:.2f}V — strong overdrive, check reliability",
+                message=f"{tid}: vov={vov:.2f}V - strong overdrive, check reliability",
                 layer=4, device=tid
             ))
     return report
@@ -745,9 +755,9 @@ def check_headroom(state: DesignState) -> ValidationReport:
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_hard_targets", layer=4,
                description="All priority-1 targets must pass when measurements are available.")
@@ -812,9 +822,9 @@ def check_all_targets(state: DesignState) -> ValidationReport:
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_gm_id_physical_range", layer=4,
                description="gm/ID strategy values must stay inside process-level feasible bounds.")
@@ -875,15 +885,15 @@ def check_symmetry_in_design_vars(state: DesignState) -> ValidationReport:
                 report.add(DiagnosisResult(
                     check_name="dr:design_var_symmetry", passed=False, severity="error",
                     message=f"Symmetry group '{label}' {var_name}: "
-                            f"{dv.device}.{dv.variable} range ≠ {ref.device}.{ref.variable} range",
+                            f"{dv.device}.{dv.variable} range != {ref.device}.{ref.variable} range",
                     layer=4, device=dv.device
                 ))
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 @register_rule("check_temperature_range", layer=4,
                description="Simulation temperature should stay inside the IC operating range.")
@@ -893,7 +903,7 @@ def check_temperature_range(state: DesignState) -> ValidationReport:
     if t < -40 or t > 125:
         report.add(DiagnosisResult(
             check_name="dr:temperature", passed=False, severity="warning",
-            message=f"Simulation temperature {t}°C outside standard IC range (-40~125°C)",
+            message=f"Simulation temperature {t} degC outside standard IC range (-40~125 degC)",
             layer=4
         ))
     return report
@@ -931,11 +941,11 @@ def check_power_density(state: DesignState) -> ValidationReport:
         if p.id > 0 and p.vds > 0:
             total_power += p.id * p.vds
     if total_area > 0 and total_power > 0:
-        density = total_power / total_area  # W/m²
+        density = total_power / total_area  # W/m^2
         if density > 1e6:  # Internal implementation note.
             report.add(DiagnosisResult(
                 check_name="dr:power_density", passed=False, severity="info",
-                message=f"Power density={density/1e4:.1f}W/mm² — high, consider reliability",
+                message=f"Power density={density/1e4:.1f}W/mm^2 - high, consider reliability",
                 layer=4
             ))
     return report
@@ -970,9 +980,9 @@ def check_process_config(state: DesignState) -> ValidationReport:
     return report
 
 
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 # Internal implementation note.
-# ═══════════════════════════════════════════════════════════════
+# ===============================================================
 
 ALL_RULES = [
     # Internal implementation note.

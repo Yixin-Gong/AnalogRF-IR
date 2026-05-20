@@ -129,6 +129,7 @@ def _asir_summary(asir_output: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": asir_output.get("name"),
         "domain": asir_output.get("domain"),
+        "circuit_class": asir_output.get("circuit_class"),
         "comparator_family": asir_output.get("comparator_family"),
         "primitive_count": len(primitives) if isinstance(primitives, list) else 0,
         "layers": sorted(layers.keys()),

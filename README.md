@@ -13,13 +13,13 @@ The project is an active research prototype. The strongest path today is the two
 Current capabilities include:
 
 - Schema-first circuit description. The YAML schema is treated as the source of truth.
-- ASIR semantic representation for topology reasoning and future cross-circuit reuse.
+- ASIR semantic representation for OTA and comparator topology reasoning.
 - gm/ID-based compact sizing and NSGA-II optimization.
 - IHP SG13G2 and PTM lookup-table support.
 - Physics-informed feasibility checking for two-stage Miller OTAs.
 - ngspice-backed AC, DC, transient slew-rate, and operating-point headroom validation.
 - Structured JSON outputs for agents and downstream tools.
-- Post-processing for two-stage DC operating point repair and bounded compensation tuning.
+- OP-first post-processing for two-stage DC repair, Miller compensation tuning, and local current recovery.
 
 ## Repository Layout
 
@@ -51,60 +51,66 @@ docs/                 Development notes and method reports
 - ngspice for simulator-backed validation
 - IHP SG13G2 PDK files if using `environment_ihp_sg13g2.yaml`
 
-The current development environment uses Ubuntu under WSL with ngspice installed in the Linux environment.
+The current development environment uses Ubuntu 26.04 under WSL with ngspice installed in the Linux environment.
 
-Install Python dependencies:
+Recreate the Python environment and install dependencies:
 
 ```bash
+rm -rf .venv
+python3 -m venv .venv
+. .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
 For WSL-based runs from this workspace:
 
 ```bash
-wsl -d Ubuntu-26.04 --cd /mnt/d/AnalogRF-IR -- python3 -m pip install -r requirements.txt
+wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; rm -rf .venv; python3 -m venv .venv; . .venv/bin/activate; python3 -m pip install -r requirements.txt'
 ```
 
 ## Quick Start
 
-Run the IHP two-stage OTA flow:
+Run the PTM two-stage OTA flow:
 
 ```bash
-python3 main.py \
-  --env environment_ihp_sg13g2.yaml \
+wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python main.py \
+  --env environment.yaml \
   --schema ir/schema_two_stage.yaml \
+  --topology yaml \
   --generations 16 \
-  --pop-size 36 \
-  --seed 42
+  --pop-size 32 \
+  --seed 11'
 ```
 
 Run a fast smoke test without post-processing:
 
 ```bash
-python3 main.py \
-  --env environment_ihp_sg13g2.yaml \
+wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python main.py \
+  --env environment.yaml \
   --schema ir/schema_two_stage.yaml \
+  --topology yaml \
   --generations 3 \
   --pop-size 10 \
   --seed 31 \
   --skip-dc-repair \
-  --skip-comp-tune
+  --skip-comp-tune'
 ```
 
 Run the feasibility checker:
 
 ```bash
-python3 scripts/run_feasibility_check.py \
-  --env environment_ihp_sg13g2.yaml \
+wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python scripts/run_feasibility_check.py \
+  --env environment.yaml \
   --schema ir/schema_two_stage.yaml \
-  --samples 3000 \
-  --seed 41
+  --topology yaml \
+  --samples 300 \
+  --seed 41'
 ```
 
 Run the test suite:
 
 ```bash
-python3 -m pytest tests/test_frontends.py tests/test_asir.py tests/test_modular_flow.py -q
+wsl -d Ubuntu-26.04 -- bash -lc 'cd /mnt/d/AnalogRF-IR; . .venv/bin/activate; python -m pytest -q'
 ```
 
 ## Inputs And Outputs
@@ -116,6 +122,8 @@ Input is primarily schema YAML. The schema describes:
 - design variables such as `gm_id`, `L`, `I_tail`, `I_stage2`, `Cc`, and `Rz`
 - target specs
 - loss terms and evaluation requests
+
+For two-stage Miller OTAs, ASIR models the series `Rz` and `Cc` network explicitly. The zero-cancellation target is `Rz ~= 1/gm2`, where `gm2` is the second-stage transconductance. Stability diagnostics first pull the dominant pole lower with `Cc`, then verify second-pole separation and `Rz` placement.
 
 The flow writes one run directory under `runs/iter_###/`:
 
@@ -137,29 +145,33 @@ Recent milestones:
 - Added slew-rate estimation and transient ngspice validation.
 - Added output swing and input common-mode range estimates and ngspice headroom extraction.
 - Added a physics-informed feasibility checker for two-stage Miller OTAs.
-- Reworked two-stage compensation tuning with candidate budgets, per-candidate timeouts, stability rescue points, and early-stop behavior.
+- Reworked two-stage compensation tuning with candidate budgets, per-candidate timeouts, stability rescue points, current recovery, and robust early-stop behavior.
+- Added OTA ASIR primitives for input pair, mirror load, tail bias, second-stage inverter, and Miller compensation.
+- Added explicit symmetry-label validation for mirror/reference device pairs.
 
-Recent IHP two-stage OTA validation after bounded compensation tuning:
+Recent PTM two-stage OTA validation after OP-first repair and robust compensation tuning:
 
 ```text
-runs/iter_078/
-  dc_gain_db:             64.98 dB
-  unity_gain_bandwidth:   14.01 MHz
-  phase_margin:           45.95 deg
-  slew_rate:              39.30 V/us
-  output_swing:           0.690 V
-  ICMR:                   0.625 V to 1.132 V
-  total_power:            98.8 uW
+runs/iter_003/
+  dc_gain_db:             79.47 dB
+  unity_gain_bandwidth:   101.90 MHz
+  phase_margin:           48.35 deg
+  slew_rate:              81.44 V/us
+  output_swing:           0.822 V
+  ICMR:                   0.598 V to 1.315 V
+  total_power:            190.6 uW
+  Cc:                     510.8 fF
+  Rz:                     4.298 kohm
 ```
 
-This point passes gain, phase margin, power, output swing, and ICMR. It still misses the current UGBW and positive slew-rate targets, which points to the next optimizer-model improvement rather than a compensation-sweep runtime problem.
+This point passes gain, unity-gain bandwidth, phase margin, slew rate, output swing, ICMR, and power targets. The final ngspice operating point keeps all nine MOS devices in saturation. Width/length symmetry is preserved for `M1/M2`, `M3/M4`, `M5/M8`, and `M7/M9`; mirror copy/reference devices can still show gm and VDS differences because they sit at different operating voltages.
 
 ## Known Limitations
 
-- The compact optimizer can still overestimate speed for IHP two-stage OTA points.
+- The compact optimizer can still overestimate speed for some two-stage OTA points, so ngspice remains the final authority.
 - PM is now verified from exported ngspice AC sweep data, but loop-gain return-ratio validation is not yet fully integrated.
 - Output swing and ICMR are currently operating-point headroom estimates, not full DC sweep signoff.
-- Two-stage post-processing can repair bias and compensation locally, but it cannot fully compensate for a weak compact model choice.
+- Two-stage post-processing can repair bias and compensation locally, but very poor compact-model choices may still need a larger optimizer run.
 - The ASIR comparator path is semantic and structural; comparator sizing objectives are not yet connected to the full optimizer loop.
 - RF-specific blocks are not yet modeled. RF extensions should add noise figure, S-parameters, impedance matching, linearity, stability factor, and PSS/PAC-style workflows where supported.
 
@@ -167,7 +179,7 @@ This point passes gain, phase margin, power, output swing, and ICMR. It still mi
 
 Near-term:
 
-- Strengthen the IHP two-stage optimizer around `I_stage2`, `gm2`, compensation capacitance, PM, UGBW, and slew-rate lower bounds.
+- Strengthen the two-stage optimizer around `I_stage2`, `gm2`, compensation capacitance, PM, UGBW, and slew-rate lower bounds.
 - Add stricter swing and ICMR sweep testbenches.
 - Add Middlebrook loop-gain validation for compensated OTAs.
 - Improve schema diagnostics so feasibility failures directly suggest minimal spec relaxations.
