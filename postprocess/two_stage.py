@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -204,6 +205,12 @@ def tune_two_stage_compensation(
     state: DesignState,
     sim: NgspiceSimulator,
     work_dir: Path,
+    *,
+    max_base_candidates: int = 24,
+    max_refine_candidates: int = 8,
+    max_load_candidates: int = 8,
+    time_budget_sec: float = 45.0,
+    candidate_timeout_sec: float = 5.0,
 ) -> dict:
     if not is_two_stage_state(state):
         return {}
@@ -221,56 +228,6 @@ def tune_two_stage_compensation(
     gm6 = state.transistors.get(gain_id).parameters.gm if gain_id in state.transistors else 0.0
     rz0 = 1.0 / gm6 if gm6 > 1e-12 else current_rz
 
-    cc_candidates = _unique_sorted(
-        [
-            cc_low,
-            cc_low * 1.25,
-            cc_low * 1.5,
-            cc_low * 2.0,
-            cc_low * 2.5,
-            cc_low * 3.0,
-            cc_low * 4.0,
-            cc_low * 5.0,
-            cc_low * 7.5,
-            cc_low * 10.0,
-            current_cc * 0.75,
-            current_cc,
-            current_cc * 1.5,
-            current_cc * 2.25,
-            cc_high,
-        ],
-        cc_low,
-        cc_high,
-    )
-    rz_candidates = _unique_sorted(
-        [
-            rz_low,
-            300.0,
-            500.0,
-            750.0,
-            1000.0,
-            1500.0,
-            2000.0,
-            2500.0,
-            3000.0,
-            3500.0,
-            4000.0,
-            4500.0,
-            5000.0,
-            7500.0,
-            10000.0,
-            15000.0,
-            rz0 * 0.5,
-            rz0,
-            rz0 * 1.5,
-            rz0 * 2.0,
-            current_rz,
-            rz_high,
-        ],
-        rz_low,
-        rz_high,
-    )
-
     targets = state.targets
     gain_min = targets.get("dc_gain", Target()).min or 0.0
     bw_target = targets.get("unity_gain_bandwidth", Target())
@@ -278,6 +235,9 @@ def tune_two_stage_compensation(
     bw_max = bw_target.max or float("inf")
     pm_min = targets.get("phase_margin", Target()).min or 0.0
     power_max = targets.get("power", Target()).max or float("inf")
+    swing_min = targets.get("output_swing", Target()).min or 0.0
+    icmr_min_max = targets.get("icmr_min", Target()).max
+    icmr_max_min = targets.get("icmr_max", Target()).min
 
     load_ids = [dev.id for dev in state.topology.devices if dev.role == "current_mirror_load"]
     load_dims = {
@@ -306,11 +266,25 @@ def tune_two_stage_compensation(
             ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
 
     def spec_pass(meas: dict) -> bool:
-        return (
-            meas.get("dc_gain_db", 0.0) >= gain_min
-            and meas.get("unity_gain_bandwidth", 0.0) >= bw_min
-            and meas.get("phase_margin", 0.0) >= pm_min
-        )
+        if meas.get("dc_gain_db", 0.0) < gain_min:
+            return False
+        if meas.get("unity_gain_bandwidth", 0.0) < bw_min:
+            return False
+        if meas.get("unity_gain_bandwidth", 0.0) > bw_max:
+            return False
+        if meas.get("phase_margin", 0.0) < pm_min:
+            return False
+        if power_max < float("inf") and "total_power" not in meas:
+            return False
+        if meas.get("total_power", 0.0) > power_max:
+            return False
+        if swing_min and ("output_swing" not in meas or meas.get("output_swing", 0.0) < swing_min):
+            return False
+        if icmr_min_max is not None and ("icmr_min" not in meas or meas.get("icmr_min", float("inf")) > icmr_min_max):
+            return False
+        if icmr_max_min is not None and ("icmr_max" not in meas or meas.get("icmr_max", 0.0) < icmr_max_min):
+            return False
+        return True
 
     def score_measurements(meas: dict) -> float:
         gain = meas.get("dc_gain_db", 0.0)
@@ -318,17 +292,33 @@ def tune_two_stage_compensation(
         pm = meas.get("phase_margin", 0.0)
         power = meas.get("total_power", 0.0)
         score = 0.0
-        score += 20.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
-        score += 15.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-        score += 25.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+        score += 25.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
+        score += 25.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
+        score += 70.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+        if pm < 0.0:
+            score += 80.0 + min(abs(pm), 180.0) / 4.0
         if bw_max < float("inf"):
             score += 0.7 * max(0.0, bw - bw_max) / max(bw_max, 1.0)
         if power_max < float("inf"):
             score += 0.2 * max(0.0, power) / max(power_max, 1e-12)
+        if swing_min:
+            score += 6.0 * max(0.0, swing_min - meas.get("output_swing", 0.0)) / max(swing_min, 1.0)
+        if icmr_min_max is not None:
+            if "icmr_min" in meas:
+                score += 4.0 * max(0.0, meas["icmr_min"] - icmr_min_max) / max(icmr_min_max, 1.0)
+            else:
+                score += 4.0
+        if icmr_max_min is not None:
+            score += 4.0 * max(0.0, icmr_max_min - meas.get("icmr_max", 0.0)) / max(icmr_max_min, 1.0)
         if pm >= pm_min and gain >= gain_min and bw >= bw_min:
             score -= min(pm - pm_min, 40.0) / 200.0
             score -= min(max(0.0, bw - bw_min) / max(bw_min, 1.0), 1.0) / 50.0
         return score
+
+    def should_skip_candidate(cc: float, rz: float) -> bool:
+        # Very small Cc with a large nulling resistor is frequently unstable and
+        # expensive for PSP/ngspice AC convergence, while rarely fixing PM.
+        return cc <= cc_low * 1.35 and rz >= rz_high * 0.70
 
     def evaluate_candidate(best: dict, cc: float, rz: float, load_scale: float) -> dict:
         apply_load_scale(load_scale)
@@ -347,43 +337,226 @@ def tune_two_stage_compensation(
             }
         return best
 
-    best = {"score": float("inf"), "Cc": current_cc, "Rz": current_rz, "load_scale": 1.0, "measurements": {}}
-    for cc in cc_candidates:
-        for rz in rz_candidates:
-            best = evaluate_candidate(best, cc, rz, 1.0)
+    best = {
+        "score": float("inf"),
+        "Cc": current_cc,
+        "Rz": current_rz,
+        "load_scale": 1.0,
+        "measurements": {},
+    }
+    stats = {
+        "evaluated_candidates": 0,
+        "skipped_candidates": 0,
+        "candidate_budget": max_base_candidates + max_refine_candidates + max_load_candidates,
+        "early_stop": False,
+        "early_stop_reason": "",
+    }
+    started = time.time()
+    evaluated: set[tuple[str, str, str]] = set()
+    records: list[dict] = []
 
-    if load_dims and not spec_pass(best["measurements"]):
-        local_cc_candidates = _unique_sorted(
-            [
-                best["Cc"],
-                cc_low * 1.25,
-                cc_low * 1.4,
-                cc_low * 1.55,
-                cc_low * 1.75,
-                cc_low * 2.0,
-                cc_low * 2.3,
-            ],
-            cc_low,
+    def candidate_key(cc: float, rz: float, load_scale: float) -> tuple[str, str, str]:
+        return (f"{cc:.12e}", f"{rz:.12e}", f"{load_scale:.6f}")
+
+    def add_candidate(
+        candidates: list[tuple[float, float, float, str]],
+        cc: float,
+        rz: float,
+        load_scale: float = 1.0,
+        tag: str = "base",
+    ) -> None:
+        cc = min(max(float(cc), cc_low), cc_high)
+        rz = min(max(float(rz), rz_low), rz_high)
+        load_scale = float(load_scale)
+        key = candidate_key(cc, rz, load_scale)
+        if not any(candidate_key(old_cc, old_rz, old_scale) == key for old_cc, old_rz, old_scale, _ in candidates):
+            candidates.append((cc, rz, load_scale, tag))
+
+    def candidate_priority(item: tuple[float, float, float, str]) -> float:
+        cc, rz, load_scale, _tag = item
+        cc_ref = max(current_cc, cc_low)
+        rz_ref = max(rz0, rz_low)
+        return (
+            abs(math.log(max(cc, 1e-30) / max(cc_ref, 1e-30)))
+            + 0.6 * abs(math.log(max(rz, 1e-30) / max(rz_ref, 1e-30)))
+            + 0.3 * abs(load_scale - 1.0)
+        )
+
+    def budget_exhausted() -> bool:
+        if stats["evaluated_candidates"] >= stats["candidate_budget"]:
+            return True
+        return (time.time() - started) >= time_budget_sec
+
+    def run_candidates(candidates: list[tuple[float, float, float, str]], limit: int) -> bool:
+        nonlocal best
+        for cc, rz, load_scale, tag in candidates[: max(0, limit)]:
+            if budget_exhausted():
+                stats["early_stop"] = True
+                stats["early_stop_reason"] = "budget_exhausted"
+                return True
+            key = candidate_key(cc, rz, load_scale)
+            if key in evaluated:
+                continue
+            if should_skip_candidate(cc, rz):
+                stats["skipped_candidates"] += 1
+                continue
+            evaluated.add(key)
+            before_score = best["score"]
+            best = evaluate_candidate(best, cc, rz, load_scale)
+            stats["evaluated_candidates"] += 1
+            if best["score"] < before_score:
+                records.append(
+                    {
+                        "score": best["score"],
+                        "Cc": best["Cc"],
+                        "Rz": best["Rz"],
+                        "load_scale": best["load_scale"],
+                        "tag": tag,
+                    }
+                )
+            if spec_pass(best["measurements"]):
+                stats["early_stop"] = True
+                stats["early_stop_reason"] = "spec_pass"
+                return True
+        return False
+
+    base_candidates: list[tuple[float, float, float, str]] = []
+    add_candidate(base_candidates, current_cc, current_rz, tag="current")
+
+    high_rz_rescue = min(max(rz0 * 1.35, 12_000.0), rz_high)
+    mid_rz_rescue = min(max(rz0, 2_500.0), rz_high)
+    for cc, rz in (
+        (cc_high, high_rz_rescue),
+        (cc_high, 12_000.0),
+        (cc_high * 0.8, high_rz_rescue),
+        (cc_high * 0.8, 12_000.0),
+        (max(current_cc * 3.0, cc_low * 10.0), 2_500.0),
+        (max(current_cc * 3.0, cc_low * 10.0), 5_000.0),
+        (max(current_cc * 4.0, cc_low * 15.0), mid_rz_rescue),
+    ):
+        add_candidate(base_candidates, cc, rz, tag="stability_rescue")
+
+    stability_cc_pool = _unique_preserve(
+        [
+            current_cc * 1.5,
+            current_cc * 2.0,
+            current_cc * 3.0,
+            cc_low * 10.0,
+            cc_low * 15.0,
+            cc_low * 20.0,
             cc_high,
-        )
-        local_rz_candidates = _unique_sorted(
-            [
-                best["Rz"],
-                rz_high * 0.8,
-                rz_high * 0.9,
-                rz_high,
-            ],
-            rz_low,
-            rz_high,
-        )
-        for load_scale in (1.08, 1.15, 1.20, 1.22, 1.25):
-            for cc in local_cc_candidates:
-                for rz in local_rz_candidates:
-                    best = evaluate_candidate(best, cc, rz, load_scale)
+        ],
+        cc_low,
+        cc_high,
+    )
+    stability_rz_pool = _unique_preserve(
+        [
+            rz0,
+            rz0 * 1.3,
+            2500.0,
+            5000.0,
+            10000.0,
+            12000.0,
+        ],
+        rz_low,
+        rz_high,
+    )
+    for cc in stability_cc_pool:
+        for rz in stability_rz_pool:
+            add_candidate(base_candidates, cc, rz, tag="stability_rescue")
+
+    coarse_candidates: list[tuple[float, float, float, str]] = []
+    cc_pool = _unique_preserve(
+        [
+            current_cc,
+            current_cc * 0.75,
+            current_cc * 1.25,
+            current_cc * 1.5,
+            cc_low * 1.5,
+            cc_low * 2.0,
+            cc_low * 3.0,
+            cc_low * 5.0,
+            min(cc_high, math.sqrt(cc_low * cc_high)),
+        ],
+        cc_low,
+        cc_high,
+    )
+    rz_pool = _unique_preserve(
+        [
+            current_rz,
+            rz0 * 0.6,
+            rz0 * 0.8,
+            rz0,
+            rz0 * 1.2,
+            rz0 * 1.5,
+            1000.0,
+            2000.0,
+            3500.0,
+            5000.0,
+            8000.0,
+        ],
+        rz_low,
+        rz_high,
+    )
+    for cc in cc_pool:
+        for rz in rz_pool:
+            add_candidate(coarse_candidates, cc, rz, tag="coarse")
+    coarse_candidates.sort(key=candidate_priority)
+    for cc, rz, load_scale, tag in coarse_candidates:
+        add_candidate(base_candidates, cc, rz, load_scale, tag)
+
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        stopped = run_candidates(base_candidates, max_base_candidates)
+
+        if not stopped and not spec_pass(best["measurements"]) and max_refine_candidates > 0:
+            refine_candidates: list[tuple[float, float, float, str]] = []
+            seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
+            for seed in seeds:
+                for cc_factor in (0.75, 1.0, 1.25):
+                    for rz_factor in (0.75, 1.0, 1.25):
+                        add_candidate(
+                            refine_candidates,
+                            seed["Cc"] * cc_factor,
+                            seed["Rz"] * rz_factor,
+                            seed.get("load_scale", 1.0),
+                            tag="refine",
+                        )
+            refine_candidates.sort(key=candidate_priority)
+            stopped = run_candidates(refine_candidates, max_refine_candidates)
+
+        if (
+            not stopped
+            and load_dims
+            and not spec_pass(best["measurements"])
+            and max_load_candidates > 0
+        ):
+            load_candidates: list[tuple[float, float, float, str]] = []
+            seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
+            for seed in seeds:
+                for load_scale in (1.08, 1.16, 1.24):
+                    for cc_factor in (0.9, 1.0, 1.15):
+                        add_candidate(
+                            load_candidates,
+                            seed["Cc"] * cc_factor,
+                            seed["Rz"],
+                            load_scale,
+                            tag="load_refine",
+                        )
+            load_candidates.sort(key=candidate_priority)
+            run_candidates(load_candidates, max_load_candidates)
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
 
     apply_load_scale(best.get("load_scale", 1.0))
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
+    best.update(stats)
+    best["elapsed_sec"] = time.time() - started
+    best["spec_pass"] = spec_pass(best["measurements"])
     return best
 
 
@@ -428,6 +601,15 @@ def _unique_sorted(values: list[float], low: float, high: float) -> list[float]:
         if not any(abs(value - old) <= max(abs(old), abs(value), 1e-30) * 1e-6 for old in out):
             out.append(value)
     return sorted(out)
+
+
+def _unique_preserve(values: list[float], low: float, high: float) -> list[float]:
+    out = []
+    for value in values:
+        value = min(max(float(value), low), high)
+        if not any(abs(value - old) <= max(abs(old), abs(value), 1e-30) * 1e-6 for old in out):
+            out.append(value)
+    return out
 
 
 def _snap_to_grid(value: float, precision: float) -> float:

@@ -8,6 +8,7 @@ from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mappin
 from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from outputs.artifacts import ArtifactWriter
+from postprocess.two_stage import tune_two_stage_compensation
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
@@ -200,6 +201,95 @@ Cload vout 0 200f
     assert perf["output_swing_low"] < perf["output_swing_high"]
     assert perf["icmr_min"] > 0
     assert perf["icmr_max"] >= perf["icmr_min"]
+
+
+def test_compensation_tune_stops_after_passing_candidate(tmp_path):
+    class PassingSimulator:
+        timeout_sec = 30.0
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            self.calls += 1
+            return SimulationResult(
+                success=True,
+                return_code=0,
+                measurements={
+                    "dc_gain_db": 55.0,
+                    "unity_gain_bandwidth": 1.2e8,
+                    "phase_margin": 60.0,
+                    "output_swing": 0.7,
+                    "icmr_min": 0.7,
+                    "icmr_max": 0.9,
+                    "total_power": 2e-4,
+                },
+            )
+
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    sim = PassingSimulator()
+
+    result = tune_two_stage_compensation(
+        state,
+        sim,
+        tmp_path,
+        max_base_candidates=20,
+        max_refine_candidates=0,
+        max_load_candidates=0,
+    )
+
+    assert sim.calls == 1
+    assert result["spec_pass"] is True
+    assert result["early_stop_reason"] == "spec_pass"
+    assert result["evaluated_candidates"] == 1
+
+
+def test_compensation_tune_rejects_negative_phase_margin(tmp_path):
+    class SequenceSimulator:
+        timeout_sec = 30.0
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            self.calls += 1
+            if self.calls == 1:
+                measurements = {
+                    "dc_gain_db": 60.0,
+                    "unity_gain_bandwidth": 1.1e8,
+                    "phase_margin": -5.0,
+                    "output_swing": 0.7,
+                    "icmr_min": 0.7,
+                    "icmr_max": 0.9,
+                    "total_power": 2e-4,
+                }
+            else:
+                measurements = {
+                    "dc_gain_db": 45.0,
+                    "unity_gain_bandwidth": 7.0e7,
+                    "phase_margin": 55.0,
+                    "output_swing": 0.7,
+                    "icmr_min": 0.7,
+                    "icmr_max": 0.9,
+                    "total_power": 2e-4,
+                }
+            return SimulationResult(success=True, return_code=0, measurements=measurements)
+
+    state = build_design_state_from_yaml(load_yaml_mapping("ir/schema_two_stage.yaml"), default_environment())
+    sim = SequenceSimulator()
+
+    result = tune_two_stage_compensation(
+        state,
+        sim,
+        tmp_path,
+        max_base_candidates=2,
+        max_refine_candidates=0,
+        max_load_candidates=0,
+        time_budget_sec=20,
+    )
+
+    assert sim.calls == 2
+    assert result["measurements"]["phase_margin"] > 0
 
 
 def test_two_stage_feasibility_report_has_required_sections(tmp_path):

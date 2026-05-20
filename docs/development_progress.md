@@ -754,3 +754,68 @@ runs/iter_066/netlist.cir
 ### Notes
 
 The current ngspice swing/ICMR metrics are operating-point headroom estimates, not full large-signal DC sweeps. They are therefore appropriate as fast necessary-condition checks and structured optimization diagnostics. A later stricter version can add true input-common-mode and output-swing sweeps once runtime is under control.
+
+## 2026-05-20 Bounded Compensation Sweep
+
+### Scope
+
+Reworked the two-stage OTA ngspice compensation tuner so it no longer performs an unbounded dense Cc/Rz grid after every compact optimizer run.
+
+### Major Changes
+
+1. Replaced the previous broad compensation grid with a bounded staged search:
+   - base candidate budget: 24
+   - refinement budget: 8
+   - load-refinement budget: 8
+   - wall-clock budget: 45 s
+   - per-candidate ngspice timeout: 5 s
+2. Added early-stop behavior when a candidate satisfies all checked AC/DC specs.
+3. Added stability-rescue candidates that force high-Cc/high-Rz points into the first sweep batch, preventing the tuner from selecting high-bandwidth but unstable negative-PM points.
+4. Added swing, ICMR, power, and bandwidth max checks to compensation `spec_pass`.
+5. Reweighted compensation scoring so negative phase margin is heavily penalized.
+6. Added structured compensation diagnostics to the flow output:
+   - evaluated candidate count
+   - skipped candidate count
+   - stop reason
+   - selected Cc/Rz and measured PM/UGBW
+
+### Validation
+
+```text
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider tests/test_modular_flow.py -q
+10 passed
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 3 --pop-size 10 --seed 31 --skip-dc-repair
+
+runs/iter_072/
+  completed in 51.9 s
+  compensation evaluated candidates: 30
+  result: gain and UGBW failed because DC repair was intentionally skipped
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 3 --pop-size 10 --seed 31
+
+runs/iter_075/
+  compensation evaluated candidates: 27
+  dc_gain_db: 58.47 dB
+  unity_gain_bandwidth: 58.53 MHz
+  phase_margin: 47.37 deg
+  slew_rate: 63.85 V/us
+  output_swing: 0.730 V
+  ICMR: 0.632 V to 0.930 V
+  remaining failed target: UGBW
+
+python3 main.py --env environment_ihp_sg13g2.yaml --schema ir/schema_two_stage.yaml --generations 16 --pop-size 36 --seed 42
+
+runs/iter_078/
+  completed in 99.7 s
+  compensation evaluated candidates: 23
+  dc_gain_db: 64.98 dB
+  unity_gain_bandwidth: 14.01 MHz
+  phase_margin: 45.95 deg
+  output_swing: 0.690 V
+  ICMR: 0.625 V to 1.132 V
+```
+
+### Diagnosis
+
+The compensation runtime issue is fixed: the previous `16 x 36` flow no longer times out in postprocess. The remaining failure is not a Cc/Rz sweep issue. For the low-current high-gain candidate selected by compact optimization, ngspice shows that satisfying PM requires very large compensation capacitance, which collapses UGBW and positive slew rate. The optimizer should next be made more speed-aware for IHP two-stage candidates, especially around `I_stage2`, second-stage gm, compensation capacitance, and load capacitance.

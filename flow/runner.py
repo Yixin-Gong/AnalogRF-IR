@@ -279,11 +279,18 @@ class ObjectiveIRFlowRunner:
             )
         elif etype == "compensation_tune":
             meas = event.get("measurements", {}) or {}
+            stop = (
+                f", stop={event.get('early_stop_reason')}"
+                if event.get("early_stop")
+                else ""
+            )
             self.emit(
                 f"       Compensation tune: Cc={event.get('Cc', 0.0):.3e}F, "
                 f"Rz={event.get('Rz', 0.0):.1f}ohm, "
                 f"PM~{meas.get('phase_margin', 0.0):.1f}deg, "
-                f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz"
+                f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
+                f"evals={event.get('evaluated_candidates', 0)}"
+                f"{stop}"
             )
 
     def _print_simulation_summary(self, result: SimulationResult) -> None:
