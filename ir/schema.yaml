@@ -1,6 +1,50 @@
 schema_version: '0.1'
 design_name: five_transistor_ota
 
+topology:
+  name: five_transistor_ota
+  class: ota
+  architecture: single-stage
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: gnd, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: vout, direction: output}
+    - {id: vbias, direction: bias}
+  devices:
+    - id: M1
+      role: input_pair
+      stage: input
+      type: nmos
+      model: nmos
+      connections: {drain: net1, gate: vinn, source: tail, body: gnd}
+    - id: M2
+      role: input_pair
+      stage: input
+      type: nmos
+      model: nmos
+      connections: {drain: vout, gate: vinp, source: tail, body: gnd}
+    - id: M3
+      role: current_mirror_load
+      stage: load
+      type: pmos
+      model: pmos
+      connections: {drain: net1, gate: net1, source: vdd, body: vdd}
+    - id: M4
+      role: current_mirror_load
+      stage: load
+      type: pmos
+      model: pmos
+      connections: {drain: vout, gate: net1, source: vdd, body: vdd}
+    - id: M5
+      role: tail_current_source
+      stage: bias
+      type: nmos
+      model: nmos
+      connections: {drain: tail, gate: vbias, source: gnd, body: gnd}
+
 targets:
   dc_gain:              {min: 45, unit: dB, priority: 1}
   unity_gain_bandwidth: {min: 100000000, unit: Hz, priority: 1}
@@ -9,7 +53,7 @@ targets:
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
-  # M1/M2 L expanded [130nm,500nm]→[130nm,1μm]→[130nm,1.5μm] per iter_002: 44.6dB still 0.4dB short of 45dB target
+  # M1/M2 L expanded to [130nm, 1.5um] after gain diagnostics.
   - {device: M1, variable: L,     range: {min: 1.3e-07, max: 1.5e-06}, initial: 2e-07, symmetry_label: sym_M1_M2}
   - {device: M2, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
   - {device: M2, variable: L,     range: {min: 1.3e-07, max: 1.5e-06}, initial: 2e-07, symmetry_label: sym_M1_M2}
@@ -17,7 +61,7 @@ design_variables:
   - {device: M3, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 5e-07, symmetry_label: sym_load_M3_M4}
   - {device: M4, variable: gm_id, range: {min: 5, max: 12}, initial: 8, symmetry_label: sym_load_M3_M4}
   - {device: M4, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 5e-07, symmetry_label: sym_load_M3_M4}
-  # M5: tightened gm_id after inversion diagnosis; target stronger tail-device inversion.
+  # M5 gm_id is constrained to keep the tail device in stronger inversion.
   - {device: M5, variable: gm_id, range: {min: 5, max: 9}, initial: 8}
   - {device: M5, variable: L,     range: {min: 1.3e-07, max: 5.0e-07}, initial: 2e-07}
   - {device: "", variable: I_tail, range: {min: 1.0e-06, max: 2.5e-04}, initial: 5.0e-05, unit: A, description: "tail current"}
@@ -26,7 +70,7 @@ corrections:
   gm_factor: 0.78
   gds_factor: 0.85
   c_factor: 1.0
-  description: "iter_001: gm_factor=0.78 (UGBW<1%), gds_factor→0.85 (dc_gain +4.4% bias)"
+  description: "gm_factor=0.78 for bandwidth calibration; gds_factor=0.85 for gain calibration"
 
 constraints:
   gm_id: {min: 5, max: 25}
