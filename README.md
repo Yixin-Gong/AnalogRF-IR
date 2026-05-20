@@ -121,6 +121,8 @@ Each profile maps circuit class and architecture to:
 
 The validator, spec registry, optimizer, and netlist generator consume the selected profile instead of hard-coding OTA or comparator behavior locally. To add a new circuit family, define a profile first, then attach only the rules, constraints, objectives, estimators, and simulator measurements that belong to that profile.
 
+After profile selection, the IR layer derives a capability set such as `two_stage_gain`, `miller_rc_compensation`, `source_follower_regulation`, `dynamic_latch`, or `tail_current_mirror`. The optimizer receives one `OptimizationProblem` regardless of topology, and post-optimization repair is selected through a `PostprocessRegistry` from those capabilities. This keeps circuit structure separate from the optimization algorithm: a topology changes the active objectives, constraints, estimator, and postprocess passes, not the optimizer API.
+
 Example profile-driven behavior:
 
 - OTA profiles use static operating-region checks, symmetry checks, compensation objectives, and two-stage stability diagnostics.

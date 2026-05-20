@@ -9,15 +9,14 @@ from core.environment import load_environment, resolve_project_path
 from core.compensation import has_miller_capacitive_compensation, has_miller_rc_compensation
 from core.validator import Validator
 import core.design_rules  # noqa: F401
-from asir.profiles import select_circuit_profile
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import StateBuilder, load_design_input
 from netlist.generator import generate_netlist
+from optimizer.problem import OptimizationProblem
 from optimizer.registry import OptimizerConfig, OptimizerRegistry
 from outputs.artifacts import ArtifactWriter, RunArtifacts, next_iteration
 from postprocess.common import backfill_state_from_ngspice, normalize_phase_margin
-from postprocess.source_follower import tune_source_follower_operating_point
-from postprocess.two_stage import TwoStagePostProcessor
+from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from pygmid.plugin import GmIdPlugin
 from schemas.design_state import DesignState, Target
 from simulator.ngspice import NgspiceSimulator, SimulationResult
@@ -98,8 +97,9 @@ class AnalogRFIRFlowRunner:
             run_asir=cfg.run_asir,
         )
         state = design_input.state
+        problem = OptimizationProblem.from_state(state)
         spec_model = self.spec_registry.select(state)
-        self._print_state_summary(state, spec_model.name)
+        self._print_state_summary(problem, spec_model.name)
 
         self.emit("\n[2/8] Validating Schema ...")
         self._validate_or_raise(state, "input")
@@ -117,8 +117,9 @@ class AnalogRFIRFlowRunner:
             seed=cfg.seed,
             verbose=True,
         )
-        optimizer, evaluator = OptimizerRegistry.create(opt_config, state, pygmid)
+        optimizer, evaluator = OptimizerRegistry.create(opt_config, problem, pygmid)
         self.emit(f"       Optimizer: {cfg.optimizer}")
+        self.emit(f"       Estimator: {problem.estimator_key}")
         self.emit(f"       Variables: {evaluator.n_vars}")
         self.emit(f"       Load cap:  {state.simulation.cload * 1e12:.1f}pF")
 
@@ -126,15 +127,14 @@ class AnalogRFIRFlowRunner:
         t0 = time.time()
         _best_x, best_meta = optimizer.optimize()
         opt_elapsed = time.time() - t0
-        formal_tail_current_mirror = any(dev.role == "tail_bias_mirror" for dev in state.topology.devices)
-        formal_stage2_current_mirror = any(dev.role == "output_bias_mirror" for dev in state.topology.devices)
         flow_options = {
             "skip_dc_repair": bool(cfg.skip_dc_repair),
             "skip_comp_tune": bool(cfg.skip_comp_tune),
-            "tail_current_mirror": bool(formal_tail_current_mirror or cfg.tail_current_mirror),
-            "stage2_current_mirror": bool(formal_stage2_current_mirror),
+            "tail_current_mirror": bool(problem.capabilities.has("tail_current_mirror") or cfg.tail_current_mirror),
+            "stage2_current_mirror": bool(problem.capabilities.has("output_bias_mirror")),
             "input_kind": design_input.source_kind,
             "asir_enabled": bool(cfg.run_asir),
+            "capabilities": list(problem.capabilities.names),
         }
         best_meta["flow_options"] = flow_options
         self._print_optimizer_summary(state, best_meta, opt_elapsed)
@@ -168,6 +168,7 @@ class AnalogRFIRFlowRunner:
             "source_path": str(design_input.source_path) if design_input.source_path else "",
             "generated_yaml": str(design_input.generated_yaml_path) if design_input.generated_yaml_path else "",
             "asir": design_input.asir_summary,
+            "problem": problem.to_flow_meta(),
             "options": flow_options,
             "validation": self.validation_reports,
             "postprocess": [],
@@ -189,12 +190,18 @@ class AnalogRFIRFlowRunner:
             )
             return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
 
-        post = TwoStagePostProcessor(skip_dc_repair=cfg.skip_dc_repair, skip_comp_tune=cfg.skip_comp_tune)
-        post_events = post.run(state, sim, output_dir)
-        if not cfg.skip_dc_repair:
-            sf_op = tune_source_follower_operating_point(state, sim, output_dir)
-            if sf_op:
-                post_events.append({"type": "source_follower_op_tune", **sf_op})
+        post_context = PostprocessContext(
+            state=state,
+            sim=sim,
+            work_dir=output_dir,
+            config=PostprocessConfig(
+                skip_dc_repair=cfg.skip_dc_repair,
+                skip_comp_tune=cfg.skip_comp_tune,
+            ),
+            profile=problem.profile,
+            capabilities=problem.capabilities,
+        )
+        post_events = PostprocessRegistry().run(post_context)
         flow_meta["postprocess"] = post_events
         for event in post_events:
             self._print_postprocess_event(event)
@@ -250,11 +257,12 @@ class AnalogRFIRFlowRunner:
             self.emit(f"  spice:  {resolve_project_path(self.config.spice)}")
         self.emit("=" * 70)
 
-    def _print_state_summary(self, state: DesignState, spec_model: str) -> None:
+    def _print_state_summary(self, problem: OptimizationProblem, spec_model: str) -> None:
+        state = problem.state
         self.emit(f"       Topology: {state.topology.name} ({state.topology.architecture})")
-        profile = select_circuit_profile(state)
         self.emit(f"       Class/spec model: {state.topology.class_} / {spec_model}")
-        self.emit(f"       IR profile: {profile.name}")
+        self.emit(f"       IR profile: {problem.profile.name}")
+        self.emit(f"       IR capabilities: {', '.join(problem.capabilities.names) or 'none'}")
         self.emit(f"       Process:  {state.process.process_name} ({state.process.technology_node}um)")
         self.emit(f"       Vdd:      {state.simulation.supply.get('vdd', 1.2)}V")
         self.emit(f"       Devices:  {len(state.topology.devices)}")

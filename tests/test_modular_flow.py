@@ -1,5 +1,6 @@
 import json
 
+from asir.capabilities import detect_circuit_capabilities
 from core.compensation import has_miller_rc_compensation
 from asir.profiles import select_circuit_profile
 from core.environment import default_environment
@@ -11,7 +12,9 @@ from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
 from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
+from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter
+from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from postprocess.source_follower import _candidate_points
 from postprocess.two_stage import tune_two_stage_compensation
 from pygmid.adapter import create_pygmid_adapter
@@ -69,18 +72,68 @@ def test_spec_registry_selects_ota_and_comparator():
 def test_ir_profile_drives_objectives_and_rule_filtering():
     ota = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     comparator = build_design_state_from_yaml(load_yaml_mapping("inputs/comparator/strongarm/strongarm_v1.yaml"), default_environment())
+    source_follower = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml"),
+        default_environment(),
+    )
 
     ota_profile = select_circuit_profile(ota)
     comparator_profile = select_circuit_profile(comparator)
+    ota_capabilities = detect_circuit_capabilities(ota, ota_profile)
+    comparator_capabilities = detect_circuit_capabilities(comparator, comparator_profile)
+    source_follower_capabilities = detect_circuit_capabilities(source_follower)
     comparator_rules = {item["name"] for item in list_rules(circuit_profile=comparator_profile.name)}
     ota_rules = {item["name"] for item in list_rules(circuit_profile=ota_profile.name)}
 
     assert ota_profile.name == "ota"
     assert comparator_profile.name == "comparator"
     assert comparator_profile.required_context == ("CL", "f_clk", "input_step")
+    assert ota_capabilities.has("two_stage_gain")
+    assert ota_capabilities.has("miller_rc_compensation")
+    assert comparator_capabilities.has("dynamic_latch")
+    assert comparator_capabilities.has("comparator_decision")
+    assert source_follower_capabilities.has("source_follower_regulation")
+    assert not source_follower_capabilities.has("miller_rc_compensation")
     assert any("by comparator profile" in term.description for term in comparator.loss_terms)
     assert "check_comparator_metric_coverage" in comparator_rules
     assert "check_comparator_metric_coverage" not in ota_rules
+
+
+def test_optimization_problem_and_postprocess_registry_are_capability_driven(tmp_path):
+    two_stage = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        default_environment(),
+    )
+    source_follower = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml"),
+        default_environment(),
+    )
+
+    two_stage_problem = OptimizationProblem.from_state(two_stage)
+    source_follower_problem = OptimizationProblem.from_state(source_follower)
+    registry = PostprocessRegistry()
+
+    two_stage_context = PostprocessContext(
+        state=two_stage,
+        sim=NgspiceSimulator(),
+        work_dir=tmp_path,
+        config=PostprocessConfig(),
+        profile=two_stage_problem.profile,
+        capabilities=two_stage_problem.capabilities,
+    )
+    source_follower_context = PostprocessContext(
+        state=source_follower,
+        sim=NgspiceSimulator(),
+        work_dir=tmp_path,
+        config=PostprocessConfig(),
+        profile=source_follower_problem.profile,
+        capabilities=source_follower_problem.capabilities,
+    )
+
+    assert two_stage_problem.estimator_key == "ota_two_stage_miller"
+    assert source_follower_problem.estimator_key == "ota_compact"
+    assert [item.name for item in registry.resolve(two_stage_context)] == ["two_stage"]
+    assert [item.name for item in registry.resolve(source_follower_context)] == ["source_follower_operating_point"]
 
 
 def test_uncompensated_two_stage_does_not_trigger_rc_logic(tmp_path):

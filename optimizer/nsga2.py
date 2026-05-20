@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Tuple, Any
 import numpy as np
 
-from asir.profiles import select_circuit_profile
-from core.compensation import has_miller_capacitive_compensation
+from optimizer.problem import OptimizationProblem
 from core.regions import compact_operating_region, inversion_region_from_gm_id, normalize_spice_region
 from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
@@ -58,10 +57,12 @@ class NSGA2Config:
 class CircuitEvaluator:
     """AnalogRF-IR internal documentation."""
 
-    def __init__(self, schema: DesignState, pygmid_adapter=None):
-        self.schema = schema
+    def __init__(self, schema: DesignState | OptimizationProblem, pygmid_adapter=None):
+        self.problem = schema if isinstance(schema, OptimizationProblem) else OptimizationProblem.from_state(schema)
+        self.schema = self.problem.state
         self.pygmid = pygmid_adapter or create_pygmid_adapter()
-        self.profile = select_circuit_profile(schema)
+        self.profile = self.problem.profile
+        self.capabilities = self.problem.capabilities
         # Internal implementation note.
         self._var_map = {}
         self._build_var_map()
@@ -291,10 +292,10 @@ class CircuitEvaluator:
         tp: Dict[str, Dict[str, float]],
         global_vars: Optional[Dict[str, float]] = None,
     ) -> Dict[str, float]:
-        if self.profile.name == "comparator":
+        if self.profile.name == "comparator" or self.capabilities.has("comparator_decision"):
             return self._estimate_comparator_performance(tp, global_vars or {})
-        if self._is_two_stage():
-            if has_miller_capacitive_compensation(self.schema):
+        if self.capabilities.has("two_stage_gain"):
+            if self.capabilities.has("miller_capacitive_compensation"):
                 return self._estimate_two_stage_performance(tp, global_vars or {})
             return self._estimate_uncompensated_two_stage_performance(tp, global_vars or {})
         return self._estimate_five_transistor_performance(tp)
@@ -303,10 +304,7 @@ class CircuitEvaluator:
         return self.profile.name == "comparator"
 
     def _is_two_stage(self) -> bool:
-        arch = (self.schema.topology.architecture or "").lower()
-        if "two" in arch or "2" in arch:
-            return True
-        return any(dev.role.startswith("second_stage") for dev in self.schema.topology.devices)
+        return self.capabilities.has("two_stage_gain")
 
     def _global_value(self, name: str, default: float, global_vars: Dict[str, float]) -> float:
         if name in global_vars:
