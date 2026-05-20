@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Callable, Tuple, Any
 import numpy as np
 
 from asir.profiles import select_circuit_profile
+from core.compensation import has_miller_capacitive_compensation
 from core.regions import compact_operating_region, inversion_region_from_gm_id, normalize_spice_region
 from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
@@ -142,6 +143,7 @@ class CircuitEvaluator:
                 power_max = self.schema.targets["power"].max or 1e-3
             i_tail_est = power_max / (vdd - vss) / 3
         i_stage2_est = globals_decoded.get("I_stage2", globals_decoded.get("I_out", i_tail_est))
+        i_follower_est = globals_decoded.get("I_follower", i_tail_est / 2.0)
         i_latch_est = globals_decoded.get("I_latch", i_tail_est / 2.0)
 
         has_tail_mirror = any(dev.role == "tail_bias_mirror" for dev in self.schema.topology.devices)
@@ -153,6 +155,10 @@ class CircuitEvaluator:
                 return i_tail_est
             if role == "input_pair" or "input_pair" in role_l:
                 return i_tail_est / 2
+            if any(token in role_l for token in ("source_follower", "follower_bias")):
+                return i_follower_est
+            if "regulated_source" in role_l:
+                return i_tail_est
             if any(token in role_l for token in ("latch", "reset", "precharge", "equalize")):
                 return i_latch_est
             if "current_mirror" in role:
@@ -288,7 +294,9 @@ class CircuitEvaluator:
         if self.profile.name == "comparator":
             return self._estimate_comparator_performance(tp, global_vars or {})
         if self._is_two_stage():
-            return self._estimate_two_stage_performance(tp, global_vars or {})
+            if has_miller_capacitive_compensation(self.schema):
+                return self._estimate_two_stage_performance(tp, global_vars or {})
+            return self._estimate_uncompensated_two_stage_performance(tp, global_vars or {})
         return self._estimate_five_transistor_performance(tp)
 
     def _is_comparator(self) -> bool:
@@ -596,15 +604,25 @@ class CircuitEvaluator:
         vdd_current = 0.0
         for dev in self.schema.topology.devices:
             p = tp.get(dev.id, {})
-            if dev.type == "pmos" and dev.connections.get("source") == "vdd":
+            if (
+                (dev.type == "pmos" and dev.connections.get("source") == "vdd")
+                or (dev.type == "nmos" and dev.connections.get("drain") == "vdd")
+            ):
                 vdd_current += p.get("id", 0)
         if vdd_current == 0 and tail_dev_id and tail_dev_id in tp:
             vdd_current = tp[tail_dev_id].get("id", 0)
         power = (vdd - vss) * vdd_current
         i_tail_sr = M5.get("id_effective", M5.get("id", 0.0))
         slew_rate = i_tail_sr / max(c_out, 1e-18)
-        output_swing, output_low, output_high = self._estimate_output_swing(M1, M3)
-        icmr_min, icmr_max = self._estimate_nmos_input_icmr(M1, M3, M5)
+        n_swing_ref, p_swing_ref = self._select_supply_swing_devices(M1, M3)
+        output_swing, output_low, output_high = self._estimate_output_swing(n_swing_ref, p_swing_ref)
+        output_swing, output_low, output_high = self._apply_source_follower_output_limit(
+            tp,
+            output_swing,
+            output_low,
+            output_high,
+        )
+        icmr_min, icmr_max = self._estimate_input_icmr(M1, M3, M5)
 
         return {
             "dc_gain": dc_gain_db,
@@ -620,6 +638,109 @@ class CircuitEvaluator:
             "icmr_min": icmr_min,
             "icmr_max": icmr_max,
             "power": power,
+        }
+
+    def _estimate_uncompensated_two_stage_performance(
+        self,
+        tp: Dict[str, Dict[str, float]],
+        global_vars: Dict[str, float],
+    ) -> Dict[str, float]:
+        """Compact two-stage OTA model for topologies without explicit Rz-Cc compensation."""
+        input_devs = [d.id for d in self.schema.topology.devices if "input_pair" in d.role]
+        load_devs = [
+            d.id for d in self.schema.topology.devices
+            if any(token in d.role for token in ("current_mirror_load", "active_load", "cascode", "folded"))
+        ]
+        gain_devs = [
+            d.id for d in self.schema.topology.devices
+            if d.role in ("second_stage_gain", "output_gain") or "second_stage_gain" in d.role
+        ]
+        out_loads = [
+            d.id for d in self.schema.topology.devices
+            if d.role in ("second_stage_load", "output_current_source", "output_load")
+        ]
+        if not input_devs or not gain_devs:
+            return self._estimate_five_transistor_performance(tp)
+
+        M1 = tp[input_devs[0]]
+        Mload = tp[load_devs[0]] if load_devs else M1
+        M2 = tp[gain_devs[0]]
+        Mout = tp[out_loads[0]] if out_loads else {}
+
+        corr = self.schema.corrections
+        gm_corr = corr.gm_factor
+        gds_corr = corr.gds_factor
+        c_corr = corr.c_factor
+
+        gm1 = M1.get("gm", 0.0) * gm_corr
+        gds1 = max(M1.get("gds", 0.0) * gds_corr, 1e-15)
+        gds_load = max(Mload.get("gds", 0.0) * gds_corr, 1e-15)
+        gm2 = M2.get("gm", 0.0) * gm_corr
+        gds2 = max(M2.get("gds", 0.0) * gds_corr, 1e-15)
+        gds_out = max(Mout.get("gds", 0.0) * gds_corr, 1e-15)
+
+        r1 = 1.0 / max(gds1 + gds_load, 1e-15)
+        r2 = 1.0 / max(gds2 + gds_out, 1e-15)
+        a1 = gm1 * r1
+        a2 = gm2 * r2
+        dc_gain_db = 20.0 * math.log10(max(abs(a1 * a2), 1e-15))
+
+        cload = self.schema.simulation.cload or 2e-13
+        c1 = (
+            M1.get("cgd", 0.0)
+            + M2.get("cgs", 0.0)
+            + Mload.get("cgd", 0.0)
+            + (M1.get("W", 0.0) + Mload.get("W", 0.0)) * 1e6 * 0.5e-15
+        ) * c_corr
+        c2 = (
+            cload
+            + M2.get("cgd", 0.0)
+            + Mout.get("cgd", 0.0)
+            + (M2.get("W", 0.0) + Mout.get("W", 0.0)) * 1e6 * 0.5e-15
+        ) * c_corr
+        p1 = 1.0 / max(r1 * max(c1, 1e-18), 1e-30)
+        p2 = 1.0 / max(r2 * max(c2, 1e-18), 1e-30)
+        dominant = min(p1, p2)
+        unity_rad = max(abs(a1 * a2) * dominant, 0.0)
+        ugbw = unity_rad / (2.0 * math.pi)
+        phase_lag = math.atan(unity_rad / max(p1, 1e-12)) + math.atan(unity_rad / max(p2, 1e-12))
+        phase_margin = max(0.0, min(120.0, 180.0 - phase_lag * 180.0 / math.pi))
+
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        i_tail = self._global_value("I_tail", M1.get("id", 0.0) * max(len(input_devs), 1), global_vars)
+        i_stage2 = self._global_value(
+            "I_stage2",
+            max(M2.get("id_effective", M2.get("id", 0.0)), Mout.get("id_effective", Mout.get("id", 0.0))),
+            global_vars,
+        )
+        power = (vdd - vss) * max(i_tail + i_stage2, 0.0)
+        slew_rate_out = i_stage2 / max(c2, 1e-18)
+        output_swing, output_low, output_high = self._estimate_output_swing(Mout or M1, M2)
+        output_swing, output_low, output_high = self._apply_source_follower_output_limit(
+            tp,
+            output_swing,
+            output_low,
+            output_high,
+        )
+        icmr_min, icmr_max = self._estimate_input_icmr(M1, Mload, Mout)
+
+        return {
+            "dc_gain": dc_gain_db,
+            "unity_gain_bandwidth": ugbw,
+            "phase_margin": phase_margin,
+            "slew_rate": slew_rate_out,
+            "slew_rate_pos": slew_rate_out,
+            "slew_rate_neg": slew_rate_out,
+            "output_swing": output_swing,
+            "output_swing_low": output_low,
+            "output_swing_high": output_high,
+            "icmr": max(0.0, icmr_max - icmr_min),
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
+            "power": power,
+            "dominant_pole_rad_s": dominant,
+            "second_pole_rad_s": max(p1, p2),
         }
 
     def _estimate_two_stage_performance(
@@ -749,8 +870,14 @@ class CircuitEvaluator:
         slew_rate_pos = i_tail / max(cc, 1e-18)
         slew_rate_neg = i_stage2 / max(cload + c2_par, 1e-18)
         output_swing, output_low, output_high = self._estimate_output_swing(M7, M6)
+        output_swing, output_low, output_high = self._apply_source_follower_output_limit(
+            tp,
+            output_swing,
+            output_low,
+            output_high,
+        )
         tail_ref = tail_sources[0] if tail_sources else {}
-        icmr_min, icmr_max = self._estimate_nmos_input_icmr(M1, M3, tail_ref)
+        icmr_min, icmr_max = self._estimate_input_icmr(M1, M3, tail_ref)
 
         return {
             "dc_gain": dc_gain_db,
@@ -791,6 +918,79 @@ class CircuitEvaluator:
         high = vdd - abs(p_device.get("vdsat", 0.0)) * factor
         return max(0.0, high - low), low, high
 
+    def _select_supply_swing_devices(
+        self,
+        dev_a: Dict[str, float],
+        dev_b: Dict[str, float],
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        n_ref = dev_a if dev_a.get("type") == "nmos" else dev_b
+        p_ref = dev_a if dev_a.get("type") == "pmos" else dev_b
+        return n_ref, p_ref
+
+    def _apply_source_follower_output_limit(
+        self,
+        tp: Dict[str, Dict[str, float]],
+        swing: float,
+        low: float,
+        high: float,
+    ) -> Tuple[float, float, float]:
+        followers = [
+            tp.get(dev.id, {})
+            for dev in self.schema.topology.devices
+            if "source_follower" in dev.role.lower() or "follower" in dev.role.lower()
+        ]
+        if not followers:
+            return swing, low, high
+
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+        output_nets = {port.id for port in self.schema.topology.ports if port.direction == "output"}
+        follower_defs = [
+            dev for dev in self.schema.topology.devices
+            if "source_follower" in dev.role.lower() or "follower" in dev.role.lower()
+        ]
+        for dev, follower in zip(follower_defs, followers):
+            vgs = abs(follower.get("vgs", 0.0))
+            vdsat = abs(follower.get("vdsat", 0.0)) * factor
+            gate_is_output = dev.connections.get("gate") in output_nets
+            source_is_output = dev.connections.get("source") in output_nets
+            if follower.get("type") == "pmos":
+                if source_is_output:
+                    low = max(low, vss + max(vgs, vdsat))
+                elif gate_is_output:
+                    high = min(high, vdd - max(vgs, vdsat))
+            else:
+                if source_is_output:
+                    high = min(high, vdd - max(vgs, vdsat))
+                elif gate_is_output:
+                    low = max(low, vss + max(vgs, vdsat))
+
+        for dev in self.schema.topology.devices:
+            role = dev.role.lower()
+            if not any(token in role for token in ("source_follower_current_source", "follower_bias", "regulated_source")):
+                continue
+            bias = tp.get(dev.id, {})
+            vdsat = abs(bias.get("vdsat", 0.0)) * factor
+            if bias.get("type") == "pmos":
+                high = min(high, vdd - vdsat)
+            else:
+                low = max(low, vss + vdsat)
+
+        if high < low:
+            high = low
+        return max(0.0, high - low), low, high
+
+    def _estimate_input_icmr(
+        self,
+        input_device: Dict[str, float],
+        load_device: Dict[str, float],
+        tail_device: Dict[str, float],
+    ) -> Tuple[float, float]:
+        if input_device.get("type") == "pmos":
+            return self._estimate_pmos_input_icmr(input_device, load_device, tail_device)
+        return self._estimate_nmos_input_icmr(input_device, load_device, tail_device)
+
     def _estimate_nmos_input_icmr(
         self,
         input_device: Dict[str, float],
@@ -808,6 +1008,23 @@ class CircuitEvaluator:
         drain_limit = vdd - vdsat_load * factor
         icmr_max = drain_limit - vdsat_in * factor + vgs_in
         return icmr_min, max(icmr_min, icmr_max)
+
+    def _estimate_pmos_input_icmr(
+        self,
+        input_device: Dict[str, float],
+        load_device: Dict[str, float],
+        tail_device: Dict[str, float],
+    ) -> Tuple[float, float]:
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+        vsg_in = abs(input_device.get("vgs", 0.0))
+        vdsat_in = abs(input_device.get("vdsat", 0.0))
+        vdsat_tail = abs(tail_device.get("vdsat", 0.0))
+        vdsat_load = abs(load_device.get("vdsat", 0.0))
+        icmr_max = vdd - vsg_in - vdsat_tail * factor
+        icmr_min = vss + vdsat_load * factor + vdsat_in * factor
+        return min(icmr_min, icmr_max), max(icmr_min, icmr_max)
     def _compute_loss(self, perf: Dict[str, float],
                        tp: Dict[str, Dict[str, float]]) -> Tuple[float, Dict[str, float]]:
         """AnalogRF-IR internal documentation."""

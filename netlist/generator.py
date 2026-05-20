@@ -121,6 +121,13 @@ class NetlistGenerator:
                 return 0.5 * (dv.range.min + dv.range.max)
         return default
 
+    def _get_explicit_bias_voltage(self, port_id: str) -> Optional[float]:
+        for key in (port_id, f"V{port_id}", f"{port_id}_voltage"):
+            value = self._get_global_param(key)
+            if value is not None:
+                return float(value)
+        return None
+
     def _is_comparator(self) -> bool:
         return self._profile.name == "comparator"
 
@@ -252,17 +259,19 @@ class NetlistGenerator:
                 continue
             if port.id in handled_ports:
                 continue
-            vbias_v = fallback
-            for dev in self.state.topology.devices:
-                if dev.connections.get("gate") != port.id:
-                    continue
-                ts = self.state.transistors.get(dev.id)
-                if ts and ts.parameters.vgs > 0:
-                    if dev.type == "pmos":
-                        vbias_v = vdd - ts.parameters.vgs
-                    else:
-                        vbias_v = ts.parameters.vgs
-                break
+            vbias_v = self._get_explicit_bias_voltage(port.id)
+            if vbias_v is None:
+                vbias_v = fallback
+                for dev in self.state.topology.devices:
+                    if dev.connections.get("gate") != port.id:
+                        continue
+                    ts = self.state.transistors.get(dev.id)
+                    if ts and ts.parameters.vgs > 0:
+                        if dev.type == "pmos":
+                            vbias_v = vdd - ts.parameters.vgs
+                        else:
+                            vbias_v = ts.parameters.vgs
+                    break
             lines.append(f"V{port.id} {port.id} 0 DC {vbias_v:.4f}")
 
         if len(lines) == 1:

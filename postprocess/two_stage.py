@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.compensation import has_miller_rc_compensation
 from netlist.generator import generate_netlist
 from postprocess.common import backfill_state_from_ngspice
 from schemas.design_state import DesignState, Target
@@ -237,7 +238,7 @@ def tune_two_stage_compensation(
     time_budget_sec: float = 45.0,
     candidate_timeout_sec: float = 5.0,
 ) -> dict:
-    if not is_two_stage_state(state):
+    if not is_two_stage_state(state) or not has_miller_rc_compensation(state):
         return {}
     cc_range = _design_var_range(state, "Cc")
     rz_range = _design_var_range(state, "Rz")
@@ -714,7 +715,7 @@ class TwoStagePostProcessor:
                 rebalance = balance_two_stage_output(state, sim, work_dir)
                 if rebalance:
                     self.events.append({"type": "stage2_rebalance", **rebalance})
-        if not self.skip_comp_tune:
+        if not self.skip_comp_tune and has_miller_rc_compensation(state):
             comp = tune_two_stage_compensation(state, sim, work_dir)
             if comp:
                 self.events.append({"type": "compensation_tune", **comp})

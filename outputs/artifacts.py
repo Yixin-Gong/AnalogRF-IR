@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from core.compensation import has_miller_rc_compensation
 from schemas.design_state import DesignState
 from simulator.ngspice import SimulationResult
 from specs.models import CircuitSpecModel, SpecRegistry
@@ -330,9 +331,16 @@ def _device_status(state: DesignState) -> dict:
 def _diagnosis_items(state: DesignState, targets: dict, losses: list[dict], mismatches: list[dict], devices: dict) -> list[dict]:
     items = []
     is_two_stage = _is_two_stage_ota(state)
+    has_rc_comp = has_miller_rc_compensation(state)
+    has_sf_regulation = _has_source_follower_regulation(state)
     for name, target in targets.items():
         if target["status"] == "fail":
-            hint = _target_hint(name, is_two_stage=is_two_stage)
+            hint = _target_hint(
+                name,
+                is_two_stage=is_two_stage,
+                has_miller_rc_compensation=has_rc_comp,
+                has_source_follower_regulation=has_sf_regulation,
+            )
             items.append(
                 {
                     "type": "target_failure",
@@ -382,18 +390,37 @@ def _is_two_stage_ota(state: DesignState) -> bool:
     )
 
 
-def _target_hint(name: str, *, is_two_stage: bool = False) -> str:
+def _has_source_follower_regulation(state: DesignState) -> bool:
+    return any(
+        "source_follower" in dev.role.lower() or "follower" in dev.role.lower()
+        for dev in state.topology.devices
+    )
+
+
+def _target_hint(
+    name: str,
+    *,
+    is_two_stage: bool = False,
+    has_miller_rc_compensation: bool = False,
+    has_source_follower_regulation: bool = False,
+) -> str:
     if name in {"unity_gain_bandwidth", "ugbw", "bandwidth"}:
-        if is_two_stage:
+        if is_two_stage and has_miller_rc_compensation:
             return "After OP is valid, retune gm1/Cc: reduce Cc only if phase margin has enough reserve, otherwise keep the dominant pole low."
-        return "Increase speed by raising useful gm, reducing compensation/load capacitance, or shortening high-capacitance devices."
-    if name in {"phase_margin"}:
         if is_two_stage:
+            return "After OP is valid, increase useful stage gm, reduce high-capacitance nodes, and verify non-dominant pole separation."
+        return "Increase speed by raising useful gm, reducing load capacitance, or shortening high-capacitance devices."
+    if name in {"phase_margin"}:
+        if is_two_stage and has_miller_rc_compensation:
             return "For a two-stage OTA, first pull the dominant pole to lower frequency by increasing Cc, then set Rz near 1/gm2 and verify p2 separation."
-        return "Improve stability by increasing compensation capacitance, moving Rz near the zero target, or reducing second-pole loading."
+        if is_two_stage:
+            return "This topology has no explicit Rz-Cc compensation; improve stability by reducing high-frequency pole loading, lowering unity-gain frequency, or adding an explicit compensation strategy."
+        return "Improve stability by reducing high-frequency pole loading, lowering unity-gain frequency, or adding an explicit compensation strategy."
     if name in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
         return "Increase available large-signal charging current or reduce compensation/load capacitance."
     if name in {"output_swing", "swing"}:
+        if has_source_follower_regulation:
+            return "The source-follower regulation path boosts output resistance but costs headroom; reduce follower/bias VGS or relax output common-mode requirements."
         return "Increase output headroom by reducing output-device VDSAT, relaxing current, or raising supply voltage."
     if name in {"icmr", "icmr_min", "icmr_max", "input_common_mode_min", "input_common_mode_max"}:
         return "Improve input common-mode range by reducing input/tail/load headroom or changing input topology."

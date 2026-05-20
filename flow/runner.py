@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.environment import load_environment, resolve_project_path
+from core.compensation import has_miller_capacitive_compensation, has_miller_rc_compensation
 from core.validator import Validator
 import core.design_rules  # noqa: F401
 from asir.profiles import select_circuit_profile
@@ -15,6 +16,7 @@ from netlist.generator import generate_netlist
 from optimizer.registry import OptimizerConfig, OptimizerRegistry
 from outputs.artifacts import ArtifactWriter, RunArtifacts, next_iteration
 from postprocess.common import backfill_state_from_ngspice, normalize_phase_margin
+from postprocess.source_follower import tune_source_follower_operating_point
 from postprocess.two_stage import TwoStagePostProcessor
 from pygmid.plugin import GmIdPlugin
 from schemas.design_state import DesignState, Target
@@ -189,14 +191,20 @@ class AnalogRFIRFlowRunner:
 
         post = TwoStagePostProcessor(skip_dc_repair=cfg.skip_dc_repair, skip_comp_tune=cfg.skip_comp_tune)
         post_events = post.run(state, sim, output_dir)
+        if not cfg.skip_dc_repair:
+            sf_op = tune_source_follower_operating_point(state, sim, output_dir)
+            if sf_op:
+                post_events.append({"type": "source_follower_op_tune", **sf_op})
         flow_meta["postprocess"] = post_events
         for event in post_events:
             self._print_postprocess_event(event)
         if post_events:
             netlist_str = generate_netlist(state)
             best_meta.setdefault("decoded", {})["__global__"] = dict(state.global_parameters)
-            best_meta.setdefault("performance", {})["Cc"] = state.global_parameters.get("Cc", 0.0)
-            best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
+            if has_miller_capacitive_compensation(state):
+                best_meta.setdefault("performance", {})["Cc"] = state.global_parameters.get("Cc", 0.0)
+            if has_miller_rc_compensation(state):
+                best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
             self._validate_or_raise(state, "postprocess")
 
         sim_result = sim.run(netlist_str, work_dir=str(output_dir))
@@ -304,6 +312,21 @@ class AnalogRFIRFlowRunner:
                 f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
                 f"evals={event.get('evaluated_candidates', 0)}"
                 f"{stop}"
+            )
+        elif etype == "source_follower_op_tune":
+            scale = float(event.get("width_scale", 1.0) or 1.0)
+            scale_text = f", width_scale={scale:.2f}" if abs(scale - 1.0) > 1e-9 else ""
+            self.emit(
+                f"       Source-follower OP tune: "
+                f"vbias_p={event.get('new_vbias_p', 0.0):.3f}V, "
+                f"vbias_reg={event.get('new_vbias_reg', 0.0):.3f}V, "
+                f"gain~{event.get('dc_gain_db', 0.0):.2f}dB, "
+                f"UGBW~{event.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
+                f"PM~{event.get('phase_margin', 0.0):.1f}deg, "
+                f"margin~{event.get('op_margin', 0.0):.3f}V, "
+                f"req_margin~{event.get('op_required_margin', 0.0):.3f}V, "
+                f"evals={event.get('candidate_count', 0)}"
+                f"{scale_text}"
             )
 
     def _print_simulation_summary(self, result: SimulationResult) -> None:

@@ -1,0 +1,98 @@
+schema_version: '0.1'
+design_name: source_follower_boosted_ota
+
+metadata:
+  reference: "DOI: 10.1109/JSSC.1969.1049994"
+  note: "Source-follower local feedback boosts output resistance without an explicit Rz-Cc compensation network."
+
+global_parameters:
+  vbias_p: 0.84
+  vbias_reg: 0.55
+
+topology:
+  name: source_follower_boosted_ota
+  class: ota
+  architecture: source-follower-boosted
+  global_nets:
+    - {name: vdd, type: supply}
+    - {name: gnd, type: ground}
+  ports:
+    - {id: vinp, direction: input}
+    - {id: vinn, direction: input}
+    - {id: vout, direction: output}
+    - {id: vbias_p, direction: bias}
+    - {id: vbias_reg, direction: bias}
+  devices:
+    - {id: M1, role: input_pair, stage: input, type: pmos, connections: {drain: nmir, gate: vinn, source: ptail, body: vdd}}
+    - {id: M2, role: input_pair, stage: input, type: pmos, connections: {drain: vout, gate: vinp, source: ptail, body: vdd}}
+    - {id: M3, role: current_mirror_load, stage: load, type: nmos, connections: {drain: nmir, gate: nmir, source: nreg, body: gnd}}
+    - {id: M4, role: current_mirror_load_regulated_output, stage: load, type: nmos, connections: {drain: vout, gate: nmir, source: nreg, body: gnd}}
+    - {id: M5, role: tail_current_source, stage: bias, type: pmos, connections: {drain: ptail, gate: vbias_p, source: vdd, body: vdd}}
+    - {id: M6, role: source_follower_regulator, stage: regulation, type: nmos, connections: {drain: vdd, gate: vout, source: nreg, body: gnd}}
+    - {id: M7, role: regulated_source_current_source, stage: bias, type: nmos, connections: {drain: nreg, gate: vbias_reg, source: gnd, body: gnd}}
+
+targets:
+  dc_gain:              {min: 50, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 80000000, unit: Hz, priority: 1}
+  phase_margin:         {min: 55, unit: deg, priority: 1}
+  slew_rate:            {min: 4.0e+07, unit: V/s, priority: 1}
+  output_swing:         {min: 3.0e-01, unit: V, priority: 1}
+  icmr_min:             {max: 7.0e-01, unit: V, priority: 1}
+  icmr_max:             {min: 5.0e-01, unit: V, priority: 1}
+  power:                {max: 5.0e-04, unit: W, priority: 2}
+
+design_variables:
+  - {device: M1, variable: gm_id, range: {min: 8, max: 22}, initial: 15, symmetry_label: sym_M1_M2}
+  - {device: M1, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: gm_id, range: {min: 8, max: 22}, initial: 15, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M3, variable: gm_id, range: {min: 5, max: 14}, initial: 8, symmetry_label: sym_load_M3_M4}
+  - {device: M3, variable: L,     range: {min: 5.0e-07, max: 2.5e-06}, initial: 1.2e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: gm_id, range: {min: 5, max: 14}, initial: 8, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: L,     range: {min: 5.0e-07, max: 2.5e-06}, initial: 1.2e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M5, variable: gm_id, range: {min: 5, max: 14}, initial: 8}
+  - {device: M5, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06}
+  - {device: M6, variable: gm_id, range: {min: 6, max: 18}, initial: 10}
+  - {device: M6, variable: L,     range: {min: 3.0e-07, max: 1.5e-06}, initial: 6.0e-07}
+  - {device: M7, variable: gm_id, range: {min: 6, max: 14}, initial: 9}
+  - {device: M7, variable: L,     range: {min: 5.0e-07, max: 1.5e-06}, initial: 8.0e-07}
+  - {device: "", variable: I_tail, range: {min: 5.0e-06, max: 8.0e-05}, initial: 2.0e-05, unit: A}
+  - {device: "", variable: I_follower, range: {min: 2.0e-06, max: 8.0e-05}, initial: 1.5e-05, unit: A}
+
+corrections:
+  gm_factor: 0.82
+  gds_factor: 0.75
+  c_factor: 1.10
+  description: "Conservative single-stage estimator with source-follower output-resistance boost"
+
+constraints:
+  gm_id: {min: 5, max: 25}
+  L: {min: 1.3e-07, max: 2.5e-06}
+  devices:
+    M1: {gm_id: {min: 8, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
+    M2: {gm_id: {min: 8, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
+    M3: {gm_id: {min: 5, max: 14}, L: {min: 5.0e-07, max: 2.5e-06}}
+    M4: {gm_id: {min: 5, max: 14}, L: {min: 5.0e-07, max: 2.5e-06}}
+    M5: {gm_id: {min: 5, max: 14}, L: {min: 5.0e-07, max: 2.0e-06}}
+    M6: {gm_id: {min: 6, max: 18}, L: {min: 3.0e-07, max: 1.5e-06}}
+    M7: {gm_id: {min: 6, max: 14}, L: {min: 5.0e-07, max: 1.5e-06}}
+
+loss_terms:
+  - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 8.0}
+  - {id: bw_deficit, formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 4.0}
+  - {id: pm_deficit, formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 10.0}
+  - {id: sr_deficit, formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 1.0}
+  - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 2.0}
+  - {id: icmr_min_excess, formula: "relu(realized.icmr_min - targets.icmr_min.max)/max(targets.icmr_min.max, 1)", weight: 1.0}
+  - {id: icmr_max_deficit, formula: "relu(targets.icmr_max.min - realized.icmr_max)/max(targets.icmr_max.min, 1)", weight: 1.0}
+  - {id: power_ratio, formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.2}
+
+evaluations:
+  - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}
+  - {name: unity_gain_bandwidth, type: ugbw, probe: vout, target_ref: unity_gain_bandwidth}
+  - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
+  - {name: slew_rate, type: slew_rate, probe: vout, target_ref: slew_rate}
+  - {name: output_swing, type: output_swing, probe: vout, target_ref: output_swing}
+  - {name: icmr_min, type: icmr_min, probe: vout, target_ref: icmr_min}
+  - {name: icmr_max, type: icmr_max, probe: vout, target_ref: icmr_max}
+  - {name: total_power, type: dc_power, target_ref: power}

@@ -331,25 +331,64 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
     input_refs = [p.id for p in semantics.by_type("differential_pair")]
     stage2_refs = [p.id for p in semantics.by_type("second_stage_inverter")]
     comp_refs = [p.id for p in semantics.by_type("miller_compensation")]
+    sf_refs = [p.id for p in semantics.by_type("source_follower_regulation")]
     load_refs = [p.id for p in semantics.by_type("current_mirror_load")]
     tail_refs = [p.id for p in semantics.by_type("tail_current_source")]
 
-    graph.add_dependency(
-        "unity_gain_rad_s",
-        ["gm1", "Cc"],
-        "gm1 / max(Cc, 1e-30)",
-        "Two-stage Miller OTA unity-gain frequency is set primarily by gm1/Cc.",
-        primitive_refs=input_refs + comp_refs,
-        constraints=["Cc > 0", "gm1 > 0"],
-    )
-    graph.add_dependency(
-        "dominant_pole_rad_s",
-        ["ro1", "gm2", "ro2", "Cc"],
-        "1 / max(ro1 * gm2 * ro2 * Cc, 1e-30)",
-        "Miller multiplication pulls the first-stage dominant pole to a lower frequency.",
-        primitive_refs=input_refs + load_refs + stage2_refs + comp_refs,
-        constraints=["increase Cc to lower the dominant pole when phase margin is weak"],
-    )
+    if sf_refs:
+        graph.add_dependency(
+            "regulated_rout",
+            ["ro1", "gm_sf", "ro_sf"],
+            "ro1 * max(1.0 + gm_sf * ro_sf, 1.0)",
+            "Source-follower local feedback holds the small-signal voltage across ro1 nearly constant, boosting output resistance.",
+            primitive_refs=sf_refs,
+            constraints=[
+                "the ideal io2 -> 0 case is approached only when the follower loop gain is high",
+                "source-follower headroom constrains the usable output common-mode range",
+            ],
+        )
+        graph.add_dependency(
+            "rout",
+            ["regulated_rout"],
+            "regulated_rout",
+            "Use the regulated output resistance for pole placement when the source-follower loop is declared.",
+            primitive_refs=sf_refs,
+        )
+
+    if comp_refs:
+        graph.add_dependency(
+            "unity_gain_rad_s",
+            ["gm1", "Cc"],
+            "gm1 / max(Cc, 1e-30)",
+            "Two-stage Miller OTA unity-gain frequency is set primarily by gm1/Cc.",
+            primitive_refs=input_refs + comp_refs,
+            constraints=["Cc > 0", "gm1 > 0"],
+        )
+        graph.add_dependency(
+            "dominant_pole_rad_s",
+            ["ro1", "gm2", "ro2", "Cc"],
+            "1 / max(ro1 * gm2 * ro2 * Cc, 1e-30)",
+            "Miller multiplication pulls the first-stage dominant pole to a lower frequency.",
+            primitive_refs=input_refs + load_refs + stage2_refs + comp_refs,
+            constraints=["increase Cc to lower the dominant pole when phase margin is weak"],
+        )
+    else:
+        graph.add_dependency(
+            "dominant_pole_rad_s",
+            ["rout", "CL_eff"],
+            "1 / max(rout * CL_eff, 1e-30)",
+            "Uncompensated OTA dominant pole is set by the highest-impedance node and its explicit capacitance.",
+            primitive_refs=input_refs + load_refs + stage2_refs,
+            constraints=["do not assume Cc exists unless the topology declares a compensation network"],
+        )
+        graph.add_dependency(
+            "unity_gain_rad_s",
+            ["dc_gain", "dominant_pole_rad_s"],
+            "dc_gain * dominant_pole_rad_s",
+            "Uncompensated OTA unity-gain frequency follows the gain-bandwidth product of the actual pole locations.",
+            primitive_refs=input_refs + load_refs + stage2_refs,
+            constraints=["verify pole separation directly instead of applying Miller Rz-Cc rules"],
+        )
     graph.add_dependency(
         "second_pole_rad_s",
         ["gm2", "CL_eff"],
@@ -358,22 +397,23 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
         primitive_refs=stage2_refs,
         constraints=["gm2 should place p2 well above unity-gain frequency"],
     )
-    graph.add_dependency(
-        "zero_target_Rz",
-        ["gm2"],
-        "1 / max(gm2, 1e-30)",
-        "A nulling resistor near 1/gm2 removes the right-half-plane Miller zero.",
-        primitive_refs=stage2_refs + comp_refs,
-        constraints=["Rz should track the measured or estimated second-stage gm"],
-    )
-    graph.add_dependency(
-        "miller_zero_rad_s",
-        ["Cc", "Rz", "gm2"],
-        "1 / max(Cc * abs(1 / max(gm2, 1e-30) - Rz), 1e-30)",
-        "Series Rz-Cc compensation places the zero according to 1/(Cc*(1/gm2 - Rz)).",
-        primitive_refs=comp_refs,
-        constraints=["Rz below 1/gm2 leaves a right-half-plane zero", "Rz above 1/gm2 creates a left-half-plane zero"],
-    )
+    if comp_refs:
+        graph.add_dependency(
+            "zero_target_Rz",
+            ["gm2"],
+            "1 / max(gm2, 1e-30)",
+            "A nulling resistor near 1/gm2 removes the right-half-plane Miller zero.",
+            primitive_refs=stage2_refs + comp_refs,
+            constraints=["Rz should track the measured or estimated second-stage gm"],
+        )
+        graph.add_dependency(
+            "miller_zero_rad_s",
+            ["Cc", "Rz", "gm2"],
+            "1 / max(Cc * abs(1 / max(gm2, 1e-30) - Rz), 1e-30)",
+            "Series Rz-Cc compensation places the zero according to 1/(Cc*(1/gm2 - Rz)).",
+            primitive_refs=comp_refs,
+            constraints=["Rz below 1/gm2 leaves a right-half-plane zero", "Rz above 1/gm2 creates a left-half-plane zero"],
+        )
     graph.add_dependency(
         "dc_gain",
         ["gm1", "ro1", "gm2", "ro2"],
@@ -382,14 +422,24 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
         primitive_refs=input_refs + load_refs + stage2_refs,
         constraints=["all gain devices must remain in saturation at the operating point"],
     )
-    graph.add_dependency(
-        "slew_rate_pos",
-        ["Itail", "Cc"],
-        "Itail / max(Cc, 1e-30)",
-        "Positive slew is bounded by first-stage tail current charging the compensation capacitor.",
-        primitive_refs=tail_refs + comp_refs,
-        constraints=["Itail must satisfy the requested large-signal slew rate"],
-    )
+    if comp_refs:
+        graph.add_dependency(
+            "slew_rate_pos",
+            ["Itail", "Cc"],
+            "Itail / max(Cc, 1e-30)",
+            "Positive slew is bounded by first-stage tail current charging the compensation capacitor.",
+            primitive_refs=tail_refs + comp_refs,
+            constraints=["Itail must satisfy the requested large-signal slew rate"],
+        )
+    else:
+        graph.add_dependency(
+            "slew_rate_pos",
+            ["I_stage2", "CL_eff"],
+            "I_stage2 / max(CL_eff, 1e-30)",
+            "Positive slew is bounded by available output current and explicit load capacitance.",
+            primitive_refs=stage2_refs + tail_refs,
+            constraints=["do not use Cc-based slew equations unless Cc exists"],
+        )
     graph.add_dependency(
         "slew_rate_neg",
         ["I_stage2", "CL_eff"],
@@ -404,6 +454,10 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
         "unity_gain_rad_s / max(second_pole_rad_s, 1e-30)",
         "Phase-margin risk rises when the non-dominant pole approaches unity gain.",
         primitive_refs=primitive_refs,
-        constraints=["lower the dominant pole with Cc before chasing bandwidth when PM fails"],
+        constraints=(
+            ["lower the dominant pole with Cc before chasing bandwidth when PM fails"]
+            if comp_refs
+            else ["reduce non-dominant pole loading or lower unity-gain frequency; no Rz-Cc compensation is declared"]
+        ),
     )
     return graph

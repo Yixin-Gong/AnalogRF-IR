@@ -1,5 +1,6 @@
 import json
 
+from core.compensation import has_miller_rc_compensation
 from asir.profiles import select_circuit_profile
 from core.environment import default_environment
 from core.rule_registry import list_rules
@@ -11,6 +12,7 @@ from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mappin
 from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from outputs.artifacts import ArtifactWriter
+from postprocess.source_follower import _candidate_points
 from postprocess.two_stage import tune_two_stage_compensation
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
@@ -43,7 +45,7 @@ def test_design_input_accepts_spice_and_writes_schema(tmp_path):
 
     assert bundle.source_kind == "spice"
     assert out.exists()
-    assert bundle.state.topology.architecture == "two-stage"
+    assert bundle.state.topology.architecture == "two-stage-miller"
     assert bundle.state.global_parameters["Cc"] == 500e-15
 
 
@@ -79,6 +81,66 @@ def test_ir_profile_drives_objectives_and_rule_filtering():
     assert any("by comparator profile" in term.description for term in comparator.loss_terms)
     assert "check_comparator_metric_coverage" in comparator_rules
     assert "check_comparator_metric_coverage" not in ota_rules
+
+
+def test_uncompensated_two_stage_does_not_trigger_rc_logic(tmp_path):
+    data = load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml")
+    data["design_name"] = "uncompensated_two_stage_ota"
+    data["topology"]["name"] = "uncompensated_two_stage_ota"
+    data["topology"]["architecture"] = "two-stage"
+    data["design_variables"] = [
+        item for item in data["design_variables"]
+        if item.get("device") or item.get("variable") not in {"Cc", "Rz"}
+    ]
+    data["loss_terms"] = [
+        item for item in data["loss_terms"]
+        if item.get("id") != "zero_alignment"
+    ]
+    state = build_design_state_from_yaml(data, default_environment())
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
+
+    _obj, _violation, meta = evaluator.evaluate(x)
+    netlist = generate_netlist(state)
+
+    assert not has_miller_rc_compensation(state)
+    assert "Cc" not in meta["performance"]
+    assert "Rz" not in meta["performance"]
+    assert "zero_target_rz" not in meta["performance"]
+    assert "\nCc " not in netlist
+    assert "\nRz " not in netlist
+    assert tune_two_stage_compensation(state, NgspiceSimulator(), tmp_path) == {}
+
+
+def test_source_follower_boosted_ota_has_no_rc_compensation():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml"),
+        default_environment(),
+    )
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in state.design_variables]
+
+    _obj, _violation, meta = evaluator.evaluate(x)
+    netlist = generate_netlist(state)
+
+    assert not has_miller_rc_compensation(state)
+    assert "Cc" not in state.global_parameters
+    assert "Rz" not in state.global_parameters
+    assert "Cc" not in meta["performance"]
+    assert "Rz" not in meta["performance"]
+    assert "\nCc " not in netlist
+    assert "\nRz " not in netlist
+    assert "Vvbias_p vbias_p 0 DC 0.8400" in netlist
+    assert "Vvbias_reg vbias_reg 0 DC 0.5500" in netlist
+    assert any("source_follower" in dev.role for dev in state.topology.devices)
+
+
+def test_source_follower_op_tune_includes_width_repair_candidates():
+    points = _candidate_points([0.80, 0.82], [0.50, 0.55], ["M7"])
+
+    assert (0.81, 0.47, 2.5) in points
+    assert (0.80, 0.50, 2.0) in points
+    assert (0.82, 0.55, 1.0) in points
 
 
 def test_artifact_writer_emits_result_json(tmp_path):

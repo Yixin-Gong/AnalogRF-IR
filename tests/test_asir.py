@@ -120,3 +120,14 @@ def test_two_stage_ota_extracts_miller_semantics():
     assert "dominant_pole_rad_s" in design.dependency_graph.graph
     assert "zero_target_Rz" in design.dependency_graph.graph
     assert "bias" in design.phase_graph.graph
+
+
+def test_source_follower_boosted_ota_is_not_miller_compensated():
+    design = build_design_from_v1_yaml("inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml")
+    counts = design.semantic_graph.primitive_type_counts()
+
+    assert counts["differential_pair"] == 1
+    assert counts["source_follower_regulation"] == 1
+    assert counts.get("miller_compensation", 0) == 0
+    assert "regulated_rout" in design.dependency_graph.graph
+    assert "zero_target_Rz" not in design.dependency_graph.graph

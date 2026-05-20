@@ -91,6 +91,8 @@ inputs/
       five_transistor_ota.yaml
     two_stage_miller/
       two_stage_miller_ota.yaml
+    source_follower_boosted/
+      source_follower_boosted_ota.yaml
   comparator/
     strongarm/
       strongarm_v1.yaml
@@ -101,6 +103,8 @@ inputs/
 ```
 
 `inputs/ota/two_stage_miller/two_stage_miller_ota.yaml` is the more complex OTA example. It models a five-transistor input OTA, a second-stage inverter, Miller capacitor `Cc`, zero-setting resistor `Rz`, and bias mirror devices.
+
+`inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml` is a source-follower-regulated OTA example. It intentionally has no `Rz-Cc` compensation network; the source follower is treated as local output-resistance boosting with output common-mode headroom as the key trade-off.
 
 ## IR Profiles
 
@@ -210,6 +214,15 @@ For two-stage Miller OTAs:
 - Pull the dominant pole lower with `Cc` when diagnosing two-stage stability failures.
 - Place the compensation zero with `Rz ~= 1/gm2`, where `gm2` is the second-stage transconductance.
 - Use ngspice AC and operating-point measurements as the final authority after compact optimization.
+
+For OTAs without explicit `Rz-Cc` compensation:
+
+- Do not synthesize `Cc`, `Rz`, or Miller zero objectives from architecture alone.
+- Derive stability diagnostics from the declared poles, loads, and local feedback paths.
+- Treat source-follower regulation as output-resistance boosting, not compensation.
+- Retune source-follower bias voltages after sizing so the regulated load, input pair, and tail source all land in a valid OP region.
+- Allow a bounded regulated-source current-source width repair when bias-only retuning cannot satisfy phase margin, bandwidth, and OP headroom together.
+- Check output common-mode headroom before trusting gain and bandwidth estimates.
 
 For dynamic comparators:
 

@@ -24,7 +24,7 @@ def test_spice_parser_canonicalizes_generated_mos_ids():
     assert ids == ["M1", "M2", "M3", "M4", "M5", "M6", "M7"]
     assert roles["M4"] == "current_mirror_load"
     assert roles["M6"] == "second_stage_gain"
-    assert data["topology"]["architecture"] == "two-stage"
+    assert data["topology"]["architecture"] == "two-stage-miller"
 
 
 def test_spice_yaml_can_seed_optimizer_design_state():
@@ -51,6 +51,26 @@ def test_spice_yaml_can_seed_optimizer_design_state():
     assert state.global_parameters["Cc"] == 500e-15
     assert state.global_parameters["Rz"] == 3500.0
     assert any(variable.variable == "Cc" for variable in state.design_variables)
+
+
+def test_spice_parser_does_not_invent_rc_compensation():
+    data = parse_spice_text(
+        """
+        M1 net1 vinn tail gnd nmos W=10u L=300n
+        M2 n1 vinp tail gnd nmos W=10u L=300n
+        M3 net1 net1 vdd vdd pmos W=20u L=1u
+        M4 n1 net1 vdd vdd pmos W=20u L=1u
+        M5 tail vbias_tail gnd gnd nmos W=8u L=500n
+        M6 vout n1 vdd vdd pmos W=60u L=500n
+        M7 vout vbias_stage2 gnd gnd nmos W=30u L=500n
+        """,
+        design_name="uncompensated_two_stage",
+    )
+    names = {item["variable"] for item in data["design_variables"] if not item.get("device")}
+
+    assert data["topology"]["architecture"] == "two-stage"
+    assert "Cc" not in names
+    assert "Rz" not in names
 
 
 def test_spice_parser_recognizes_tail_bias_mirror():

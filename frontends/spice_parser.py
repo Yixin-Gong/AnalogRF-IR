@@ -72,7 +72,7 @@ def parse_spice_text(text: str, design_name: str = "spice_design") -> dict[str, 
         "topology": topology,
         "targets": _default_targets(topology["class"]),
         "constraints": _default_constraints(devices),
-        "design_variables": _default_design_variables(devices, transistors),
+        "design_variables": _default_design_variables(devices, transistors, passives),
         "loss_terms": _default_loss_terms(topology["class"]),
         "corrections": {
             "gm_factor": 1.0,
@@ -309,7 +309,7 @@ def _looks_like_ota(devices: list[dict[str, Any]], ports: list[dict[str, str]]) 
 
 def _infer_architecture(devices: list[dict[str, Any]], passives: list[dict[str, Any]]) -> str:
     if any(dev["role"] == "second_stage_gain" for dev in devices):
-        return "two-stage"
+        return "two-stage-miller" if _has_miller_passives(passives) else "two-stage"
     if len([dev for dev in devices if dev["role"] != "device"]) >= 5:
         return "single-stage"
     return "spice-import"
@@ -337,7 +337,11 @@ def _default_constraints(devices: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _default_design_variables(devices: list[dict[str, Any]], transistors: dict[str, Any]) -> list[dict[str, Any]]:
+def _default_design_variables(
+    devices: list[dict[str, Any]],
+    transistors: dict[str, Any],
+    passives: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     variables = []
     for dev in devices:
         params = transistors.get(dev["id"], {}).get("parameters", {})
@@ -347,9 +351,16 @@ def _default_design_variables(devices: list[dict[str, Any]], transistors: dict[s
         variables.extend([
             {"device": "", "variable": "I_tail", "range": {"min": 5e-6, "max": 8e-5}, "initial": 2e-5, "unit": "A"},
             {"device": "", "variable": "I_stage2", "range": {"min": 1e-5, "max": 2.5e-4}, "initial": 8e-5, "unit": "A"},
-            {"device": "", "variable": "Cc", "range": {"min": 1e-13, "max": 2.5e-12}, "initial": 4e-13, "unit": "F"},
-            {"device": "", "variable": "Rz", "range": {"min": 1e2, "max": 2e4}, "initial": 1e3, "unit": "ohm"},
         ])
+        passive_ids = {str(item.get("id", "")).lower() for item in passives}
+        if "cc" in passive_ids:
+            variables.append(
+                {"device": "", "variable": "Cc", "range": {"min": 1e-13, "max": 2.5e-12}, "initial": 4e-13, "unit": "F"}
+            )
+        if "rz" in passive_ids:
+            variables.append(
+                {"device": "", "variable": "Rz", "range": {"min": 1e2, "max": 2e4}, "initial": 1e3, "unit": "ohm"}
+            )
     return variables
 
 
@@ -408,6 +419,11 @@ def _global_parameters_from_passives(passives: list[dict[str, Any]]) -> dict[str
         elif item["id"].lower() == "rz":
             out["Rz"] = value
     return out
+
+
+def _has_miller_passives(passives: list[dict[str, Any]]) -> bool:
+    passive_ids = {str(item.get("id", "")).lower() for item in passives}
+    return "cc" in passive_ids
 
 
 def _role_gm_id(role: str) -> float:

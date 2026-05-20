@@ -32,14 +32,17 @@ class RuleBasedSemanticExtractor:
 
     def _extract_ota_primitives(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
         primitives: list[SemanticPrimitive] = []
-        primitives.extend(self._extract_ota_input_pairs(topology))
-        primitives.extend(self._extract_ota_current_mirror_loads(topology))
-        primitives.extend(self._extract_ota_tail_bias(topology))
+        comp_primitives = self._extract_ota_miller_compensation(topology)
+        has_miller_comp = bool(comp_primitives)
+        primitives.extend(self._extract_ota_input_pairs(topology, has_miller_comp=has_miller_comp))
+        primitives.extend(self._extract_ota_current_mirror_loads(topology, has_miller_comp=has_miller_comp))
+        primitives.extend(self._extract_ota_tail_bias(topology, has_miller_comp=has_miller_comp))
         primitives.extend(self._extract_ota_second_stage(topology))
-        primitives.extend(self._extract_ota_miller_compensation(topology))
+        primitives.extend(self._extract_ota_source_follower_regulation(topology))
+        primitives.extend(comp_primitives)
         return primitives
 
-    def _extract_ota_input_pairs(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+    def _extract_ota_input_pairs(self, topology: TopologyGraph, *, has_miller_comp: bool) -> list[SemanticPrimitive]:
         primitives: list[SemanticPrimitive] = []
         for index, devices in enumerate(self._devices_by_role_token(topology, "input_pair"), start=1):
             if len(devices) < 2:
@@ -53,10 +56,17 @@ class RuleBasedSemanticExtractor:
                     primitive_type="differential_pair",
                     role="input transconductance stage",
                     member_devices=devices,
-                    equations=[
-                        "i_diff = gm1 * (vinp - vinn)",
-                        "omega_u ~= gm1 / Cc",
-                    ],
+                    equations=(
+                        [
+                            "i_diff = gm1 * (vinp - vinn)",
+                            "omega_u ~= gm1 / Cc",
+                        ]
+                        if has_miller_comp
+                        else [
+                            "i_diff = gm1 * (vinp - vinn)",
+                            "omega_u depends on the explicit output and internal node capacitances",
+                        ]
+                    ),
                     constraints=[
                         "input pair devices must be symmetric",
                         "input pair devices must remain in saturation at the operating point",
@@ -70,7 +80,7 @@ class RuleBasedSemanticExtractor:
             )
         return primitives
 
-    def _extract_ota_current_mirror_loads(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+    def _extract_ota_current_mirror_loads(self, topology: TopologyGraph, *, has_miller_comp: bool) -> list[SemanticPrimitive]:
         devices = [
             dev for dev in topology.mos_devices()
             if "current_mirror_load" in topology.role_hint(dev)
@@ -86,10 +96,17 @@ class RuleBasedSemanticExtractor:
                 primitive_type="current_mirror_load",
                 role="single-ended active load for the first-stage differential pair",
                 member_devices=sorted(devices),
-                equations=[
-                    "A1 ~= gm1 / (gds_input + gds_load)",
-                    "p1 is lowered by Miller multiplication from the second-stage gain",
-                ],
+                equations=(
+                    [
+                        "A1 ~= gm1 / (gds_input + gds_load)",
+                        "p1 is lowered by Miller multiplication from the second-stage gain",
+                    ]
+                    if has_miller_comp
+                    else [
+                        "A1 ~= gm1 / (gds_input + gds_load)",
+                        "p1 is set by the first-stage output resistance and local capacitance",
+                    ]
+                ),
                 constraints=[
                     "mirror load devices should be matched",
                     "mirror output device must remain in saturation at the operating point",
@@ -102,7 +119,7 @@ class RuleBasedSemanticExtractor:
             )
         ]
 
-    def _extract_ota_tail_bias(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+    def _extract_ota_tail_bias(self, topology: TopologyGraph, *, has_miller_comp: bool) -> list[SemanticPrimitive]:
         devices = [
             dev for dev in topology.mos_devices()
             if any(token in topology.role_hint(dev) for token in ("tail_current_source", "tail_bias_mirror"))
@@ -115,10 +132,17 @@ class RuleBasedSemanticExtractor:
                 primitive_type="tail_current_source",
                 role="continuous bias current for the input differential pair",
                 member_devices=sorted(devices),
-                equations=[
-                    "Itail sets gm1 through the selected gm/ID",
-                    "SR+ ~= Itail / Cc",
-                ],
+                equations=(
+                    [
+                        "Itail sets gm1 through the selected gm/ID",
+                        "SR+ ~= Itail / Cc",
+                    ]
+                    if has_miller_comp
+                    else [
+                        "Itail sets gm1 through the selected gm/ID",
+                        "large-signal slew depends on the explicit output and internal node capacitances",
+                    ]
+                ),
                 constraints=[
                     "tail source and tail reference devices should preserve the intended mirror ratio",
                     "tail source must remain in saturation at the operating point",
@@ -166,6 +190,60 @@ class RuleBasedSemanticExtractor:
                 input_nets=sorted({topology.terminal_net(dev, "gate") or "" for dev in gain_devices}),
                 output_nets=output_nets,
                 internal_nets=sorted({topology.terminal_net(dev, "source") or "" for dev in devices}),
+            )
+        ]
+
+    def _extract_ota_source_follower_regulation(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        follower_devices = [
+            dev for dev in topology.mos_devices()
+            if "source_follower" in topology.role_hint(dev).lower()
+            or "follower" in topology.role_hint(dev).lower()
+        ]
+        regulated_devices = [
+            dev for dev in topology.mos_devices()
+            if "regulated_output" in topology.role_hint(dev).lower()
+            or "regulated_cascode" in topology.role_hint(dev).lower()
+        ]
+        if not follower_devices:
+            return []
+        members = sorted(set(follower_devices + regulated_devices))
+        output_nets = topology.output_nets() or sorted(
+            {
+                topology.terminal_net(dev, "source") or ""
+                for dev in follower_devices
+                if topology.terminal_net(dev, "source")
+            }
+        )
+        return [
+            SemanticPrimitive(
+                id="ota_source_follower_regulation_1",
+                primitive_type="source_follower_regulation",
+                role="local source-follower feedback that boosts output resistance",
+                member_devices=members,
+                equations=[
+                    "v_ro1_top ~= v_ro1_bottom under source-follower feedback",
+                    "i_ro1 ~= 0 in the high-loop-gain limit",
+                    "rout ~= ro1 * (1 + loop_gain_sf)",
+                ],
+                constraints=[
+                    "source-follower headroom limits the valid output common-mode range",
+                    "regulated device and follower bias devices must remain in their valid operating regions",
+                ],
+                active_phases=["bias", "small_signal"],
+                state_variables=["vout", "v_ro1", "loop_gain_sf", "rout"],
+                input_nets=sorted({topology.terminal_net(dev, "gate") or "" for dev in follower_devices}),
+                output_nets=output_nets,
+                internal_nets=sorted(
+                    {
+                        topology.terminal_net(dev, terminal) or ""
+                        for dev in members
+                        for terminal in ("drain", "source")
+                        if topology.terminal_net(dev, terminal)
+                    }
+                ),
+                notes=(
+                    "This is an output-resistance boosting mechanism, not an Rz-Cc compensation network."
+                ),
             )
         ]
 
