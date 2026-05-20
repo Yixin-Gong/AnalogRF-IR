@@ -1,18 +1,4 @@
-"""
-设计规则库 V2.0 — 25 个实用的模拟IC约束函数。
-
-全部用 @register_rule 注册，Agent 可通过 get_rule(name) 调用。
-函数分类:
-  A. 几何/工艺设计规则 (7)
-  B. 面积与版图 (2)
-  C. 匹配与对称 (4)
-  D. 偏置与工作区 (5)
-  E. 性能达标 (2)
-  F. 搜索空间 (3)
-  G. 可靠性 (2)
-
-每个函数签名: (state: DesignState) -> ValidationReport
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -25,13 +11,13 @@ from core.rule_registry import register_rule, ValidationReport, DiagnosisResult
 
 
 # ═══════════════════════════════════════════════════════════════
-#  A. 几何/工艺设计规则 (DRC)
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_min_width", layer=4,
-               description="W >= process.min_W 对所有晶体管")
+               description="W must be greater than or equal to process.min_W for every transistor.")
 def check_min_width(state: DesignState) -> ValidationReport:
-    """检查所有晶体管宽度不小于工艺最小宽度。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
@@ -49,9 +35,9 @@ def check_min_width(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_max_width", layer=4,
-               description="W <= process.max_W 对所有晶体管")
+               description="W must not exceed the process maximum single-finger width.")
 def check_max_width(state: DesignState) -> ValidationReport:
-    """检查所有晶体管宽度不超过工艺最大单指宽度。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
@@ -67,7 +53,7 @@ def check_max_width(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_min_length", layer=4,
-               description="L >= process.min_L 对所有晶体管")
+               description="L must be greater than or equal to process.min_L for every transistor.")
 def check_min_length(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -85,7 +71,7 @@ def check_min_length(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_max_length", layer=4,
-               description="L <= process.max_L 对所有晶体管")
+               description="L must not exceed process.max_L for every transistor.")
 def check_max_length(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -101,9 +87,9 @@ def check_max_length(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_W_precision", layer=4,
-               description="W 是 process.W_precision 的整数倍")
+               description="W must align to the process width grid.")
 def check_W_precision(state: DesignState) -> ValidationReport:
-    """检查 W 符合工艺网格精度。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
@@ -121,7 +107,7 @@ def check_W_precision(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_L_precision", layer=4,
-               description="L 是 process.L_precision 的整数倍")
+               description="L must align to the process length grid.")
 def check_L_precision(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -140,9 +126,9 @@ def check_L_precision(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_W_L_ratio", layer=4,
-               description="W/L 在 [min_W_L_ratio, max_W_L_ratio] 范围内")
+               description="W/L must stay within process ratio limits.")
 def check_W_L_ratio(state: DesignState) -> ValidationReport:
-    """检查宽长比在合理范围，防止极端尺寸。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
@@ -167,11 +153,11 @@ def check_W_L_ratio(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  B. 面积与版图
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_min_area", layer=4,
-               description="W*L >= process.min_area 对所有晶体管")
+               description="W*L must exceed the process minimum device area.")
 def check_min_area(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -191,9 +177,9 @@ def check_min_area(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_finger_width", layer=4,
-               description="W > max_finger_width 时建议分叉指")
+               description="Wide devices should be split into layout fingers.")
 def check_finger_width(state: DesignState) -> ValidationReport:
-    """检查是否需要叉指分解（版图建议）。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
@@ -210,36 +196,36 @@ def check_finger_width(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  C. 匹配与对称
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
-PAIR_TOLERANCE = 0.05  # 5% 默认容差
+PAIR_TOLERANCE = 0.05  # Internal implementation note.
 
 
 @register_rule("check_pair_W_mismatch", layer=4,
-               description="对管 W 偏差 < 5%")
+               description="Matched-pair W mismatch should stay below 5%.")
 def check_pair_W_mismatch(state: DesignState) -> ValidationReport:
     return _check_pair_param(state, "W", PAIR_TOLERANCE, "W", lambda p: p.W)
 
 
 @register_rule("check_pair_L_mismatch", layer=4,
-               description="对管 L 偏差 < 5%")
+               description="Matched-pair L mismatch should stay below 5%.")
 def check_pair_L_mismatch(state: DesignState) -> ValidationReport:
     return _check_pair_param(state, "L", PAIR_TOLERANCE, "L",
                               lambda p, ts: ts.L_strategy or p.L)
 
 
 @register_rule("check_pair_gm_mismatch", layer=4,
-               description="对管 gm 偏差 < 5%")
+               description="Matched-pair gm mismatch should stay below 5%.")
 def check_pair_gm_mismatch(state: DesignState) -> ValidationReport:
     return _check_pair_param(state, "gm", PAIR_TOLERANCE, "gm", lambda p: p.gm)
 
 
 def _check_pair_param(state: DesignState, param_name: str, tolerance: float,
                        label: str, getter) -> ValidationReport:
-    """通用对管参数偏差检查。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
-    # 按 role 分组
+    # Internal implementation note.
     role_groups = {}
     for dev in state.topology.devices:
         role_groups.setdefault(dev.role, []).append(dev.id)
@@ -273,20 +259,20 @@ def _check_pair_param(state: DesignState, param_name: str, tolerance: float,
 
 
 @register_rule("check_current_mirror_ratio", layer=4,
-               description="电流镜 W 比例在约束范围内")
+               description="Current-mirror width ratios should stay inside the supported range.")
 def check_current_mirror_ratio(state: DesignState) -> ValidationReport:
-    """检查电流镜管之间的 W 比例是否合理（1:1 ~ 1:10）。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     mirror_groups = {}
     for dev in state.topology.devices:
         if "current_mirror" in dev.role or "mirror" in dev.role.lower():
-            # 按 gate 连接分组
+            # Internal implementation note.
             gate_net = dev.connections.get("gate", "")
             mirror_groups.setdefault(gate_net, []).append(dev.id)
     for gate_net, dev_ids in mirror_groups.items():
         if len(dev_ids) < 2:
             continue
-        # 取所有 W 值，检查比例
+        # Internal implementation note.
         widths = []
         for did in dev_ids:
             ts = state.transistors.get(did)
@@ -308,17 +294,17 @@ def check_current_mirror_ratio(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  D. 偏置与工作区
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_saturation_margin", layer=4,
-               description="VDS >= VDSAT * headroom_factor 对有源器件")
+               description="Active devices should satisfy VDS >= VDSAT times the headroom factor.")
 def check_saturation_margin(state: DesignState) -> ValidationReport:
-    """检查关键器件是否在饱和区，使用工艺定义的 headroom factor。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     factor = proc.VDSAT_headroom_factor
-    exempt = {"current_mirror_load"}  # diode-connected 豁免
+    exempt = {"current_mirror_load"}  # Internal implementation note.
     for tid, ts in state.transistors.items():
         p = ts.parameters
         if p.region == "unknown" or p.vdsat <= 0:
@@ -339,13 +325,9 @@ def check_saturation_margin(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_region_validity", layer=4,
-               description="region 字段是有效 SPICE 工作区值且非豁免器件在饱和区")
+               description="SPICE operating-region labels must be valid and non-exempt devices should saturate.")
 def check_region_validity(state: DesignState) -> ValidationReport:
-    """检查所有晶体管的 region 字段：
-    1. 是有效 SPICE 工作区值
-    2. 非豁免器件必须在 saturation 区（或 subthreshold 亚阈值区）
-    3. unknown 表示仿真未正确回填
-    """
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     SATURATION_OK = {"saturation", "subthreshold"}
     EXEMPT = {"current_mirror_load"}
@@ -354,7 +336,7 @@ def check_region_validity(state: DesignState) -> ValidationReport:
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
 
-        # 0. 有效性
+        # Internal implementation note.
         if p.region not in SPICE_OPERATING_REGIONS:
             report.add(DiagnosisResult(
                 check_name="dr:region_valid", passed=False, severity="error",
@@ -363,7 +345,7 @@ def check_region_validity(state: DesignState) -> ValidationReport:
             ))
             continue
 
-        # 1. unknown → 仿真回填Bug
+        # Internal implementation note.
         if p.region == "unknown":
             report.add(DiagnosisResult(
                 check_name="dr:region_valid", passed=False, severity="warning",
@@ -373,11 +355,11 @@ def check_region_validity(state: DesignState) -> ValidationReport:
             ))
             continue
 
-        # 2. 豁免器件不检查
+        # Internal implementation note.
         if role in EXEMPT:
             continue
 
-        # 3. 非豁免，必须在饱和区或亚阈值区
+        # Internal implementation note.
         if p.region not in SATURATION_OK:
             report.add(DiagnosisResult(
                 check_name="dr:region_saturation", passed=False,
@@ -391,28 +373,22 @@ def check_region_validity(state: DesignState) -> ValidationReport:
     return report
 
 
-# ── 按 role 分级的饱和深度 ──────────────────────────────────
+# Internal implementation note.
 
-# 默认裕度映射: role → 最小 VDS-VDSAT 余量 [V]
+# Internal implementation note.
 _SATURATION_DEPTH_MARGIN: dict = {
-    "input_pair":         0.08,   # 差分对: 80mV 裕度
-    "cascode":            0.20,   # cascode: 需要深饱和
-    "tail_current_source": 0.05,  # 尾电流源: 压摆有限
-    "current_mirror_load": 0.0,   # diode-connected 豁免
+    "input_pair":         0.08,   # Internal implementation note.
+    "cascode":            0.20,   # Internal implementation note.
+    "tail_current_source": 0.05,  # Internal implementation note.
+    "current_mirror_load": 0.0,   # Internal implementation note.
 }
-_DEFAULT_DEPTH_MARGIN = 0.05  # 未明确 role 的默认余量
+_DEFAULT_DEPTH_MARGIN = 0.05  # Internal implementation note.
 
 
 @register_rule("check_saturation_depth", layer=4,
-               description="按器件 role 分级检查 VDS-VDSAT 饱和深度")
+               description="Role-dependent VDS-VDSAT saturation depth should meet policy margins.")
 def check_saturation_depth(state: DesignState) -> ValidationReport:
-    """对每个非豁免器件，检查 VDS 超出 VDSAT 的裕度是否达到其 role 的要求。
-
-    diode-connected (current_mirror_load) 器件 VDS = VGS，豁免。
-    其他器件按 role 查表，无匹配则用默认 50mV。
-
-    与 check_saturation_margin (乘性因子) 互补 — 本规则使用绝对电压裕度。
-    """
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     for tid, ts in state.transistors.items():
         p = ts.parameters
@@ -421,7 +397,7 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
         dev_def = state.get_device_def(tid)
         role = dev_def.role if dev_def else ""
         if role in ("current_mirror_load",):
-            continue  # diode-connected 豁免
+            continue  # Internal implementation note.
 
         margin_v = p.vds - p.vdsat
         required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
@@ -441,29 +417,25 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
     return report
 
 
-# ── 反型层约束 ──────────────────────────────────────────────
+# Internal implementation note.
 
-# 按 role 的反型层期望: (IC_min, IC_max, 描述)
-# 来自 gm/ID 设计方法学:
-#   WI (弱反型):  IC < 0.1, 高增益效率, 低带宽
-#   MI (中等反型): 0.1 ≤ IC ≤ 10, 增益-带宽平衡
-#   SI (强反型):  IC > 10, 高带宽, 低增益效率
+# Internal implementation note.
+# Internal implementation note.
+# Internal implementation note.
+# Internal implementation note.
+# Internal implementation note.
 _INVERSION_EXPECTATION: dict = {
-    "input_pair":         (0.3, 8.0,   "中等反型中段 — 增益带宽平衡"),
-    "current_mirror_load": (2.0, 50.0, "中强反型 — 电流复制精度高"),
-    "tail_current_source": (5.0, 100.0, "强反型 — 电流稳定, 高输出阻抗"),
-    "cascode":            (5.0, 100.0, "强反型 — 高本征增益"),
+    "input_pair":         (0.3, 8.0,   "moderate inversion for gain-bandwidth efficiency"),
+    "current_mirror_load": (2.0, 50.0, "moderate-to-strong inversion for mirror accuracy"),
+    "tail_current_source": (5.0, 100.0, "strong inversion for stable bias current and high output resistance"),
+    "cascode":            (5.0, 100.0, "strong inversion for high intrinsic gain"),
 }
 
 
 @register_rule("check_inversion_region", layer=4,
-               description="按器件 role 检查反型系数 IC 是否在期望范围内")
+               description="Device inversion coefficient should match the expected role-dependent range.")
 def check_inversion_region(state: DesignState) -> ValidationReport:
-    """使用 InversionAnalyzer 计算每个晶体管的 IC，检查是否落在 role 期望区间。
-
-    本规则需要 ProcessInfo 中的 n_sub_nmos / n_sub_pmos 参数（P0 已加入）。
-    若仿真尚未回填物理参数，使用 strategy gm_id 做近似计算。
-    """
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     try:
         from core.inversion import InversionAnalyzer
@@ -483,7 +455,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
         role = dev_def.role if dev_def else ""
         expectation = _INVERSION_EXPECTATION.get(role)
         if expectation is None:
-            continue  # 无约束的 role 跳过
+            continue  # Internal implementation note.
 
         ic_min, ic_max, desc = expectation
         result = analyzer.analyze_transistor(ts, proc)
@@ -502,7 +474,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
                 check_name="dr:inversion_region", passed=False,
                 severity="warning",
                 message=f"{tid} ({role}): IC={ic:.3f} < min={ic_min} — "
-                        f"too weak (期望: {desc})",
+                        f"too weak (expected: {desc})",
                 layer=4, device=tid,
                 details={"ic": ic, "ic_min": ic_min, "ic_max": ic_max,
                          "gm_id": result.gm_id, "region": result.region}
@@ -512,7 +484,7 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
                 check_name="dr:inversion_region", passed=False,
                 severity="warning",
                 message=f"{tid} ({role}): IC={ic:.3f} > max={ic_max} — "
-                        f"too strong (期望: {desc})",
+                        f"too strong (expected: {desc})",
                 layer=4, device=tid,
                 details={"ic": ic, "ic_min": ic_min, "ic_max": ic_max,
                          "gm_id": result.gm_id, "region": result.region}
@@ -521,39 +493,29 @@ def check_inversion_region(state: DesignState) -> ValidationReport:
     return report
 
 
-# ── 反型层一致性 ────────────────────────────────────────────
+# Internal implementation note.
 
-_IC_CONSISTENCY_TOLERANCE = 0.30  # 30% 偏差容忍
+_IC_CONSISTENCY_TOLERANCE = 0.30  # Internal implementation note.
 
 
-# ── 饱和失效诊断 ────────────────────────────────────────────
+# Internal implementation note.
 
 
 @register_rule("diagnose_saturation_failure", layer=4,
-               description="饱和失效根因诊断 — 分析 VDS 不足的可能原因 (info only)")
+               description="Diagnose likely causes when device saturation headroom is weak.")
 def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
-    """对每个非豁免的饱和不足器件，推断可能的根因。
-
-    本规则是纯诊断性的 (severity=info)，不做 pass/fail 判断。
-    仅在 check_saturation_margin 或 check_saturation_depth 发现问题后才有输出。
-
-    诊断策略 (按 role):
-      tail_current_source: VDS_tail = VGS_input_pair，尾电流过大或 VDD 不足
-      input_pair:         VDS_input = VDD − VDS_load − VDS_tail，负载压降过大
-      cascode:            偏置电压可能不足，或上下管 W 比例失调
-      current_mirror_load: VDS = VGS (diode)，本身不应饱和失效；若出问题检查镜像比
-    """
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
 
-    # 计算 VDD 范围
+    # Internal implementation note.
     vdd = state.simulation.supply.get("vdd", proc.nominal_VDD)
     vss = state.simulation.supply.get("vss", 0.0)
     span = vdd - vss
     if span <= 0:
         return report
 
-    # 先收集所有晶体管的 VDS/VDSAT 信息
+    # Internal implementation note.
     devices_info = {}
     for tid, ts in state.transistors.items():
         p = ts.parameters
@@ -565,55 +527,55 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
             "margin": p.vds - p.vdsat,
         }
 
-    # 对每个可能饱和不足的器件进行诊断
+    # Internal implementation note.
     for tid, info in devices_info.items():
         if info["region"] == "unknown" or info["vdsat"] <= 0:
             continue
         role = info["role"]
         if role in ("current_mirror_load",):
-            continue  # diode 不需要饱和
+            continue  # Internal implementation note.
 
         margin = info["margin"]
 
-        # 使用 saturation_depth 中的裕度要求
+        # Internal implementation note.
         required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
         if margin >= required:
-            continue  # 裕度充足，无需诊断
+            continue  # Internal implementation note.
 
-        # ── 推断可能原因 ──
+        # Internal implementation note.
         causes = []
 
-        # 通用检查: VDS/VDD 占比
+        # Internal implementation note.
         vds_ratio = info["vds"] / span if span > 0 else 0
 
         if role == "tail_current_source":
             if info["vdsat"] > 0.25:
-                causes.append("VDSAT 偏高 → gm/ID 可能过于激进（偏强反型），试试降低 gm_id")
+                causes.append("high VDSAT; gm/ID may be too strong or L may be too short")
             if vds_ratio < 0.15:
-                causes.append(f"VDS 仅占 VDD 的 {vds_ratio*100:.0f}%，"
-                              "输入对管 VGS 占用过大 → 尾电流可能偏大")
+                causes.append(f"VDS is only {vds_ratio*100:.0f}% of VDD; "
+                              "tail headroom is tight and input-pair VGS may be too large")
 
         elif role == "input_pair":
             if info["vdsat"] > 0.35:
-                causes.append("VDSAT 偏高 → L 太小或 gm/ID 偏强反型，考虑增大 L 或提高 gm_id")
+                causes.append("high VDSAT; consider increasing gm/ID or L")
             if vds_ratio < 0.20:
-                causes.append(f"VDS 仅占 VDD 的 {vds_ratio*100:.0f}%，"
-                              "负载管或尾电流管压降过大 → 检查 VDD 分配")
+                causes.append(f"VDS is only {vds_ratio*100:.0f}% of VDD; "
+                              "load or tail devices consume too much headroom")
 
         elif role == "cascode":
             if info["vdsat"] > 0.3:
-                causes.append("VDSAT 偏高 → cascode 器件通常用较大 L，检查 L 是否充足")
-            causes.append("cascode VDS 不足 → 检查偏置电压和上下管 W 比例")
+                causes.append("high VDSAT; cascode devices usually need longer L")
+            causes.append("insufficient cascode VDS; check bias voltage and device ratios")
 
         else:
             if info["vdsat"] > 0.3:
-                causes.append("VDSAT 偏高 → 考虑调整 gm/ID 或增大 L")
+                causes.append("high VDSAT; adjust gm/ID, current, or L")
             if vds_ratio < 0.10:
-                causes.append(f"VDS 仅占 VDD 的 {vds_ratio*100:.0f}%，"
-                              "电压分配极端不均 → 检查堆叠结构")
+                causes.append(f"VDS is only {vds_ratio*100:.0f}% of VDD; "
+                              "voltage allocation is highly unbalanced")
 
         if not causes:
-            causes.append("VDS 裕度不足 — 检查 VDD、各管 VDS 分配、gm/ID 策略")
+            causes.append("insufficient VDS margin; check supply, stack allocation, and gm/ID strategy")
 
         report.add(DiagnosisResult(
             check_name="dr:diagnose_saturation", passed=True, severity="info",
@@ -625,7 +587,7 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
                      "causes": causes}
         ))
 
-    # 全局诊断: VDD 堆叠利用率
+    # Internal implementation note.
     total_vds = sum(info["vds"] for info in devices_info.values()
                     if info["vds"] > 0 and info["role"] != "current_mirror_load")
     active_count = sum(1 for info in devices_info.values()
@@ -635,8 +597,8 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         if avg_vds < 0.15:
             report.add(DiagnosisResult(
                 check_name="dr:diagnose_headroom", passed=True, severity="info",
-                message=f"平均 VDS/管 = {avg_vds*1e3:.0f}mV (VDD={span:.2f}V) — "
-                        "堆叠过于拥挤，考虑降低层数或提高 VDD",
+                message=f"Average VDS/device = {avg_vds*1e3:.0f}mV (VDD={span:.2f}V) — "
+                        "stacked path is crowded; consider reducing stack depth or increasing VDD",
                 layer=4
             ))
 
@@ -644,12 +606,9 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_inversion_consistency", layer=4,
-               description="同 role 器件之间的 IC 偏差 < 30%")
+               description="Devices with the same role should have consistent inversion coefficients.")
 def check_inversion_consistency(state: DesignState) -> ValidationReport:
-    """验证同 role 器件（如差分对管）的反型系数一致。
-
-    大偏差意味着匹配对管工作在不同的反型层 — 增益、带宽、噪声不匹配。
-    """
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     try:
         from core.inversion import InversionAnalyzer
@@ -659,7 +618,7 @@ def check_inversion_consistency(state: DesignState) -> ValidationReport:
     proc = state.process
     analyzer = InversionAnalyzer()
 
-    # 按 role 分组
+    # Internal implementation note.
     role_groups: dict = {}
     for dev in state.topology.devices:
         role_groups.setdefault(dev.role, []).append(dev.id)
@@ -668,7 +627,7 @@ def check_inversion_consistency(state: DesignState) -> ValidationReport:
         if len(dev_ids) < 2:
             continue
 
-        # 计算每管的 IC
+        # Internal implementation note.
         ic_map = {}
         for did in dev_ids:
             ts = state.transistors.get(did)
@@ -681,7 +640,7 @@ def check_inversion_consistency(state: DesignState) -> ValidationReport:
         if len(ic_map) < 2:
             continue
 
-        # 两两比较
+        # Internal implementation note.
         dev_list = list(ic_map.keys())
         for i in range(len(dev_list)):
             for j in range(i + 1, len(dev_list)):
@@ -704,7 +663,7 @@ def check_inversion_consistency(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_VGS_breakdown", layer=4,
-               description="|VGS| <= max_VGS 防止栅氧击穿")
+               description="Gate-source voltage must remain below the process reliability limit.")
 def check_VGS_breakdown(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -722,7 +681,7 @@ def check_VGS_breakdown(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_VDS_reliability", layer=4,
-               description="VDS 在安全范围内 (VDS + safe_margin < max_VDS)")
+               description="Drain-source voltage must remain inside the safe reliability range.")
 def check_VDS_reliability(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -741,9 +700,9 @@ def check_VDS_reliability(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_VGS_safe_range", layer=4,
-               description="VGS 在 VTH+50mV ~ VTH+800mV 安全范围")
+               description="VGS should stay in a practical operating range around threshold.")
 def check_VGS_safe_range(state: DesignState) -> ValidationReport:
-    """VGS 太低 → 深亚阈值噪声大；太高 → 过驱动可靠性差。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     for tid, ts in state.transistors.items():
         vgs = ts.parameters.vgs
@@ -769,7 +728,7 @@ def check_VGS_safe_range(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_headroom", layer=4,
-               description="VDS 堆叠 ≤ VDD-VSS 余量")
+               description="Estimated stacked VDS demand must fit inside the supply range.")
 def check_headroom(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     vdd = state.simulation.supply.get("vdd", 1.8)
@@ -787,20 +746,20 @@ def check_headroom(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  E. 性能达标检查
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_hard_targets", layer=4,
-               description="所有 priority=1 的 targets 必须满足")
+               description="All priority-1 targets must pass when measurements are available.")
 def check_hard_targets(state: DesignState) -> ValidationReport:
-    """检查硬性指标（priority=1）是否全部满足。需要仿真后的性能数据。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
-    # 从最后一个 history entry 取性能数据（如果有的话）
+    # Internal implementation note.
     perf = {}
     if state.history:
         perf = state.history[-1].final_performance
     if not perf:
-        return report  # 没有仿真数据，跳过
+        return report  # Internal implementation note.
 
     for name, t in state.targets.items():
         if t.priority != 1:
@@ -824,7 +783,7 @@ def check_hard_targets(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_all_targets", layer=4,
-               description="所有 targets 检查（含低优先级）")
+               description="Check all targets, including lower-priority specifications.")
 def check_all_targets(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     perf = {}
@@ -854,11 +813,11 @@ def check_all_targets(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  F. 搜索空间
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_gm_id_physical_range", layer=4,
-               description="gm/ID 在 [gm_id_min, gm_id_max] 物理可行范围内")
+               description="gm/ID strategy values must stay inside process-level feasible bounds.")
 def check_gm_id_physical_range(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -876,16 +835,16 @@ def check_gm_id_physical_range(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_L_step_resolution", layer=4,
-               description="L 优化步长 >= L_precision")
+               description="Optimizer L search ranges should be wide enough relative to process precision.")
 def check_L_step_resolution(state: DesignState) -> ValidationReport:
-    """检查 optimizer 的 L 搜索步长不小于工艺精度。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     for dv in state.design_variables:
         if dv.variable != "L":
             continue
         span = dv.range.max - dv.range.min
-        # 粗略估计：如果 L 范围极窄（< 10 * precision），提示可能无法探索
+        # Internal implementation note.
         if span < proc.L_precision * 10:
             report.add(DiagnosisResult(
                 check_name="dr:L_resolution", passed=False, severity="info",
@@ -897,9 +856,9 @@ def check_L_step_resolution(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_symmetry_in_design_vars", layer=4,
-               description="对称对管的设计变量 range 必须一致")
+               description="Symmetric design variables must use identical ranges.")
 def check_symmetry_in_design_vars(state: DesignState) -> ValidationReport:
-    """验证同 (symmetry_label, variable) 的设计变量有相同的 range。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     groups: dict = {}
     for dv in state.design_variables:
@@ -923,11 +882,11 @@ def check_symmetry_in_design_vars(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  G. 可靠性
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @register_rule("check_temperature_range", layer=4,
-               description="仿真温度在 IC 工作范围 (-40~125°C)")
+               description="Simulation temperature should stay inside the IC operating range.")
 def check_temperature_range(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     t = state.simulation.temperature
@@ -941,7 +900,7 @@ def check_temperature_range(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_supply_valid", layer=4,
-               description="VDD 在工艺电源域内")
+               description="The configured supply voltage must fit the process supply domain.")
 def check_supply_valid(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
@@ -956,16 +915,16 @@ def check_supply_valid(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_power_density", layer=4,
-               description="功耗密度检查 — 总功耗/总面积")
+               description="Estimated power density should remain below a practical warning threshold.")
 def check_power_density(state: DesignState) -> ValidationReport:
-    """粗略检查：总功耗 / 总晶体管面积 是否合理。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     total_area = 0.0
     for ts in state.transistors.values():
         W = ts.parameters.W or 0
         L_val = ts.L_strategy or ts.parameters.L or 0
         total_area += W * L_val
-    # 估算总功耗
+    # Internal implementation note.
     total_power = 0.0
     for ts in state.transistors.values():
         p = ts.parameters
@@ -973,7 +932,7 @@ def check_power_density(state: DesignState) -> ValidationReport:
             total_power += p.id * p.vds
     if total_area > 0 and total_power > 0:
         density = total_power / total_area  # W/m²
-        if density > 1e6:  # > 1 W/mm² 是很高的功率密度
+        if density > 1e6:  # Internal implementation note.
             report.add(DiagnosisResult(
                 check_name="dr:power_density", passed=False, severity="info",
                 message=f"Power density={density/1e4:.1f}W/mm² — high, consider reliability",
@@ -983,9 +942,9 @@ def check_power_density(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_process_config", layer=4,
-               description="工艺配置完整性")
+               description="Process configuration must include required electrical and geometry limits.")
 def check_process_config(state: DesignState) -> ValidationReport:
-    """检查工艺信息是否完整配置。"""
+    """AnalogRF-IR internal documentation."""
     report = ValidationReport()
     proc = state.process
     if not proc.process_name:
@@ -1012,33 +971,33 @@ def check_process_config(state: DesignState) -> ValidationReport:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  导出列表（供 Agent 发现）
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 ALL_RULES = [
-    # A. 几何/DRC
+    # Internal implementation note.
     check_min_width, check_max_width, check_min_length, check_max_length,
     check_W_precision, check_L_precision, check_W_L_ratio,
-    # B. 面积
+    # Internal implementation note.
     check_min_area, check_finger_width,
-    # C. 匹配
+    # Internal implementation note.
     check_pair_W_mismatch, check_pair_L_mismatch, check_pair_gm_mismatch,
     check_current_mirror_ratio,
-    # D. 偏置
+    # Internal implementation note.
     check_region_validity, check_saturation_margin,
     check_saturation_depth,
     check_VGS_breakdown, check_VDS_reliability,
     check_VGS_safe_range, check_headroom,
-    # D2. 反型层
+    # Internal implementation note.
     check_inversion_region, check_inversion_consistency,
-    # D3. 诊断
+    # Internal implementation note.
     diagnose_saturation_failure,
-    # E. 性能
+    # Internal implementation note.
     check_hard_targets, check_all_targets,
-    # F. 搜索空间
+    # Internal implementation note.
     check_gm_id_physical_range, check_L_step_resolution,
     check_symmetry_in_design_vars,
-    # G. 可靠性
+    # Internal implementation note.
     check_temperature_range, check_supply_valid, check_power_density,
     check_process_config,
 ]

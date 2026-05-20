@@ -1,33 +1,4 @@
-"""
-单位系统 V2.1 — 模拟IC设计常用单位转换表 + 自动解析。
-
-所有硬件量的单位转换集中在此文件。原则：
-  - 内部存储永远用 SI
-  - 输入接受多种写法：纯数值、"40 MHz"字符串、"40MHz"、dict {value: 40, unit: "MHz"}
-  - parse_value() 是统一入口
-
-支持的维度与单位:
-  Length:      m, cm, mm, um, μm, nm, pm, A(angstrom)
-  Voltage:     V, mV, uV, μV, nV
-  Current:     A, mA, uA, μA, nA, pA
-  Power:       W, mW, uW, μW, nW
-  Frequency:   Hz, kHz, MHz, GHz, THz
-  Temperature: C, K, F
-  Capacitance: F, mF, uF, μF, nF, pF, fF
-  Resistance:  ohm, Ω, kohm, kΩ, Mohm, MΩ
-  Time:        s, ms, us, μs, ns, ps, fs
-  Angle:       deg, rad
-  Ratio:       dB (仅存储，不转换)
-  Area:        m2, cm2, mm2, um2, nm2 (也支持 m² 等 Unicode)
-
-使用方式:
-    from util.units import parse_value, DIMENSION
-
-    parse_value("40 MHz")           # → 4.0e7  (纯数值，SI)
-    parse_value(1.8e-7, "m")        # → 1.8e-7
-    parse_value("180 nm")           # → 1.8e-7
-    parse_value({"value": 5, "unit": "uA"})  # → 5e-6
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -38,7 +9,7 @@ from typing import Dict, Optional, Union, Any, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════
-#  单位转换表 — 全部以乘法因子表示（到 SI 的倍数）
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 UNIT_TABLES: Dict[str, Dict[str, float]] = {
@@ -79,8 +50,8 @@ UNIT_TABLES: Dict[str, Dict[str, float]] = {
     },
     "temperature": {
         "K": 1.0,
-        "C": None,   # 需要 +273.15 偏移
-        "F": None,   # 需要 (F-32)*5/9 + 273.15
+        "C": None,   # Internal implementation note.
+        "F": None,   # Internal implementation note.
     },
     "capacitance": {
         "F":  1.0,
@@ -122,7 +93,7 @@ UNIT_TABLES: Dict[str, Dict[str, float]] = {
 
 
 # ═══════════════════════════════════════════════════════════════
-#  维度标签
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 class Dimension:
@@ -145,12 +116,12 @@ class Dimension:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  核心 Unit 类型
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class Unit:
-    """带单位的数值。frozen=True 确保不可变。"""
+    """AnalogRF-IR internal documentation."""
     value_si: float
     unit: str
     dimension: str
@@ -238,24 +209,24 @@ class Unit:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  字符串解析器 — 自动识别 "40 MHz"、"180nm" 等
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 _UNIT_PATTERN = re.compile(
     r'^\s*'
-    r'([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)'  # 数值
+    r'([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)'  # Internal implementation note.
     r'\s*'
-    r'([a-zA-Zμ]+[/²2]?)'                               # 单位
+    r'([a-zA-Zμ]+[/²2]?)'                               # Internal implementation note.
     r'\s*$'
 )
 
-# 从 UNIT_TABLES 自动构建单位→维度映射
+# Internal implementation note.
 _UNIT_TO_DIMENSION: Dict[str, str] = {}
 for _dim, _table in UNIT_TABLES.items():
     for _unit in _table:
         _UNIT_TO_DIMENSION[_unit] = _dim
         _UNIT_TO_DIMENSION[_unit.lower()] = _dim
-# 额外常用小写别名
+# Internal implementation note.
 _UNIT_TO_DIMENSION["mv"] = Dimension.VOLTAGE
 _UNIT_TO_DIMENSION["uv"] = Dimension.VOLTAGE
 _UNIT_TO_DIMENSION["ma"] = Dimension.CURRENT
@@ -286,17 +257,7 @@ def parse_value(
     default_unit: str = "",
     dimension: str = Dimension.RATIO,
 ) -> float:
-    """
-    统一入口：解析各种格式的物理量，返回 SI 数值。
-
-    支持格式:
-      - float / int: 直接返回
-      - str "40 MHz":     拆分 → 40 * 1e6 = 4e7
-      - str "40MHz":      同上
-      - str "180nm":      拆分 → 180 * 1e-9 = 1.8e-7
-      - str "2.5k":       拆分 → 2.5 * 1e3 = 2500 (识别为电阻)
-      - dict {value: 40, unit: "MHz"}: 用 dict 显式指定
-    """
+    """AnalogRF-IR internal documentation."""
     if isinstance(value, (int, float)):
         return float(value)
 
@@ -345,7 +306,7 @@ def parse_value(
 
 
 # ═══════════════════════════════════════════════════════════════
-#  便捷构造器
+# Internal implementation note.
 # ═══════════════════════════════════════════════════════════════
 
 def Length(value: float, unit: str = "m") -> Unit:

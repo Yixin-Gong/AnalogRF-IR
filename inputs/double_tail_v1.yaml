@@ -1,4 +1,4 @@
-schema_version: '2.1'
+schema_version: '0.1'
 design_name: double_tail_comparator
 topology:
   name: double_tail_comparator

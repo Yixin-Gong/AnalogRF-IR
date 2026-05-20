@@ -1,12 +1,4 @@
-"""
-ngspice 仿真器接口 V2.0 — ngspice 45 兼容 · 双 pass 架构
-
-策略（ngspice 45.2 限制：.meas ac 不能与 .dc + .control 共存）：
-  Pass 1: 纯 AC — .ac + .meas ac → 提取 gain/GBW/PM
-  Pass 2: 纯 DC — .dc + .control print all → 提取 power + 工作点
-
-合并结果到 SimulationResult。
-"""
+"""AnalogRF-IR internal documentation."""
 from __future__ import annotations
 
 import subprocess
@@ -22,25 +14,25 @@ from typing import Dict, List, Optional, Any, Tuple
 
 @dataclass
 class SimulationResult:
-    """ngspice 仿真结果。"""
+    """AnalogRF-IR internal documentation."""
 
     success: bool = False
     return_code: int = -1
     elapsed_sec: float = 0.0
 
-    # 性能指标: {"dc_gain_db": 41.7, "ugbw": 4.82e7, "pm": 85.0, "total_power": 4.05e-5, ...}
+    # Internal implementation note.
     measurements: Dict[str, float] = field(default_factory=dict)
 
-    # 晶体管工作点: {"MM1": {"gate": 0.6, "id": 1.69e-5, ...}, ...}
+    # Internal implementation note.
     operating_points: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
-    # 原始输出（调试）
+    # Internal implementation note.
     raw_stdout: str = ""
     raw_stderr: str = ""
 
 
 class NgspiceSimulator:
-    """ngspice 批量仿真器（双 pass，兼容 ngspice 45.2 + BSIM4）。"""
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self, ngspice_bin: str = "ngspice", timeout_sec: float = 60.0):
         self.ngspice_bin = ngspice_bin
@@ -62,7 +54,7 @@ class NgspiceSimulator:
         work_dir: Optional[str] = None,
         include_transient: Optional[bool] = None,
     ) -> SimulationResult:
-        """双 pass 仿真：AC 测量 + DC 工作点。"""
+        """AnalogRF-IR internal documentation."""
         t0 = time.time()
 
         result_ac = self._run_ac_pass(netlist, work_dir)
@@ -74,13 +66,13 @@ class NgspiceSimulator:
         merged = SimulationResult()
         merged.elapsed_sec = time.time() - t0
 
-        # 合并测量值
+        # Internal implementation note.
         merged.measurements = {}
         merged.measurements.update(result_dc.measurements)  # DC: total_power
         merged.measurements.update(result_ac.measurements)  # AC: dc_gain_db, ugbw, pm
         merged.measurements.update(result_tran.measurements)  # TRAN: slew_rate
 
-        # 工作点从 DC pass
+        # Internal implementation note.
         merged.operating_points = result_dc.operating_points
 
         merged.raw_stdout = result_ac.raw_stdout + "\n" + result_dc.raw_stdout + "\n" + result_tran.raw_stdout
@@ -93,7 +85,7 @@ class NgspiceSimulator:
         if pass_codes:
             merged.return_code = 0 if all(code == 0 for code in pass_codes) else max(pass_codes)
 
-        merged.success = bool(merged.measurements)  # 有测量值即成功
+        merged.success = bool(merged.measurements)  # Internal implementation note.
 
         return merged
 
@@ -104,14 +96,8 @@ class NgspiceSimulator:
     # ── Pass 1: AC ──
 
     def _run_ac_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
-        """Pass 1: 纯 AC 分析 + Bode 曲线导出。
-
-        `.meas ac phase_margin find vp(vout) when vdb(vout)=0` only returns the
-        principal phase at one crossing. For compensated OTAs that can hide phase
-        wrapping or secondary unity-gain crossings, so the final PM is calculated
-        from the exported sweep in Python.
-        """
-        # 去掉 .dc 行和 .control 块
+        """AnalogRF-IR internal documentation."""
+        # Internal implementation note.
         cleaned = self._strip_dc_control(netlist)
         if ".ac" not in cleaned.lower():
             return SimulationResult()
@@ -144,7 +130,7 @@ class NgspiceSimulator:
         return "\n".join(lines + control + [".end"])
 
     def _strip_dc_control(self, netlist: str) -> str:
-        """移除 .dc/.tran 和 .control 块，保留 .ac 和 .meas ac。"""
+        """AnalogRF-IR internal documentation."""
         lines = netlist.split("\n")
         out = []
         skip_control = False
@@ -158,7 +144,7 @@ class NgspiceSimulator:
                 if low.startswith(".endc"):
                     skip_control = False
                 continue
-            # 移除非 AC 分析和测量
+            # Internal implementation note.
             if low.startswith(".dc ") or low.startswith(".dc\t"):
                 continue
             if low.startswith(".tran ") or low.startswith(".tran\t"):
@@ -171,27 +157,27 @@ class NgspiceSimulator:
     # ── Pass 2: DC ──
 
     def _run_dc_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
-        """Pass 2: 纯 DC 分析 + .control print all。"""
+        """AnalogRF-IR internal documentation."""
         lines = netlist.split("\n")
         out = []
         for line in lines:
             stripped = line.strip()
             low = stripped.lower()
-            # 注释掉 .ac 行
+            # Internal implementation note.
             if low.startswith(".ac ") or low.startswith(".ac\t"):
                 out.append(f"* {line}")
             elif low.startswith(".tran ") or low.startswith(".tran\t"):
                 out.append(f"* {line}")
-            # 移除 .meas ac 行
+            # Internal implementation note.
             elif ".meas ac" in low or ".meas tran" in low:
                 out.append(f"* {line}")
             else:
                 out.append(line)
 
-        # 确保有 .dc（如果没有，添加单点 dc）
+        # Internal implementation note.
         has_dc = any(l.strip().startswith(".dc ") for l in out)
 
-        # 添加 .control 块
+        # Internal implementation note.
         out.append("")
         out.append(".control")
         out.append("  set ngbehavior = hsa")
@@ -390,7 +376,7 @@ class NgspiceSimulator:
             raise ValueError(token)
         return value * scale
 
-    # ── 执行 ──
+    # Internal implementation note.
 
     def _exec_ngspice(self, netlist: str, work_dir: Optional[str], suffix: str) -> SimulationResult:
         t0 = time.time()
@@ -458,7 +444,7 @@ class NgspiceSimulator:
         has_error = "error" in combined.lower() and "Note:" not in combined
         result.success = executed and not has_error
 
-        # 解析
+        # Internal implementation note.
         result.measurements = self._parse_measures(combined)
         result.operating_points = self._parse_op(combined)
 
@@ -478,9 +464,9 @@ class NgspiceSimulator:
             tran_path = Path(os.path.dirname(cir_path)) / "tran_sweep.dat"
             result.measurements.update(self._extract_tran_curve_performance(tran_path))
 
-        # DC pass: 保留 .meas dc 解析 + 补充 vdd#branch fallback
+        # Internal implementation note.
         if suffix == "dc":
-            # 过滤掉 _parse_measures 误捕获的节点电压（如 net1=, vout= 等）
+            # Internal implementation note.
             result.measurements = {
                 k: v for k, v in result.measurements.items()
                 if k in ("total_power", "i_vdd") or k.endswith("_power")
@@ -499,7 +485,7 @@ class NgspiceSimulator:
                 osdi_paths.append(stripped.split(None, 2)[2])
         if not osdi_paths:
             return
-        lines = ["* Auto-generated by objective_ir for OSDI-backed PDK models"]
+        lines = ["* Auto-generated by AnalogRF-IR v0.1 for OSDI-backed PDK models"]
         for path in osdi_paths:
             lines.append(f"osdi {path}")
         try:
@@ -507,15 +493,10 @@ class NgspiceSimulator:
         except OSError:
             pass
 
-    # ── 解析 ──
+    # Internal implementation note.
 
     def _parse_measures(self, stdout: str) -> Dict[str, float]:
-        """解析 .meas 输出行。
-
-        ngspice 对短测量名输出:  dc_gain_db          =  4.807e+01 at=  1.000e+00
-        对长测量名(>~20字符):    unity_gain_bandwidth=   7.428e+07
-        正则需兼容两种格式: name 后可有0~若干空格, at= 可选。
-        """
+        """AnalogRF-IR internal documentation."""
         measures = {}
         pat = re.compile(
             r"^\s*([\w_]+)\s*(?:at\s+\S+\s+)?=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)",
@@ -781,7 +762,7 @@ class NgspiceSimulator:
         return best
 
     def _parse_op(self, stdout: str) -> Dict[str, Dict[str, float]]:
-        """解析 print all 输出中的晶体管工作点。"""
+        """AnalogRF-IR internal documentation."""
         op = {}
         patterns = [
             re.compile(r"([mM]+\d[\w]*)#(\w+)\s*=\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", re.MULTILINE),
@@ -989,7 +970,7 @@ class NgspiceSimulator:
     def _extract_dc_performance(
         self, stdout: str, op: Dict[str, Dict[str, float]]
     ) -> Dict[str, float]:
-        """从 DC 输出提取 power。"""
+        """AnalogRF-IR internal documentation."""
         perf = {}
         for line in stdout.split("\n"):
             if "vdd" in line and "branch" in line and "=" in line:

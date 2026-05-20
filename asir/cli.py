@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default="strongarm",
         choices=[*COMPARATOR_BUILDERS.keys(), "all", "from-yaml"],
-        help="Comparator architecture to export, or from-yaml for obj_ir_v1-style input",
+        help="Comparator architecture to export, or from-yaml for AnalogRF-IR YAML input",
     )
     parser.add_argument("input", nargs="?", help="YAML input path when architecture is from-yaml")
     parser.add_argument("--out", default="exports", help="Output YAML file or directory")
@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             with out_path.open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(embed_asir_output(source_data, design), handle, sort_keys=False, allow_unicode=True, width=120)
         _print_optional_queries(args, design)
-        print(f"Exported v1-compatible ASIR YAML: {out_path}")
+        print(f"Exported AnalogRF-IR ASIR YAML: {out_path}")
         return 0
 
     if args.architecture == "all":

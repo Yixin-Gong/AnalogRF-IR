@@ -1,30 +1,4 @@
-"""
-LookupTable V1.0 — Boris Murmann 风格的 gm/ID 查找表。
-
-基于预计算的 ngspice 仿真数据，提供从 (GM_ID, L) → 物理参数的
-精确翻译。数据以 numpy .npz 格式存储，无需外部依赖（只用 numpy）。
-
-核心 API：
-    table = LookupTable("ptm130_nmos.npz")
-    result = table.lookup(GM_ID=15, L=0.2e-6)
-    # → {"ID_W": ..., "GM_W": ..., "VGS": ..., "VDSAT": ..., ...}
-
-数据格式 (.npz)：
-    L_grid    : (M,)   沟道长度扫描点 [m]
-    VGS_grid  : (N,)   栅源电压扫描点 [V]
-    VDS       : float  固定漏源电压 [V]
-    VSB       : float  固定体源电压 [V]
-    GM_ID     : (M,N)  gm/ID [S/A]
-    ID_W      : (M,N)  ID/W [A/m]
-    GM_W      : (M,N)  gm/W [S/m]
-    GDS_W     : (M,N)  gds/W [S/m]
-    VDSAT     : (M,N)  VDSAT [V]
-    CGG_W     : (M,N)  Cgg/W [F/m]
-    CGS_W     : (M,N)  Cgs/W [F/m]
-    CGD_W     : (M,N)  Cgd/W [F/m]
-    FT        : (M,N)  fT [Hz]
-    VTH       : (M,N)  VTH [V] (可选)
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -34,24 +8,19 @@ from typing import Dict, Optional, Tuple
 
 
 class LookupTable:
-    """gm/ID 查找表（与 Boris Murmann 的 pygmid 接口兼容）。"""
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self, filename: str):
-        """
-        加载 .npz 查找表。
-
-        Args:
-            filename: .npz 文件路径
-        """
+        """AnalogRF-IR internal documentation."""
         data = np.load(filename, allow_pickle=False)
 
-        # 网格
+        # Internal implementation note.
         self.L_grid: np.ndarray = data["L_grid"]        # (M,)
         self.VGS_grid: np.ndarray = data["VGS_grid"]    # (N,)
         self.VDS: float = float(data["VDS"])
         self.VSB: float = float(data["VSB"])
 
-        # 2D 数据: shape (M, N) — rows=L, cols=VGS
+        # Internal implementation note.
         self.GM_ID: np.ndarray = data["GM_ID"]           # gm/ID
         self.ID_W: np.ndarray = data["ID_W"]             # ID/W
         self.GM_W: np.ndarray = data["GM_W"]             # gm/W
@@ -66,27 +35,16 @@ class LookupTable:
         self._M = len(self.L_grid)
         self._N = len(self.VGS_grid)
 
-        # 预计算 GM_ID 的合法范围
+        # Internal implementation note.
         self._gm_id_min = float(np.nanmin(self.GM_ID))
         self._gm_id_max = float(np.nanmax(self.GM_ID))
 
-    # ── 公共接口 ────────────────────────────────────────────
+    # Internal implementation note.
 
     def lookup(self, GM_ID: Optional[float] = None,
                L: Optional[float] = None,
                VGS: Optional[float] = None) -> Dict[str, float]:
-        """
-        查找 (GM_ID, L) 或 (VGS, L) 对应的归一化参数。
-
-        两种模式：
-        1. lookup(GM_ID=15, L=0.2e-6)  → 从 GM_ID 反推 VGS
-        2. lookup(VGS=0.6, L=0.2e-6)   → 直接用 VGS
-
-        Returns:
-            dict with keys: ID_W, GM_W, GDS_W, VGS, VDSAT,
-                            CGG_W, CGS_W, CGD_W, FT, VTH,
-                            GM_ID, L (回显输入)
-        """
+        """AnalogRF-IR internal documentation."""
         L_val = L or self.L_grid[len(self.L_grid) // 2]
 
         if GM_ID is not None:
@@ -101,21 +59,11 @@ class LookupTable:
         return self._interpolate(L_val, vgs_val, gm_id_clipped)
 
     def lookup_VGS(self, VGS: float, L: Optional[float] = None) -> Dict[str, float]:
-        """通过 VGS 直接查找（别名）。"""
+        """AnalogRF-IR internal documentation."""
         return self.lookup(VGS=VGS, L=L)
 
     def forward(self, GM_ID: float, L: float, ID: float) -> Dict[str, float]:
-        """
-        正向翻译：(GM_ID, L, ID) → (W, VGS, VDSAT, gm, ...)
-
-        Args:
-            GM_ID: 目标 gm/ID [S/A]
-            L: 沟道长度 [m]
-            ID: 漏极电流 [A]
-
-        Returns:
-            dict with W, VGS, VDSAT, GM, GDS, CGS, CGD, CGG, FT, VTH
-        """
+        """AnalogRF-IR internal documentation."""
         result = self.lookup(GM_ID=GM_ID, L=L)
         ID_W = max(result["ID_W"], 1e-15)
         W = ID / ID_W
@@ -137,27 +85,22 @@ class LookupTable:
 
     @property
     def gm_id_range(self) -> Tuple[float, float]:
-        """返回 GM_ID 的有效范围。"""
+        """AnalogRF-IR internal documentation."""
         return (self._gm_id_min, self._gm_id_max)
 
     @property
     def L_range(self) -> Tuple[float, float]:
-        """返回 L 的有效范围。"""
+        """AnalogRF-IR internal documentation."""
         return (float(self.L_grid[0]), float(self.L_grid[-1]))
 
-    # ── 内部插值 ────────────────────────────────────────────
+    # Internal implementation note.
 
     def _invert_gm_id(self, GM_ID: float, L: float) -> float:
-        """
-        对于给定 L，在 VGS 轴上反求 GM_ID → VGS。
-
-        GM_ID(VGS) 在饱和区通常单调递减。
-        对每行独立反插，再沿 L 插值。
-        """
+        """AnalogRF-IR internal documentation."""
         vgs_per_L = np.zeros(self._M)
         for i in range(self._M):
             row = self.GM_ID[i, :]
-            # 反转 VGS 与 GM_ID 顺序确保单调递增
+            # Internal implementation note.
             vgs_per_L[i] = np.interp(GM_ID, row[::-1], self.VGS_grid[::-1])
 
         vgs = float(np.interp(L, self.L_grid, vgs_per_L))
@@ -165,9 +108,7 @@ class LookupTable:
 
     def _interpolate(self, L: float, VGS: float,
                      gm_id_override: Optional[float] = None) -> Dict[str, float]:
-        """
-        在 (L, VGS) 点双线性插值所有参数。
-        """
+        """AnalogRF-IR internal documentation."""
         i_L = max(0, np.searchsorted(self.L_grid, L) - 1)
         i_L = min(i_L, self._M - 2)
 
@@ -191,9 +132,9 @@ class LookupTable:
 
         gm_id_val = gm_id_override if gm_id_override is not None else _bilinear(self.GM_ID)
 
-        # 反型系数 IC ≈ ID_W / I0  (需要工艺参数; 填占位值, adapter 会覆盖)
+        # Internal implementation note.
         id_w = _bilinear(self.ID_W)
-        ic_val = 0.0  # 由 adapter 调用方设置，此处先占位
+        ic_val = 0.0  # Internal implementation note.
 
         return {
             "GM_ID": gm_id_val,
@@ -208,13 +149,13 @@ class LookupTable:
             "CGD_W": _bilinear(self.CGD_W) if np.any(self.CGD_W) else 0.0,
             "FT": _bilinear(self.FT) if np.any(self.FT) else 0.0,
             "VTH": _bilinear(self.VTH) if np.any(self.VTH) else 0.0,
-            "IC": ic_val,   # 反型系数 — adapter 层负责计算
+            "IC": ic_val,   # Internal implementation note.
         }
 
-    # ── 诊断 ────────────────────────────────────────────────
+    # Internal implementation note.
 
     def summary(self) -> str:
-        """返回查找表的可读摘要。"""
+        """AnalogRF-IR internal documentation."""
         lines = [
             f"LookupTable @ VDS={self.VDS:.2f}V, VSB={self.VSB:.2f}V",
             f"  L:    {self.L_grid[0]*1e9:.0f}nm ... {self.L_grid[-1]*1e9:.0f}nm ({self._M} pts)",
@@ -224,13 +165,13 @@ class LookupTable:
         return "\n".join(lines)
 
 
-# ── 工厂函数 ────────────────────────────────────────────────
+# Internal implementation note.
 
 def load_lookup_table(filename: str) -> LookupTable:
-    """便捷工厂：从文件加载查找表。"""
+    """AnalogRF-IR internal documentation."""
     return LookupTable(filename)
 
 
 def create_lookup_pair(nmos_path: str, pmos_path: str) -> Tuple[LookupTable, LookupTable]:
-    """加载 NMOS/PMOS 查找表对。"""
+    """AnalogRF-IR internal documentation."""
     return LookupTable(nmos_path), LookupTable(pmos_path)

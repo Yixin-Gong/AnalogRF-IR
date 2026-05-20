@@ -1,4 +1,4 @@
-schema_version: '2.1'
+schema_version: '0.1'
 design_name: sense_amplifier_comparator
 topology:
   name: sense_amplifier_comparator

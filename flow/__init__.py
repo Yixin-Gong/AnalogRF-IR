@@ -1,3 +1,3 @@
-from .runner import FlowConfig, FlowResult, ObjectiveIRFlowRunner
+from .runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
 
-__all__ = ["FlowConfig", "FlowResult", "ObjectiveIRFlowRunner"]
+__all__ = ["AnalogRFIRFlowRunner", "FlowConfig", "FlowResult"]

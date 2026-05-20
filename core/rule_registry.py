@@ -1,21 +1,17 @@
-"""
-规则注册系统 — 供 validator 和 design_rules 共享。
-
-避免循环导入：validator.py 和 design_rules.py 都 import 此模块。
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Callable, Any
 
-# ── 规则注册表 ──────────────────────────────────────────────
+# Internal implementation note.
 
 _rule_registry: Dict[str, dict] = {}
 
 
 def register_rule(name: str, layer: int = 4, description: str = "") -> Callable:
-    """装饰器：注册自定义规则函数。"""
+    """AnalogRF-IR internal documentation."""
     def decorator(fn: Callable) -> Callable:
         _rule_registry[name] = {
             "fn": fn,
@@ -61,7 +57,7 @@ def run_registered_rules(state, layer: Optional[int] = None) -> "ValidationRepor
     return report
 
 
-# ── 诊断结果 ─────────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class DiagnosisResult:

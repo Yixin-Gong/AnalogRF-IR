@@ -1,24 +1,4 @@
-"""
-反型系数分析模块 V1.0 — gm/ID 方法学的反型层语义分析。
-
-核心概念:
-  I0 = 2 * n * μ * Cox * UT² / L   (工艺特定电流, A/m)
-  IC = ID / (I0 * W)               (反型系数, 无量纲)
-
-  弱反型 (WI):   IC < 0.1
-  中等反型 (MI): 0.1 ≤ IC ≤ 10
-  强反型 (SI):   IC > 10
-
-  gm/ID 与 IC 的近似关系 (EKV 模型):
-    gm/ID ≈ 1 / (n * UT * (1 + sqrt(1 + 4*IC)) / (2*IC))
-    反向: IC ≈ 1 / ((n*UT * gm/ID - 1)² / 2 - 1)
-
-用法:
-    from core.inversion import InversionAnalyzer, ic_to_region
-    analyzer = InversionAnalyzer()
-    ic = analyzer.compute_IC_from_gm_id(gm_id=15, device_type="nmos", proc=process_info)
-    region = ic_to_region(ic)  # "moderate"
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -26,39 +6,27 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-# 热电压 @ 27°C
+# Internal implementation note.
 UT_300K = 0.02585  # kT/q [V]
 
 
 @dataclass
 class InversionResult:
-    """单个晶体管的反型层分析结果。"""
+    """AnalogRF-IR internal documentation."""
     device_id: str
-    ic: float                          # 反型系数
+    ic: float                          # Internal implementation note.
     region: str                        # weak | moderate | strong | unknown
     gm_id: float                       # gm/ID [S/A]
-    vgs: float                         # 栅源电压 [V]
-    vth: float                         # 阈值电压 [V]
-    vov: float                         # 过驱动电压 [V]
-    description: str = ""              # 人类可读描述
+    vgs: float                         # Internal implementation note.
+    vth: float                         # Internal implementation note.
+    vov: float                         # Internal implementation note.
+    description: str = ""              # Internal implementation note.
 
 
-# ── 核心计算 ────────────────────────────────────────────────
+# Internal implementation note.
 
 def compute_I0(device_type: str, L: float, proc) -> float:
-    """
-    计算工艺特定电流 I0 [A/m] — 从工艺参数直接计算。
-
-    公式: I0 = 2 * n * μ * Cox * UT²
-
-    Args:
-        device_type: "nmos" or "pmos"
-        L: 沟道长度 [m] (I0 本身不依赖 L，此处保留接口)
-        proc: ProcessInfo dataclass
-
-    Returns:
-        I0 [A/m]
-    """
+    """AnalogRF-IR internal documentation."""
     if device_type in ("nmos", "nch_18"):
         n = proc.n_sub_nmos if hasattr(proc, "n_sub_nmos") else 1.4
         mu = proc.mu_n if hasattr(proc, "mu_n") else 0.04
@@ -72,51 +40,27 @@ def compute_I0(device_type: str, L: float, proc) -> float:
 
 def compute_IC_from_gm_id(gm_id: float, n: float = 1.4,
                           ut: float = UT_300K) -> float:
-    """
-    从 gm/ID 近似计算反型系数 IC (EKV 模型逆推)。
-
-    EKV 公式:
-      gm/ID ≈ 1 / (n*UT * (1 + sqrt(1+4*IC)) / (2*IC))
-
-    反解:
-      设 x = n*UT * gm/ID
-      IC ≈ 4 * IC . 通过迭代求解:
-        IC ≈ 1 / (x * (1 + sqrt(1+4*IC))/ (2*IC) - 1) 的逆形式
-
-    简化逼近 (Murmann 经验公式):
-      IC ≈ 1 / (exp((gm/ID_max - gm/ID) / (n*UT)) - 1)  不适合强反型
-
-    数值稳定方案 (二分法求根):
-      解 f(IC) = 1/(n*UT * (1+sqrt(1+4*IC))/(2*IC)) - gm/ID = 0
-
-    Args:
-        gm_id: gm/ID [S/A]
-        n: 亚阈值斜率因子
-        ut: 热电压 [V]
-
-    Returns:
-        IC (反型系数)
-    """
+    """AnalogRF-IR internal documentation."""
     if gm_id <= 0:
         return 0.0
 
-    # 对于极低 gm/ID (强反型), 用平方律近似:
+    # Internal implementation note.
     # gm/ID ≈ 2/VOV, VOV = 2*UT*sqrt(IC)
-    # IC ≈ (n * gm_id * UT)⁻² — 不够精确, 用数值解
+    # Internal implementation note.
 
     x = n * ut * gm_id
 
-    # 弱反型近似: IC → 0, gm/ID → 1/(n*UT)
+    # Internal implementation note.
     if x >= 0.999:
-        # 弱反型/亚阈值区域，用解析近似
+        # Internal implementation note.
         return 1.0 / (math.exp(1.0 / (1.0 - x)) - 1.0) if x < 0.9999 else 0.01
 
-    # 中等-强反型: 二分法求 IC ∈ [1e-4, 1e6]
+    # Internal implementation note.
     lo, hi = 1e-4, 1e6
     for _ in range(60):
         mid = (lo + hi) / 2.0
         # EKV: gm/ID = 2 / (n*UT * (1 + sqrt(1 + 4*IC)))
-        # 注意分子是 2, 不是 2*IC
+        # Internal implementation note.
         ic_sqrt = math.sqrt(1.0 + 4.0 * mid)
         gm_id_pred = 2.0 / (n * ut * (1.0 + ic_sqrt))
 
@@ -133,41 +77,15 @@ def compute_IC_from_gm_id(gm_id: float, n: float = 1.4,
 
 def compute_IC_from_id_w(id_w: float, device_type: str,
                          proc) -> float:
-    """
-    从 ID/W 直接计算 IC。
-
-    公式: IC = ID / (W * I0) = ID_W / I0
-    其中 I0 = 2*n*μ*Cox*UT² (与 L 无关，是 per-square 量)
-
-    Args:
-        id_w: ID/W [A/m]
-        device_type: "nmos" or "pmos"
-        proc: ProcessInfo
-
-    Returns:
-        IC
-    """
-    i0 = compute_I0(device_type, 1e-6, proc)  # L 不参与 I0
+    """AnalogRF-IR internal documentation."""
+    i0 = compute_I0(device_type, 1e-6, proc)  # Internal implementation note.
     return id_w / i0 if i0 > 0 else 0.0
 
 
-# ── 反型层分类 ──────────────────────────────────────────────
+# Internal implementation note.
 
 def ic_to_region(ic: float) -> str:
-    """
-    将反型系数 IC 映射为反型层字符串。
-
-    分类:
-      IC < 0.1        → "weak"       (弱反型 / 亚阈值)
-      0.1 ≤ IC ≤ 10   → "moderate"   (中等反型)
-      IC > 10         → "strong"     (强反型)
-
-    Args:
-        ic: 反型系数
-
-    Returns:
-        "weak" | "moderate" | "strong" | "unknown"
-    """
+    """AnalogRF-IR internal documentation."""
     if ic < 0:
         return "unknown"
     if ic < 0.1:
@@ -178,30 +96,21 @@ def ic_to_region(ic: float) -> str:
 
 
 def ic_to_description(ic: float, gm_id: Optional[float] = None) -> str:
-    """
-    返回反型层的详细描述。
-
-    Args:
-        ic: 反型系数
-        gm_id: 可选 gm/ID 用于补充描述
-
-    Returns:
-        人类可读描述
-    """
+    """AnalogRF-IR internal documentation."""
     region = ic_to_region(ic)
     parts = [f"IC={ic:.3f}"]
 
     if region == "weak":
-        parts.append("弱反型 (亚阈值)")
-        parts.append("高增益效率, 低带宽, 噪声大")
+        parts.append("weak inversion / subthreshold")
+        parts.append("high gm efficiency, lower bandwidth, higher noise")
     elif region == "moderate":
-        parts.append("中等反型")
-        parts.append("增益-带宽平衡区")
+        parts.append("moderate inversion")
+        parts.append("gain-bandwidth tradeoff region")
     elif region == "strong":
-        parts.append("强反型")
-        parts.append("高带宽, 高线性度, 低增益效率")
+        parts.append("strong inversion")
+        parts.append("higher bandwidth and linearity, lower gm efficiency")
     else:
-        parts.append("未知反型层")
+        parts.append("unknown inversion level")
 
     if gm_id is not None:
         parts.append(f"gm/ID={gm_id:.1f}")
@@ -209,17 +118,10 @@ def ic_to_description(ic: float, gm_id: Optional[float] = None) -> str:
     return " — ".join(parts)
 
 
-# ── 综合分析 ────────────────────────────────────────────────
+# Internal implementation note.
 
 class InversionAnalyzer:
-    """
-    反型层分析器 — 对单管或整个设计状态进行反型系数分析。
-
-    Usage:
-        analyzer = InversionAnalyzer()
-        result = analyzer.analyze_transistor(ts, state.process, device_type="nmos")
-        print(result.region, result.ic)
-    """
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self, n_default: float = 1.4):
         self.n_default = n_default
@@ -227,40 +129,26 @@ class InversionAnalyzer:
     def analyze_transistor(self, ts, proc,
                            device_type: Optional[str] = None,
                            vth: Optional[float] = None) -> InversionResult:
-        """
-        对单个 TransistorState 进行反型层分析。
-
-        优先使用仿真回填的 gm_id_realized 和 vgs/vth，
-        若不可用则使用 strategy 值。
-
-        Args:
-            ts: TransistorState
-            proc: ProcessInfo
-            device_type: 覆盖器件类型 (默认从 ts.type 推断)
-            vth: 覆盖阈值电压 (默认从 proc 取)
-
-        Returns:
-            InversionResult
-        """
+        """AnalogRF-IR internal documentation."""
         p = ts.parameters
         dtype = device_type or ts.type or "nmos"
 
-        # 确定 VTH
+        # Internal implementation note.
         if vth is None:
             vth = proc.VTH_n if dtype in ("nmos", "nch_18") else proc.VTH_p
 
-        # 优先使用仿真值
+        # Internal implementation note.
         gm_id = p.gm_id_realized if p.gm_id_realized > 0 else ts.gm_id_strategy
         vgs = p.vgs if p.vgs > 0 else 0.0
 
-        # 选取 n 因子
+        # Internal implementation note.
         n = (proc.n_sub_nmos if dtype in ("nmos", "nch_18")
              else proc.n_sub_pmos)
 
-        # 计算 IC
+        # Internal implementation note.
         ic = compute_IC_from_gm_id(gm_id, n)
 
-        # 也可从 ID_W 验证
+        # Internal implementation note.
         if hasattr(p, "id") and p.id > 0 and p.W > 0:
             id_w = p.id / p.W
             ic_from_id_w = compute_IC_from_id_w(id_w, dtype, proc)
@@ -285,16 +173,7 @@ class InversionAnalyzer:
 
     def analyze_all(self, state,
                     by_role: bool = True) -> Dict[str, InversionResult]:
-        """
-        分析设计状态中所有晶体管。
-
-        Args:
-            state: DesignState
-            by_role: 按 role 排序输出
-
-        Returns:
-            Dict[device_id, InversionResult]
-        """
+        """AnalogRF-IR internal documentation."""
         results = {}
         for dev_id, ts in state.transistors.items():
             dev_def = state.get_device_def(dev_id)
@@ -308,7 +187,7 @@ class InversionAnalyzer:
             results[dev_id] = result
 
         if by_role:
-            # 保持插入顺序但分组
+            # Internal implementation note.
             sorted_results = {}
             for dev in state.topology.devices:
                 if dev.id in results:
@@ -318,15 +197,7 @@ class InversionAnalyzer:
         return results
 
     def summary_table(self, state) -> str:
-        """
-        生成所有晶体管的反型层摘要表。
-
-        Args:
-            state: DesignState
-
-        Returns:
-            格式化的字符串表格
-        """
+        """AnalogRF-IR internal documentation."""
         results = self.analyze_all(state)
         lines = [
             f"{'Device':<6} {'Role':<22} {'Type':<5} "
@@ -340,11 +211,11 @@ class InversionAnalyzer:
             dtype = dev_def.type if dev_def else "?"
             note = ""
             if r.ic < 0.05:
-                note = "深亚阈值"
+                note = "deep subthreshold"
             elif r.ic > 50:
-                note = "深强反型"
+                note = "deep strong inversion"
             elif 0.5 < r.ic < 2:
-                note = "最优效率区"
+                note = "best-efficiency region"
 
             lines.append(
                 f"{dev_id:<6} {role:<22} {dtype:<5} "

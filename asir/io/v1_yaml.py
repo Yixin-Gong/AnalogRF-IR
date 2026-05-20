@@ -62,7 +62,7 @@ def embed_asir_output(source_data: dict[str, Any], design: ASIRDesign) -> dict[s
     out["asir_output"] = design.to_dict()
     out.setdefault("metadata", {})
     if isinstance(out["metadata"], dict):
-        out["metadata"]["asir_compiled_from"] = "obj_ir_v1_style_yaml"
+        out["metadata"]["asir_compiled_from"] = "analogrf_ir_yaml"
         out["metadata"]["asir_note"] = (
             "Original topology/spec fields are preserved; ASIR output is a layered semantic IR bundle."
         )

@@ -1,23 +1,4 @@
-"""
-分层验证器 V2.0 — 数据驱动的多级验证引擎。
-
-架构：
-  Layer 1 — Syntax:   结构完整性（字段存在、类型、SchemaSpec 驱动）
-  Layer 2 — Semantic: 引用一致性（ID 交叉验证、net 名称有效性）
-  Layer 3 — Value:    数值合理性（范围、正数、物理可行性、单位一致性）
-  Layer 4 — Physical: 设计规则（工作区、对称、电压堆叠）— 基于 role/stage 动态发现
-
-每一层独立运行，互不依赖。用户可以：
-  1. 编辑 Schema 后重新验证 — 所有层自动适配
-  2. 注册自定义规则函数 — Agent 通过名称调用
-  3. 选择只运行某些层 — 快速检查 vs 完整验证
-
-规则注册系统：
-  @register_rule("my_symmetry_check", layer=4)
-  def my_check(state): ...
-
-  Agent 调用: rule = get_rule("my_symmetry_check"); report = rule(state)
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -32,29 +13,24 @@ from schemas.design_state import (
 )
 from util.units import Unit, Dimension, Length, Voltage, Current
 
-# 导入设计规则库 → 触发 @register_rule 自动注册
+# Internal implementation note.
 import core.design_rules  # noqa: F401
 
-# 规则注册 API（共享自 rule_registry 模块）
+# Internal implementation note.
 from core.rule_registry import (
     register_rule, get_rule, list_rules, run_registered_rules,
     DiagnosisResult, ValidationReport,
 )
-# ── Layer 1: Syntax 验证 ────────────────────────────────────
+# Internal implementation note.
 
 class SyntaxValidator:
-    """
-    语法层验证 — 基于 SchemaSpec 的字段存在性和类型检查。
-
-    这是数据驱动的：从 DesignState dataclass 的字段定义自动生成 spec，
-    不硬编码任何字段名。用户新增字段后，spec 自动更新。
-    """
+    """AnalogRF-IR internal documentation."""
 
     @staticmethod
     def validate(state: DesignState) -> ValidationReport:
         report = ValidationReport()
 
-        # 必填字段检查
+        # Internal implementation note.
         if not state.design_name or state.design_name == "unnamed":
             report.add(DiagnosisResult(
                 check_name="syntax:required_field", passed=False, severity="warning",
@@ -78,7 +54,7 @@ class SyntaxValidator:
                 message="topology.devices is empty — at least one device required", layer=1
             ))
 
-        # 类型检查
+        # Internal implementation note.
         for dev in state.topology.devices:
             if not isinstance(dev.connections, dict):
                 report.add(DiagnosisResult(
@@ -101,18 +77,10 @@ class SyntaxValidator:
         return report
 
 
-# ── Layer 2: Semantic 验证 ──────────────────────────────────
+# Internal implementation note.
 
 class SemanticValidator:
-    """
-    语义层验证 — 引用完整性和一致性检查。
-
-    检查各项之间的 ID 引用是否闭合：
-      - topology.devices ↔ transistors
-      - topology.devices ↔ constraints.per_device
-      - design_variables.device → topology.devices
-      - connections 中的 net 名称有效性
-    """
+    """AnalogRF-IR internal documentation."""
 
     @staticmethod
     def validate(state: DesignState) -> ValidationReport:
@@ -152,7 +120,7 @@ class SemanticValidator:
         # ── design_variables.device → devices ──
         for dv in state.design_variables:
             if not dv.device:
-                continue  # 全局变量 (device="") 豁免
+                continue  # Internal implementation note.
             if dv.device not in topo_ids:
                 report.add(DiagnosisResult(
                     check_name="semantic:design_var_device", passed=False,
@@ -161,10 +129,10 @@ class SemanticValidator:
                     layer=2, device=dv.device
                 ))
 
-        # ── connections net 名称有效性 ──
+        # Internal implementation note.
         valid_nets = {gn.name for gn in state.topology.global_nets}
         valid_nets |= {p.id for p in state.topology.ports}
-        # 中间节点也有效（如 net1, tail 等 — 任何非空字符串即可）
+        # Internal implementation note.
         for dev in state.topology.devices:
             for pin, net_name in dev.connections.items():
                 if not net_name or (isinstance(net_name, str) and net_name.strip() == ""):
@@ -178,25 +146,16 @@ class SemanticValidator:
         return report
 
 
-# ── Layer 3: Value Domain 验证 ──────────────────────────────
+# Internal implementation note.
 
 class ValueValidator:
-    """
-    值域层验证 — 数值合理性、范围、单位一致性。
-
-    检查:
-      - Range: min < max
-      - 物理量正值: W > 0, L > 0, gm > 0
-      - 温度合理: 250K < T < 400K
-      - 电源正压: vdd > vss
-      - Loss weight 非负
-    """
+    """AnalogRF-IR internal documentation."""
 
     @staticmethod
     def validate(state: DesignState) -> ValidationReport:
         report = ValidationReport()
 
-        # ── constraints 范围检查 ──
+        # Internal implementation note.
         for key, rng in state.constraints.global_.items():
             if rng.min > rng.max:
                 report.add(DiagnosisResult(
@@ -220,7 +179,7 @@ class ValueValidator:
                     message=f"{dev_id} L range invalid: min > max", layer=3, device=dev_id
                 ))
 
-        # ── 仿真配置 ──
+        # Internal implementation note.
         sim = state.simulation
         if not (-50 < sim.temperature < 200):
             report.add(DiagnosisResult(
@@ -239,7 +198,7 @@ class ValueValidator:
                 message=f"vdd ({vdd}V) must be > vss ({vss}V)", layer=3
             ))
 
-        # ── 晶体管物理量正值检查 ──
+        # Internal implementation note.
         for tid, ts in state.transistors.items():
             p = ts.parameters
             if p.W < 0:
@@ -255,7 +214,7 @@ class ValueValidator:
                     message=f"{tid}: L is undefined (both strategy and parameters)", layer=3, device=tid
                 ))
 
-        # ── Loss weight 检查 ──
+        # Internal implementation note.
         for lt in state.loss_terms:
             if lt.weight < 0:
                 report.add(DiagnosisResult(
@@ -271,7 +230,7 @@ class ValueValidator:
                     layer=3
                 ))
 
-        # ── target 范围 ──
+        # Internal implementation note.
         for name, t in state.targets.items():
             if t.min is not None and t.max is not None and t.min > t.max:
                 report.add(DiagnosisResult(
@@ -283,24 +242,12 @@ class ValueValidator:
         return report
 
 
-# ── Layer 4: Physical Rules 验证 ────────────────────────────
+# Internal implementation note.
 
 class PhysicalValidator:
-    """
-    物理规则层验证 — 基于 role/stage 标注动态发现检查规则。
+    """AnalogRF-IR internal documentation."""
 
-    这是领域专用的验证层。与旧版本的区别：
-      - 不再硬编码 "input_pair"、"current_mirror_load"
-      - 而是扫描 topology 中的 role 标注，自动发现对称组和检查对象
-      - 用户添加新 role 后，规则自动适配
-
-    动态规则发现逻辑：
-      - 对称性检查：扫描所有 role，对 role 内出现 ≥2 次的器件自动配对
-      - 电压堆叠：基于 topology connections 构建信号路径图
-      - 饱和区检查：应用于所有有仿真数据的器件
-    """
-
-    # 不需要饱和区检查的 role（如 diode-connected 负载管）
+    # Internal implementation note.
     SATURATION_EXEMPT_ROLES: Set[str] = {"current_mirror_load"}  # diode-connected
 
     @staticmethod
@@ -310,29 +257,29 @@ class PhysicalValidator:
                   symmetry_tolerance: float = 0.05) -> ValidationReport:
         report = ValidationReport()
 
-        # ── 饱和区检查 ──
+        # Internal implementation note.
         report.results.extend(
             PhysicalValidator._check_saturation(state, vdsat_margin)
         )
 
-        # ── 对称性检查（动态发现） ──
+        # Internal implementation note.
         report.results.extend(
             PhysicalValidator._check_symmetry(state, symmetry_tolerance)
         )
 
-        # ── 电压堆叠检查 ──
+        # Internal implementation note.
         report.results.extend(
             PhysicalValidator._check_voltage_stack(state, min_headroom)
         )
 
-        # ── 电流守恒检查（粗略 KCL）──────────────────────────
+        # Internal implementation note.
         report.results.extend(
             PhysicalValidator._check_current_balance(state)
         )
 
         return report
 
-    # ── 内部方法 ──
+    # Internal implementation note.
 
     @staticmethod
     def _check_saturation(state: DesignState, margin: float) -> List[DiagnosisResult]:
@@ -344,7 +291,7 @@ class PhysicalValidator:
             dev_def = state.get_device_def(tid)
             role = dev_def.role if dev_def else ""
             if role in PhysicalValidator.SATURATION_EXEMPT_ROLES:
-                continue  # diode 连接的器件不需要饱和检查
+                continue  # Internal implementation note.
 
             if p.vds < p.vdsat + margin:
                 results.append(DiagnosisResult(
@@ -365,16 +312,9 @@ class PhysicalValidator:
 
     @staticmethod
     def _check_symmetry(state: DesignState, tolerance: float) -> List[DiagnosisResult]:
-        """
-        动态对称性检查。
-
-        算法：
-          1. 扫描 topology.devices，按 role 分组
-          2. 对每个 role 组，若成员 ≥2，检查物理参数对称性
-          3. 不需要预先知道有哪些 role
-        """
+        """AnalogRF-IR internal documentation."""
         results = []
-        # 按 role 分组
+        # Internal implementation note.
         role_groups: Dict[str, List[str]] = {}
         for dev in state.topology.devices:
             role_groups.setdefault(dev.role, []).append(dev.id)
@@ -383,7 +323,7 @@ class PhysicalValidator:
             if len(dev_ids) < 2:
                 continue
 
-            # 取第一对（可扩展为 N 向对称）
+            # Internal implementation note.
             for i in range(len(dev_ids)):
                 for j in range(i + 1, len(dev_ids)):
                     a, b = dev_ids[i], dev_ids[j]
@@ -427,23 +367,18 @@ class PhysicalValidator:
 
     @staticmethod
     def _check_voltage_stack(state: DesignState, headroom: float) -> List[DiagnosisResult]:
-        """
-        电压堆叠检查 — 基于 topology 连接关系推断。
-
-        简单版本：对每个 stage，按连接关系估算 VDS 堆叠。
-        完整版本需要构建 netlist graph，暂用简化版。
-        """
+        """AnalogRF-IR internal documentation."""
         results = []
         vdd = state.simulation.supply.get("vdd", 1.8)
         vss = state.simulation.supply.get("vss", 0.0)
         supply_span = vdd - vss
 
-        # 按 stage 分组
+        # Internal implementation note.
         stage_devices: Dict[str, List[str]] = {}
         for dev in state.topology.devices:
             stage_devices.setdefault(dev.stage, []).append(dev.id)
 
-        # 对每个 stage，估算 VDS 总和
+        # Internal implementation note.
         for stage, dev_ids in stage_devices.items():
             total_vds = 0.0
             for did in dev_ids:
@@ -462,15 +397,9 @@ class PhysicalValidator:
 
     @staticmethod
     def _check_current_balance(state: DesignState) -> List[DiagnosisResult]:
-        """
-        电流守恒检查 — 粗略 KCL。
-
-        基于 role 标注推断电流关系：
-          - tail_current_source 电流 = 输入对管电流之和
-          - 输入对管电流之和 ≈ 负载管电流
-        """
+        """AnalogRF-IR internal documentation."""
         results = []
-        # 收集各 role 的电流
+        # Internal implementation note.
         role_currents: Dict[str, List[float]] = {}
         for tid, ts in state.transistors.items():
             dev_def = state.get_device_def(tid)
@@ -481,7 +410,7 @@ class PhysicalValidator:
                 continue
             role_currents.setdefault(dev_def.role, []).append(p.id)
 
-        # tail 电流 vs 输入对管电流
+        # Internal implementation note.
         tail_currents = role_currents.get("tail_current_source", [])
         input_currents = role_currents.get("input_pair", [])
         if tail_currents and input_currents:
@@ -499,22 +428,10 @@ class PhysicalValidator:
         return results
 
 
-# ── 综合验证器 ──────────────────────────────────────────────
+# Internal implementation note.
 
 class Validator:
-    """
-    综合验证器 — 运行全部分层验证 + 用户注册的自定义规则。
-
-    使用方式:
-        v = Validator()
-        report = v.validate(state)
-
-        # 只运行语法 + 语义
-        report = v.validate(state, layers=[1, 2])
-
-        # 运行自定义规则
-        report = v.validate(state, include_custom=True)
-    """
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self):
         self.syntax = SyntaxValidator()
@@ -547,8 +464,8 @@ class Validator:
         return report
 
 
-# ── 便捷函数 ─────────────────────────────────────────────────
+# Internal implementation note.
 
 def validate(state: DesignState) -> ValidationReport:
-    """运行完整验证（4 层 + 自定义规则）。"""
+    """AnalogRF-IR internal documentation."""
     return Validator().validate(state)

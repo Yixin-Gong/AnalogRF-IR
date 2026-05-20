@@ -45,7 +45,7 @@ Export all comparator examples:
 python main.py all --out exports
 ```
 
-Compile an `obj_ir_v1.0`-style YAML input and embed the layered ASIR output back into the YAML document:
+Compile an AnalogRF-IR YAML input and embed the layered ASIR output back into the YAML document:
 
 ```powershell
 python main.py from-yaml inputs/strongarm_v1.yaml --out exports/strongarm_v1_asir.yaml --summary
@@ -97,15 +97,15 @@ asir/
 tests/
   test_asir.py             smoke tests for extraction and reasoning
 inputs/
-  *_v1.yaml                obj_ir_v1-style designer-editable topology inputs
+  *_v1.yaml                designer-editable topology inputs
 ```
 
 ## Designer Input
 
-Designers do not need to edit Python. The intended input is the old `obj_ir_v1.0`-style YAML shape:
+Designers do not need to edit Python. The intended input is the AnalogRF-IR YAML shape:
 
 ```yaml
-schema_version: '2.1'
+schema_version: '0.1'
 design_name: strongarm_comparator
 topology:
   class: comparator

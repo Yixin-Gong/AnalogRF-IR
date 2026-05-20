@@ -66,7 +66,7 @@ def parse_spice_text(text: str, design_name: str = "spice_design") -> dict[str, 
         "devices": [*devices, *passives],
     }
     out = {
-        "schema_version": "2.1",
+        "schema_version": "0.1",
         "design_name": design_name,
         "metadata": {"source": "spice_parser", "note": "Generated from SPICE; review roles and specs before optimization."},
         "topology": topology,

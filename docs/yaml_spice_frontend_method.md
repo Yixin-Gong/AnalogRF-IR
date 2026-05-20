@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This update merges the ASIR prototype from `obj_irv2.0` into `objective_ir` and refactors the input side of the optimizer around a designer-editable YAML rule set. The optimizer, gm/id sizing model, compensation repair, and ngspice verification flow are retained. The new frontend supports two equivalent entry paths:
+This update documents the AnalogRF-IR v0.1 input side: a designer-editable YAML rule set plus an optional SPICE-to-YAML frontend. The optimizer, gm/id sizing model, compensation repair, and ngspice verification flow are retained. The frontend supports two equivalent entry paths:
 
 1. Designer edits YAML directly.
 2. Designer provides a SPICE netlist; the parser generates YAML, seeds initial values, then the optimizer runs on the generated design state.
@@ -16,7 +16,7 @@ The goal is to make topology, specifications, constraints, design variables, los
 The project now has two complementary IR layers:
 
 - `DesignState`: the optimization IR used by sizing, validation, netlist generation, and simulation.
-- `ASIR`: the semantic IR imported from `obj_irv2.0`, currently focused on comparator topology semantics and layered graph extraction.
+- `ASIR`: the semantic IR layer, currently focused on comparator topology semantics and layered graph extraction.
 
 The optimizer consumes `DesignState`. ASIR can compile YAML topology into semantic graphs for reasoning, documentation, and future topology-aware diagnosis.
 

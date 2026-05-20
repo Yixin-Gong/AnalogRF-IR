@@ -61,7 +61,7 @@ def build_design_state_from_yaml(data: dict[str, Any], env: dict[str, Any]) -> D
     YAML instead of being reconstructed from a hard-coded OTA builder.
     """
     state = DesignState(
-        schema_version=str(data.get("schema_version", "2.1")),
+        schema_version=str(data.get("schema_version", "0.1")),
         design_name=str(data.get("design_name") or (data.get("topology") or {}).get("name") or "yaml_design"),
     )
     state.topology = _parse_topology(data, env)

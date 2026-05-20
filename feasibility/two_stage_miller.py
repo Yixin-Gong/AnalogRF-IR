@@ -106,7 +106,7 @@ class TwoStageMillerFeasibilityChecker:
         validation_plan = self._validation_plan(top)
 
         return {
-            "schema_version": "objective_ir.feasibility.v1",
+            "schema_version": "analogrf_ir.feasibility.v0_1",
             "topology": {
                 "name": self.state.topology.name,
                 "class": self.state.topology.class_,

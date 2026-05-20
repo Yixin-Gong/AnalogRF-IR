@@ -1,15 +1,4 @@
-"""
-Schema V2.0 — 设计状态文件 design_state.yaml 的 Python 数据模型。
-
-四层 Schema 架构 (架构总纲 V1.1):
-  L1 — 设计宪法:   topology + targets         (仅人可写, Agent 只读)
-  L2 — 优化问题:   constraints + loss_terms   (人 + Agent 可写)
-  L3 — 评估声明:   evaluations                (人 + Agent 可写)
-  L4 — 物理状态:   transistors 物理量          (仅执行脚本可写, 只读)
-
-这是系统的唯一设计状态源 (Single Source of Truth)。
-Agent 通过读写此文件与物理执行层交互，遵守"认知-执行分离"原则。
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -22,28 +11,25 @@ from pathlib import Path
 from util.units import parse_value
 
 
-# ── L1: 拓扑层 ──────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class GlobalNet:
-    """全局网络定义（电源、地等）。"""
+    """AnalogRF-IR internal documentation."""
     name: str          # e.g. vdd, gnd
     type: str          # supply | ground
 
 
 @dataclass
 class Port:
-    """电路端口定义。"""
+    """AnalogRF-IR internal documentation."""
     id: str            # e.g. vinp, vinn, vout, vbias
     direction: str     # input | output | bias | supply
 
 
 @dataclass
 class DeviceDefinition:
-    """
-    器件的拓扑定义（静态，不随迭代改变）。
-    connections 直接对应 ngspice 网表的节点连接。
-    """
+    """AnalogRF-IR internal documentation."""
     id: str                              # M1, M2, ...
     role: str                            # input_pair | current_mirror_load | tail_current_source | cascode | ...
     stage: str = "core"                  # input | core | output | bias
@@ -54,7 +40,7 @@ class DeviceDefinition:
 
 @dataclass
 class Topology:
-    """电路拓扑的完整语义描述 (L1 — 仅人可写)。"""
+    """AnalogRF-IR internal documentation."""
     name: str = "unnamed"
     class_: str = "ota"
     architecture: str = "single-stage"
@@ -63,11 +49,11 @@ class Topology:
     devices: List[DeviceDefinition] = field(default_factory=list)
 
 
-# ── L1: 规格层 ──────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class Target:
-    """单个性能指标规格 (L1 — 仅人可写)。"""
+    """AnalogRF-IR internal documentation."""
     min: Optional[float] = None
     max: Optional[float] = None
     unit: str = ""
@@ -76,16 +62,16 @@ class Target:
 
 @dataclass
 class Range:
-    """数值范围。"""
+    """AnalogRF-IR internal documentation."""
     min: float
     max: float
 
 
-# ── L2: 优化问题定义 ──────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class DeviceConstraint:
-    """单个器件的约束边界 (L2)。"""
+    """AnalogRF-IR internal documentation."""
     gm_id: Optional[Range] = None
     L: Optional[Range] = None
     VDS_min: Optional[float] = None
@@ -94,18 +80,7 @@ class DeviceConstraint:
 
 @dataclass
 class Constraints:
-    """
-    优化器的搜索空间限制 (L2 — Agent 可修改)。
-
-    支持两种序列化格式:
-      新格式 (架构总纲 V1.1 平铺):
-        constraints:
-          M1: {gm_id: [8, 20], L: [0.13e-6, 2e-6]}
-      旧格式 (嵌套, 向后兼容):
-        constraints:
-          global: {gm_id: {min: 5, max: 25}}
-          per_device: {M1: {gm_id: {min: 12, max: 25}}}
-    """
+    """AnalogRF-IR internal documentation."""
     global_: Dict[str, Range] = field(default_factory=dict)
     per_device: Dict[str, DeviceConstraint] = field(default_factory=dict)
 
@@ -122,16 +97,11 @@ class Constraints:
 
 @dataclass
 class DesignVariable:
-    """单个优化器决策变量（扁平化，供 NSGA-II 使用）。
-
-    支持两类变量:
-      - 器件变量: device="M1", variable="gm_id" | "L"
-      - 全局变量: device="", variable="I_tail"  (device 为空)
-    """
+    """AnalogRF-IR internal documentation."""
     device: str = ""
     variable: str = ""        # gm_id | L | I_tail | ...
     range: Range = field(default_factory=lambda: Range(0, 1))
-    initial: Optional[float] = None   # 优化器种子值 (None → 取 range 中点)
+    initial: Optional[float] = None   # Internal implementation note.
     symmetry_label: Optional[str] = None
     unit: str = ""
     description: str = ""
@@ -139,22 +109,18 @@ class DesignVariable:
 
 @dataclass
 class CorrectionFactors:
-    """估计模型校正因子 — 从 ngspice 回测更新，不进优化器逻辑。
-
-    Agent 可修改这些值以改善 pygmid 查找表与 ngspice BSIM4 之间
-    的系统性偏差。Optimizer 只读。
-    """
-    gm_factor: float = 1.0          # gm 缩放 (VDS/体效应校正)
-    gds_factor: float = 1.0         # gds 缩放
-    c_factor: float = 1.0           # 电容缩放
+    """AnalogRF-IR internal documentation."""
+    gm_factor: float = 1.0          # Internal implementation note.
+    gds_factor: float = 1.0         # Internal implementation note.
+    c_factor: float = 1.0           # Internal implementation note.
     description: str = ""
 
 
-# ── L4: 晶体管运行时状态层 ─────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class TransistorParameters:
-    """仿真后回填的物理参数 (L4 — 仅脚本可写)。"""
+    """AnalogRF-IR internal documentation."""
     W: float = 0.0
     L: float = 0.0
     gm: float = 0.0
@@ -170,12 +136,12 @@ class TransistorParameters:
     cdd: float = 0.0
     cgs: float = 0.0
     cgd: float = 0.0
-    ic: float = 0.0          # 反型系数 (inversion coefficient), L4 脚本回填
+    ic: float = 0.0          # Internal implementation note.
 
 
 @dataclass
 class TransistorState:
-    """单个晶体管的完整状态 (L4 — 仅脚本可写)。"""
+    """AnalogRF-IR internal documentation."""
     device_id: str
     role: str
     type: str
@@ -186,44 +152,35 @@ class TransistorState:
     parameters: TransistorParameters = field(default_factory=TransistorParameters)
 
 
-# ── L2: Loss 定义 ──────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class LossTerm:
-    """
-    单项 Loss 定义 (L2 — Agent 可修改 formula 和 weight)。
-
-    formula 白名单变量: realized.*, targets.*, device.Mx.*
-    白名单函数: relu, abs, max, min, sqrt, pow, log10, penalty_if
-    """
+    """AnalogRF-IR internal documentation."""
     id: str
     formula: str
     weight: float = 1.0
     description: str = ""
 
 
-# ── L3: 评估声明 ──────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class Evaluation:
-    """
-    评估声明 (L3 — Agent 可修改): 定义要测量什么、如何测量。
-
-    驱动 ngspice .meas 生成和仿真结果解析。
-    """
+    """AnalogRF-IR internal documentation."""
     name: str                    # e.g. dc_gain, phase_margin, total_power, region_M1
     type: str                    # ac_gain | ugbw | phase_margin | dc_power | operating_region | cmrr | psrr
-    probe: str = ""             # 探测节点, e.g. vout
-    device: str = ""            # 关联器件, e.g. M1
-    target_ref: str = ""        # 对应的 target key, e.g. dc_gain
-    meas_formula: str = ""      # 可选: 自定义 .meas 公式
+    probe: str = ""             # Internal implementation note.
+    device: str = ""            # Internal implementation note.
+    target_ref: str = ""        # Internal implementation note.
+    meas_formula: str = ""      # Internal implementation note.
 
 
-# ── 仿真配置 ──────────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class SimulationConfig:
-    """ngspice 仿真配置。"""
+    """AnalogRF-IR internal documentation."""
     temperature: float = 27.0
     supply: Dict[str, float] = field(default_factory=dict)
     model_lib: str = ""
@@ -235,11 +192,11 @@ class SimulationConfig:
     bias_voltage: float = 0.6
 
 
-# ── 工艺信息 ──────────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class ProcessInfo:
-    """工艺信息 — 设计规则、物理参数、可靠性约束的来源。"""
+    """AnalogRF-IR internal documentation."""
     process_name: str = ""
     technology_node: float = 0.13
     foundry: str = ""
@@ -273,21 +230,21 @@ class ProcessInfo:
     gm_id_min: float = 3.0
     gm_id_max: float = 28.0
     VDSAT_headroom_factor: float = 1.3
-    n_sub_nmos: float = 1.4       # NMOS 亚阈值斜率因子
-    n_sub_pmos: float = 1.4       # PMOS 亚阈值斜率因子
-    mu_n: float = 0.04            # NMOS 电子迁移率 [m²/V·s] (PTM 130nm 典型)
-    mu_p: float = 0.01            # PMOS 空穴迁移率 [m²/V·s] (PTM 130nm 典型)
+    n_sub_nmos: float = 1.4       # Internal implementation note.
+    n_sub_pmos: float = 1.4       # Internal implementation note.
+    mu_n: float = 0.04            # Internal implementation note.
+    mu_p: float = 0.01            # Internal implementation note.
 
 
-# ── 历史记录层 ─────────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class HistoryEntry:
-    """单次外层迭代的完整记录 (Agent 写入, 确保变更可追溯)。"""
+    """AnalogRF-IR internal documentation."""
     iteration: int
     timestamp: str = ""
     strategy: str = ""
-    diagnosis: str = ""                  # 物理诊断依据 (强制: Agent 必须填写)
+    diagnosis: str = ""                  # Internal implementation note.
     constraint_changes: List[str] = field(default_factory=list)
     loss_weight_changes: List[str] = field(default_factory=list)
     loss_formula_changes: List[str] = field(default_factory=list)
@@ -298,20 +255,12 @@ class HistoryEntry:
     transistor_snapshot: Dict[str, TransistorParameters] = field(default_factory=dict)
 
 
-# ── 顶层设计状态 ───────────────────────────────────────────
+# Internal implementation note.
 
 @dataclass
 class DesignState:
-    """
-    设计状态 V2.0 — 系统的唯一真相源。
-
-    四层架构:
-      L1 (仅人):    topology, targets, constraints
-      L2 (人+Agent): design_variables, loss_terms
-      L3 (人+Agent): evaluations
-      L4 (仅脚本):   transistors
-    """
-    schema_version: str = "2.0"
+    """AnalogRF-IR internal documentation."""
+    schema_version: str = "0.1"
     design_name: str = "unnamed"
 
     # L1
@@ -331,14 +280,14 @@ class DesignState:
     transistors: Dict[str, TransistorState] = field(default_factory=dict)
     global_parameters: Dict[str, float] = field(default_factory=dict)
 
-    # 工具链配置
+    # Internal implementation note.
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     process: ProcessInfo = field(default_factory=ProcessInfo)
 
-    # 历史
+    # Internal implementation note.
     history: List[HistoryEntry] = field(default_factory=list)
 
-    # ── 序列化 ──
+    # Internal implementation note.
 
     def to_dict(self) -> dict:
         return _dataclass_to_dict(self)
@@ -391,8 +340,8 @@ class DesignState:
         return None
 
     def build_design_variables(self) -> None:
-        """从 constraints 构建 design_variables（兜底：YAML 已声明时跳过）。"""
-        # 如果 design_variables 已由 YAML/Agent 填充，仅标记对称
+        """AnalogRF-IR internal documentation."""
+        # Internal implementation note.
         if self.design_variables:
             self.design_variables = self._mark_pair_symmetry(self.design_variables)
             return
@@ -435,7 +384,7 @@ class DesignState:
         return None
 
 
-# ── 序列化辅助函数 ──────────────────────────────────────────
+# Internal implementation note.
 
 def _dataclass_to_dict(obj: Any) -> Any:
     if isinstance(obj, list):
@@ -508,7 +457,7 @@ def _dict_to_design_state(d: dict) -> DesignState:
         if isinstance(max_raw, str): max_raw = parse_value(max_raw)
         targets[k] = Target(min=min_raw, max=max_raw, unit=unit, priority=v.get("priority", 1))
 
-    # constraints (支持新旧两种格式)
+    # Internal implementation note.
     cons_d = d.get("constraints", {})
     global_cons = {}
     per_device_cons = {}
@@ -623,7 +572,7 @@ def _dict_to_design_state(d: dict) -> DesignState:
         ))
 
     return DesignState(
-        schema_version=d.get("schema_version", "2.0"),
+        schema_version=d.get("schema_version", "0.1"),
         design_name=d.get("design_name", "unnamed"),
         topology=topology, targets=targets, constraints=constraints,
         design_variables=design_vars, transistors=transistors,

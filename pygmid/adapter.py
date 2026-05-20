@@ -1,22 +1,4 @@
-"""
-pygmid 适配器 V2.0 — Boris Murmann 风格的 gm/ID LookupTable 后端。
-
-职责：
-1. 将 (gm_id, L, id) 翻译为 (W, VGS, VDSAT, gm, ...)  — forward
-2. 将仿真结果反求为物理 gm_id                            — backward
-3. 提供工艺相关的归一化参数查询                           — lookup
-
-架构原则（保持不变）：
-  - 这是"物理执行层"的确定性脚本
-  - Agent 不直接调用查找表，而是通过 Schema 间接驱动
-  - forward/backward/lookup 接口保持不变
-
-V2.0 变更：
-  - 删除 MockPygmid（平方律近似）和 RealPygmid（旧导入尝试）
-  - 使用 Boris Murmann 风格的 LookupTable + 双线性插值
-  - 所有参数来自 BSIM4 预仿真 .npz 查找表
-  - 无查找表时自动降级为基础分析模型
-"""
+"""AnalogRF-IR internal documentation."""
 
 from __future__ import annotations
 
@@ -27,16 +9,13 @@ from typing import Dict, Optional, Tuple, Any
 try:
     from pygmid.lookup import LookupTable
 except ImportError:
-    from lookup import LookupTable  # 直接执行时的 fallback
+    from lookup import LookupTable  # Internal implementation note.
 
 
-# ── 基础分析模型（查找表不可用时的降级）─────────────────
+# Internal implementation note.
 
 class _AnalyticalFallback:
-    """
-    基于平方律 + 亚阈值修正的分析模型。
-    仅在查找表文件不存在时使用，精度远低于 BSIM4 查找表。
-    """
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self, device_type: str):
         self.device_type = device_type
@@ -69,7 +48,7 @@ class _AnalyticalFallback:
         cgd = 0.1 * cgs
         ft = gm / (2.0 * math.pi * (cgs + cgd)) if (cgs + cgd) > 0 else 0
 
-        # 反型系数 IC 估算: 从 VOV 反推 (平方律)
+        # Internal implementation note.
         # VOV ≈ 2*UT*sqrt(IC) for strong inversion
         ic = max((vov / (2.0 * self.VT)) ** 2, 0.001)
 
@@ -104,28 +83,13 @@ class _AnalyticalFallback:
 # ── Boris Murmann PygmidAdapter ────────────────────────────
 
 class PygmidAdapter:
-    """
-    Boris Murmann 风格的 gm/ID 适配器。
-
-    使用预计算的 .npz 查找表进行精确的 (gm_id, L) → (W, VGS, ...) 翻译。
-    查找表不可用时自动降级为分析模型。
-
-    Usage:
-        adapter = PygmidAdapter(nmos_table="tables/ptm130_nmos.npz",
-                                pmos_table="tables/ptm130_pmos.npz")
-        result = adapter.forward(gm_id=15, L=0.2e-6, id_target=10e-6, device_type="nmos")
-    """
+    """AnalogRF-IR internal documentation."""
 
     def __init__(self,
                  nmos_table: Optional[str] = None,
                  pmos_table: Optional[str] = None,
                  tables_dir: Optional[str] = None):
-        """
-        Args:
-            nmos_table: NMOS .npz 查找表路径
-            pmos_table: PMOS .npz 查找表路径
-            tables_dir: 查找表目录（若未指定 nmos_table/pmos_table，在此目录下搜索）
-        """
+        """AnalogRF-IR internal documentation."""
         self._nmos: Optional[LookupTable] = None
         self._pmos: Optional[LookupTable] = None
         self._fallback_nmos = _AnalyticalFallback("nmos")
@@ -155,7 +119,7 @@ class PygmidAdapter:
             print(f"[PygmidAdapter] PMOS table not loadable ({e}), using fallback")
 
     def _auto_discover(self, tables_dir: str) -> None:
-        """在 tables_dir 下搜索 *_nmos.npz 和 *_pmos.npz。"""
+        """AnalogRF-IR internal documentation."""
         import os
         d = Path(tables_dir)
         if not d.is_dir():
@@ -177,10 +141,7 @@ class PygmidAdapter:
         return self._fallback_nmos if device_type in ("nmos", "nch_18") else self._fallback_pmos
 
     def _compute_ic(self, id_w: float, device_type: str) -> float:
-        """从 ID_W 计算反型系数 IC = ID_W / I0。
-
-        I0 = 2 * n * μ * Cox * UT² 使用默认 PTM 130nm 参数。
-        """
+        """AnalogRF-IR internal documentation."""
         UT = 0.02585
         if device_type in ("nmos", "nch_18"):
             n, mu = 1.4, 0.04
@@ -198,18 +159,11 @@ class PygmidAdapter:
     def has_pmos_table(self) -> bool:
         return self._pmos is not None
 
-    # ── 核心接口（兼容旧 adapter.py）─────────────────────
+    # Internal implementation note.
 
     def forward(self, gm_id: float, L: float, id_target: float,
                 device_type: str = "nmos") -> Dict[str, float]:
-        """
-        正向翻译：(gm_id, L, id_target) → (W, vgs, vdsat, gm, gds, ft, cgs, cgd, vov, id_w)
-
-        使用查找表时，流程为：
-          1. 从 GM_ID 反推 VGS
-          2. 双线性插值所有归一化参数
-          3. W = id_target / ID_W
-        """
+        """AnalogRF-IR internal documentation."""
         table = self._get_table(device_type)
 
         if table is not None:
@@ -217,14 +171,14 @@ class PygmidAdapter:
                 result = table.lookup(GM_ID=gm_id, L=L)
                 id_w = max(result["ID_W"], 1e-15)
                 W = id_target / id_w
-                W = max(W, 1e-9)  # 最小 1nm
+                W = max(W, 1e-9)  # Internal implementation note.
 
                 cgs_w = result.get("CGS_W", 0) or 0
                 cgd_w = result.get("CGD_W", 0) or 0
                 cgg_w = result.get("CGG_W", 0) or 0
                 vth = result.get("VTH", self._get_fallback(device_type).VTH)
 
-                # 计算反型系数 IC = ID_W / I0
+                # Internal implementation note.
                 ic = self._compute_ic(id_w, device_type)
 
                 return {
@@ -288,18 +242,14 @@ class PygmidAdapter:
 
     def backward(self, gm: float, id_val: float, vgs: float,
                  device_type: str = "nmos") -> Dict[str, float]:
-        """
-        反向计算：从仿真结果反求 gm_id_realized 和工作区。
-
-        使用查找表时：通过 VGS 和 L 查表得出 GM_ID。
-        """
+        """AnalogRF-IR internal documentation."""
         table = self._get_table(device_type)
 
         if table is not None and id_val > 1e-15:
             try:
-                # 从 VGS 反查 — 但我们不知道 L...
-                # 实际用法中，backward 通常在仿真后调用，此时已知所有参数
-                # 简化：直接用 gm/id_val
+                # Internal implementation note.
+                # Internal implementation note.
+                # Internal implementation note.
                 gm_id = gm / id_val
                 region = "saturation"
                 if gm_id > 20:
@@ -314,12 +264,7 @@ class PygmidAdapter:
 
     def lookup(self, gm_id: float, L: float,
                device_type: str = "nmos") -> Dict[str, float]:
-        """
-        纯查表：给定 (gm_id, L) → 归一化参数。
-
-        Returns:
-            dict with id_over_w, gm_over_w, gm_gds, vov, ft_approx
-        """
+        """AnalogRF-IR internal documentation."""
         table = self._get_table(device_type)
 
         if table is not None:
@@ -339,11 +284,7 @@ class PygmidAdapter:
         return self._get_fallback(device_type).lookup(gm_id, L)
 
     def get_params(self, device_type: str = "nmos") -> Tuple[float, float, float, float]:
-        """
-        获取工艺参数 (VTH, KP, LAMBDA, COX) — 兼容旧接口。
-
-        查找表可用时，从表中取 L 中点的典型值；否则用 fallback。
-        """
+        """AnalogRF-IR internal documentation."""
         fallback = self._get_fallback(device_type)
         table = self._get_table(device_type)
 
@@ -352,7 +293,7 @@ class PygmidAdapter:
                 mid_L = table.L_grid[len(table.L_grid) // 2]
                 mid_result = table.lookup(GM_ID=10, L=mid_L)
                 vth = mid_result.get("VTH", fallback.VTH)
-                # 从 ID_W 估算 KP: ID = 0.5 * KP * (W/L) * vov^2
+                # Internal implementation note.
                 id_w = mid_result["ID_W"]
                 vov = mid_result["VGS"] - vth
                 if vov > 0.01 and id_w > 0:
@@ -374,8 +315,8 @@ class PygmidAdapter:
         return (fallback.VTH, fallback.KP, 0.15, fallback.COX)
 
     def summary(self) -> str:
-        """返回适配器状态摘要。"""
-        lines = ["PygmidAdapter V2.0 (Boris Murmann style)"]
+        """AnalogRF-IR internal documentation."""
+        lines = ["AnalogRF-IR v0.1 PygmidAdapter (Boris Murmann style)"]
         lines.append(f"  NMOS: {'LookupTable' if self._nmos else 'Analytical fallback'}")
         if self._nmos:
             lines.append(f"    {self._nmos.summary()}")
@@ -385,20 +326,10 @@ class PygmidAdapter:
         return "\n".join(lines)
 
 
-# ── 工厂函数 ────────────────────────────────────────────────
+# Internal implementation note.
 
 def create_pygmid_adapter(nmos_path: Optional[str] = None,
                           pmos_path: Optional[str] = None,
                           tables_dir: Optional[str] = None) -> PygmidAdapter:
-    """
-    工厂函数：创建 PygmidAdapter 实例。
-
-    Args:
-        nmos_path: NMOS .npz 查找表路径
-        pmos_path: PMOS .npz 查找表路径
-        tables_dir: 查找表目录（自动发现）
-
-    Returns:
-        PygmidAdapter 实例
-    """
+    """AnalogRF-IR internal documentation."""
     return PygmidAdapter(nmos_table=nmos_path, pmos_table=pmos_path, tables_dir=tables_dir)

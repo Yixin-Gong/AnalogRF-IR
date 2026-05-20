@@ -53,7 +53,7 @@ class FlowResult:
     flow_meta: dict[str, Any]
 
 
-class ObjectiveIRFlowRunner:
+class AnalogRFIRFlowRunner:
     """End-to-end orchestration with explicit module boundaries."""
 
     def __init__(
@@ -233,7 +233,7 @@ class ObjectiveIRFlowRunner:
 
     def _header(self, env_path: Path, schema_path: Path) -> None:
         self.emit("=" * 70)
-        self.emit("  objective_ir V2.2 - modular schema-driven flow")
+        self.emit("  AnalogRF-IR v0.1 - modular schema-driven analog/RF flow")
         self.emit("  Schema is the single source of truth")
         self.emit(f"  env:    {env_path}")
         self.emit(f"  schema: {schema_path}")

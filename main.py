@@ -4,12 +4,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from flow.runner import FlowConfig, ObjectiveIRFlowRunner
+from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from topologies.legacy import build_design_state
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="objective_ir modular analog optimizer")
+    parser = argparse.ArgumentParser(description="AnalogRF-IR v0.1 modular analog/RF optimizer")
     parser.add_argument("--env", default="environment.yaml", help="Environment YAML path")
     parser.add_argument("--schema", default="ir/schema.yaml", help="Schema YAML path")
     parser.add_argument("--spice", default="", help="Optional SPICE netlist to import before optimization")
@@ -22,7 +22,7 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--tail-current-mirror",
         action="store_true",
-        help="Legacy switch for five-transistor OTA tail mirror bias generation",
+        help="Enable five-transistor OTA tail mirror bias generation",
     )
     parser.add_argument(
         "--skip-dc-repair",
@@ -60,7 +60,7 @@ def main(argv=None) -> int:
         run_asir=not bool(args.no_asir),
     )
     try:
-        ObjectiveIRFlowRunner(
+        AnalogRFIRFlowRunner(
             config=config,
             legacy_state_builder=build_design_state,
             emit=print,

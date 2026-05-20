@@ -77,7 +77,7 @@ class ArtifactWriter:
         diagnostics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
 
         result = {
-            "schema_version": "objective_ir.result.v1",
+            "schema_version": "analogrf_ir.result.v0_1",
             "iteration": iteration,
             "status": diagnostics["status"],
             "measurements": sim_result.measurements,
@@ -123,7 +123,7 @@ def build_simulation_log(
         return value
 
     log = {
-        "schema_version": "objective_ir.sim_log.v2",
+        "schema_version": "analogrf_ir.sim_log.v0_1",
         "iteration": iteration,
         "timestamp": datetime.now().isoformat(),
         "design_name": state.design_name,
@@ -217,7 +217,7 @@ def build_agent_diagnostics(
     mismatches = _comparison_mismatch(comparison)
     devices = _device_status(state)
     return {
-        "schema_version": "agent_diagnostics.v2",
+        "schema_version": "analogrf_ir.agent_diagnostics.v0_1",
         "run": {
             "iteration": iteration,
             "timestamp": datetime.now().isoformat(),

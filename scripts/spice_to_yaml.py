@@ -11,7 +11,7 @@ from frontends.spice_parser import parse_spice_file, write_yaml
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Convert a SPICE netlist into objective_ir YAML")
+    parser = argparse.ArgumentParser(description="Convert a SPICE netlist into AnalogRF-IR YAML")
     parser.add_argument("spice", help="Input .cir/.sp/.spice file")
     parser.add_argument("--out", default="", help="Output YAML path")
     parser.add_argument("--name", default="", help="Override design_name")

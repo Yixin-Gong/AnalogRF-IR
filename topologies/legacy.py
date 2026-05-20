@@ -65,7 +65,7 @@ def _models(env: dict[str, Any]) -> tuple[str, str]:
 def _five_transistor_defaults(env: dict[str, Any]) -> dict[str, Any]:
     nmos, pmos = _models(env)
     return {
-        "schema_version": "2.1",
+        "schema_version": "0.1",
         "design_name": "five_transistor_ota",
         "topology": {
             "name": "five_transistor_ota",
@@ -121,7 +121,7 @@ def _five_transistor_defaults(env: dict[str, Any]) -> dict[str, Any]:
 def _two_stage_defaults(env: dict[str, Any]) -> dict[str, Any]:
     nmos, pmos = _models(env)
     return {
-        "schema_version": "2.1",
+        "schema_version": "0.1",
         "design_name": "two_stage_ota",
         "topology": {
             "name": "two_stage_ota",
