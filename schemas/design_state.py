@@ -287,6 +287,9 @@ class DesignState:
     # Internal implementation note.
     history: List[HistoryEntry] = field(default_factory=list)
 
+    # Runtime outputs derived from optimization, validation, simulation, and diagnosis.
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
     # Internal implementation note.
 
     def to_dict(self) -> dict:
@@ -388,6 +391,8 @@ class DesignState:
 
 def _dataclass_to_dict(obj: Any) -> Any:
     if isinstance(obj, list):
+        return [_dataclass_to_dict(item) for item in obj]
+    elif isinstance(obj, tuple):
         return [_dataclass_to_dict(item) for item in obj]
     elif isinstance(obj, dict):
         return {k: _dataclass_to_dict(v) for k, v in obj.items()}
@@ -580,4 +585,5 @@ def _dict_to_design_state(d: dict) -> DesignState:
         loss_terms=loss_terms, evaluations=evaluations,
         simulation=simulation, process=process, history=history,
         corrections=corrections,
+        diagnostics=d.get("diagnostics", {}),
     )

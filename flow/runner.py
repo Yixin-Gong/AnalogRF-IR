@@ -385,6 +385,7 @@ class AnalogRFIRFlowRunner:
         self.emit("     netlist.cir          SPICE netlist emitted from schema")
         self.emit("     sim_log.json         Optimizer + ngspice structured log")
         self.emit("     agent_diagnostics.json Agent diagnostics")
+        self.emit("     causal_diagnostics.json Causal graph and attribution view")
         self.emit("     result.json          Compact final JSON result")
         self.emit(f"{'=' * 70}")
 

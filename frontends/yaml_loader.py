@@ -78,6 +78,7 @@ def build_design_state_from_yaml(data: dict[str, Any], env: dict[str, Any]) -> D
         for k, v in (data.get("global_parameters") or {}).items()
         if _maybe_num(v) is not None
     }
+    state.diagnostics = data.get("diagnostics") or {}
 
     # Inject process/simulation from the active environment; process remains an
     # environment concern while the YAML describes the design/problem.

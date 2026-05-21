@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from core.compensation import has_miller_rc_compensation
+from diagnostics import build_causal_diagnostics
 from schemas.design_state import DesignState
 from simulator.ngspice import SimulationResult
 from specs.models import CircuitSpecModel, SpecRegistry
@@ -20,6 +21,7 @@ class RunArtifacts:
     netlist: Path
     sim_log: Path
     diagnostics: Path
+    causal_diagnostics: Path
     result_json: Path
 
 
@@ -57,15 +59,13 @@ class ArtifactWriter:
         netlist_path = output_dir / "netlist.cir"
         sim_log_path = output_dir / "sim_log.json"
         diagnostics_path = output_dir / "agent_diagnostics.json"
+        causal_diagnostics_path = output_dir / "causal_diagnostics.json"
         result_path = output_dir / "result.json"
 
-        state.to_yaml(design_state_path)
         netlist_path.write_text(netlist_str, encoding="utf-8")
 
         spec_model = self.spec_registry.select(state)
         sim_log = build_simulation_log(state, best_meta, sim_result, iteration, spec_model, flow_meta or {})
-        sim_log_path.write_text(json.dumps(sim_log, indent=2), encoding="utf-8")
-
         diagnostics = build_agent_diagnostics(
             state,
             best_meta,
@@ -75,16 +75,41 @@ class ArtifactWriter:
             spec_model,
             flow_meta or {},
         )
-        diagnostics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
-
         result = {
             "schema_version": "analogrf_ir.result.v0_1",
             "iteration": iteration,
             "status": diagnostics["status"],
             "measurements": sim_result.measurements,
             "artifacts": diagnostics["artifacts"],
+            "causal_summary": {
+                "failed_symptoms": [
+                    item["metric"]
+                    for item in diagnostics["causal_diagnostics"]["failure_symptom_analysis"]
+                    if item["status"] == "fail"
+                ],
+                "top_root_cause": (
+                    diagnostics["causal_diagnostics"]["root_cause_attribution"][0]
+                    if diagnostics["causal_diagnostics"]["root_cause_attribution"]
+                    else None
+                ),
+            },
         }
-        result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        state.diagnostics = {
+            "schema_version": "analogrf_ir.state_diagnostics.v0_1",
+            "iteration": iteration,
+            "simulation_log": sim_log,
+            "agent_diagnostics": diagnostics,
+            "causal_diagnostics": diagnostics["causal_diagnostics"],
+            "result": result,
+        }
+        state.to_yaml(design_state_path)
+        sim_log_path.write_text(json.dumps(state.diagnostics["simulation_log"], indent=2), encoding="utf-8")
+        diagnostics_path.write_text(json.dumps(state.diagnostics["agent_diagnostics"], indent=2), encoding="utf-8")
+        causal_diagnostics_path.write_text(
+            json.dumps(state.diagnostics["causal_diagnostics"], indent=2),
+            encoding="utf-8",
+        )
+        result_path.write_text(json.dumps(state.diagnostics["result"], indent=2), encoding="utf-8")
 
         return RunArtifacts(
             output_dir=output_dir,
@@ -92,6 +117,7 @@ class ArtifactWriter:
             netlist=netlist_path,
             sim_log=sim_log_path,
             diagnostics=diagnostics_path,
+            causal_diagnostics=causal_diagnostics_path,
             result_json=result_path,
         )
 
@@ -212,6 +238,14 @@ def build_agent_diagnostics(
         name: spec_model.target_status(name, target, measurements, perf_est)
         for name, target in state.targets.items()
     }
+    causal_diagnostics = build_causal_diagnostics(
+        state=state,
+        best_meta=best_meta,
+        sim_result=sim_result,
+        target_status=target_status,
+        spec_model=spec_model,
+        flow_meta=flow_meta,
+    )
     failed_targets = [name for name, item in target_status.items() if item["status"] == "fail"]
     unverified_targets = [name for name, item in target_status.items() if item["status"] == "unverified"]
     top_losses = _top_items(loss_breakdown, limit=8)
@@ -254,12 +288,14 @@ def build_agent_diagnostics(
         },
         "model_mismatch": mismatches,
         "devices": devices,
+        "causal_diagnostics": causal_diagnostics,
         "diagnosis": _diagnosis_items(state, target_status, top_losses, mismatches, devices),
         "artifacts": {
             "design_state": "design_state.yaml",
             "netlist": "netlist.cir",
             "sim_log": "sim_log.json",
             "agent_diagnostics": "agent_diagnostics.json",
+            "causal_diagnostics": "causal_diagnostics.json",
             "result": "result.json",
         },
     }

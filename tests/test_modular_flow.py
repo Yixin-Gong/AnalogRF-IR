@@ -238,8 +238,65 @@ def test_artifact_writer_emits_result_json(tmp_path):
 
     assert artifacts.design_state.exists()
     assert artifacts.netlist.exists()
+    assert artifacts.causal_diagnostics.exists()
+    assert "!!python" not in artifacts.design_state.read_text(encoding="utf-8")
     payload = json.loads(artifacts.result_json.read_text(encoding="utf-8"))
     assert payload["status"]["spec_pass"] is True
+    state_payload = load_yaml_mapping(artifacts.design_state)
+    assert "diagnostics" in state_payload
+    assert state_payload["diagnostics"]["result"]["status"]["spec_pass"] is True
+    assert state_payload["diagnostics"]["causal_diagnostics"]["dependency_graph"]["nodes"]
+
+
+def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 62.0,
+            "unity_gain_bandwidth": 9.0e7,
+            "phase_margin": 18.0,
+            "slew_rate": 5.0e7,
+            "output_swing": 0.7,
+            "icmr_min": 0.8,
+            "icmr_max": 0.7,
+            "total_power": 2.0e-4,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 62.0,
+            "unity_gain_bandwidth": 9.0e7,
+            "phase_margin": 18.0,
+            "slew_rate": 5.0e7,
+            "output_swing": 0.7,
+            "icmr_min": 0.8,
+            "icmr_max": 0.7,
+            "power": 2.0e-4,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"pm_deficit": 1.0},
+    }
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=2,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+
+    state_payload = load_yaml_mapping(artifacts.design_state)
+    causal = state_payload["diagnostics"]["causal_diagnostics"]
+    result_view = state_payload["diagnostics"]["result"]
+
+    assert "phase_margin" in result_view["status"]["failed_targets"]
+    assert any(item["metric"] == "phase_margin" for item in causal["failure_symptom_analysis"])
+    assert causal["root_cause_attribution"]
+    assert causal["counterfactual_predictions"]
+    assert causal["suggested_validation_experiments"][0]["sweep"] == ["-10%", "-5%", "+5%", "+10%"]
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

@@ -243,12 +243,15 @@ Each run writes a new directory under:
 Typical artifacts:
 
 ```text
-design_state.yaml          Updated schema and transistor state
+design_state.yaml          Updated schema, transistor state, simulation outputs, and diagnostics
 netlist.cir                Generated SPICE netlist
-sim_log.json               Full structured optimizer and ngspice log
-agent_diagnostics.json     Agent-oriented diagnostics and suggestions
-result.json                Compact final status and measured specs
+sim_log.json               Derived view of diagnostics.simulation_log
+agent_diagnostics.json     Derived view of diagnostics.agent_diagnostics
+causal_diagnostics.json    Derived view of diagnostics.causal_diagnostics
+result.json                Derived compact view of diagnostics.result
 ```
+
+`design_state.yaml` is the unique state source after a run. The JSON files are convenience views generated from the `diagnostics` section in that schema. Causal diagnostics include a directed dependency graph, failure symptoms, ranked causal paths, root-cause attribution scores, counterfactual predictions, and SPICE perturbation experiments for validation.
 
 ## Tests
 
