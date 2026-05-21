@@ -8,7 +8,9 @@ from core.rule_registry import list_rules
 from core.validator import Validator
 from diagnostics import apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
+from flow.agent_loop import DiagnosticAgentLoop
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
+from main import DEFAULT_AGENT_MAX_ITERATIONS, _parse_args
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
@@ -589,6 +591,77 @@ def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeyp
     assert command["llm_planner"]["status"] == "ok"
     assert command["args"]["selected_actions"][0]["decision"] == "skip"
     assert command["args"]["custom_actions"][0]["knob"] == "global.I_tail"
+
+
+def test_agent_loop_defaults_to_twenty_iterations_and_routes_on_stop_reason():
+    args = _parse_args([])
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+
+    assert DEFAULT_AGENT_MAX_ITERATIONS == 20
+    assert args.agent_rounds == 20
+    assert loop._route_after_diagnostics({"stop_reason": "spec satisfied"}) == "stop"
+    assert loop._route_after_diagnostics({"stop_reason": "maximum iterations reached"}) == "stop"
+    assert loop._route_after_diagnostics({"stop_reason": "", "round_index": 19, "max_rounds": 20}) == "write_command"
+
+
+def test_agent_loop_read_diagnostics_sets_stop_reason(tmp_path):
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.emit = lambda _msg: None
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["result"] = {"status": {"spec_pass": True, "failed_targets": []}}
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+
+    output = loop._read_schema_diagnostics_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 4,
+            "max_rounds": 20,
+        }
+    )
+
+    assert output["stop_reason"] == "spec satisfied"
+    assert output["last_spec_pass"] is True
+
+    state.diagnostics["result"] = {"status": {"spec_pass": False, "failed_targets": ["dc_gain"]}}
+    state.to_yaml(state_path)
+    output = loop._read_schema_diagnostics_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 20,
+            "max_rounds": 20,
+        }
+    )
+
+    assert output["stop_reason"] == "maximum iterations reached"
+    assert output["last_failed_targets"] == ["dc_gain"]
+
+
+def test_agent_loop_final_log_outputs_result_summary():
+    messages = []
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.emit = messages.append
+
+    loop._print_final_result(
+        {
+            "stop_reason": "spec satisfied",
+            "max_rounds": 20,
+            "rounds": [
+                {
+                    "artifact_dir": "runs/iter_003",
+                    "spec_pass": True,
+                    "failed_targets": [],
+                    "best_loss": 0.0,
+                }
+            ],
+        }
+    )
+
+    log = "\n".join(messages)
+    assert "LangGraph final result" in log
+    assert "stop_reason: spec satisfied" in log
+    assert "completed_iterations: 1" in log
+    assert "spec_pass: True" in log
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

@@ -76,6 +76,7 @@ class DiagnosticAgentLoop:
             raise RuntimeError("Diagnostic agent loop did not run any rounds")
         if final_state.get("stop_reason"):
             self.emit(f"       Agent graph stopped: {final_state['stop_reason']}")
+        self._print_final_result(final_state)
         return AgentLoopResult(rounds=final_state.get("rounds", []), final_result=self._final_result)
 
     def _build_graph(self):
@@ -143,10 +144,16 @@ class DiagnosticAgentLoop:
                 for item in tuning.get("by_failure", [])
             ],
         }
+        stop_reason = ""
+        if bool(status.get("spec_pass", False)):
+            stop_reason = "spec satisfied"
+        elif int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
+            stop_reason = "maximum iterations reached"
         return {
             "agent_model": agent_model,
             "last_spec_pass": bool(status.get("spec_pass", False)),
             "last_failed_targets": list(status.get("failed_targets", [])),
+            "stop_reason": stop_reason,
         }
 
     def _execute_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
@@ -197,9 +204,7 @@ class DiagnosticAgentLoop:
         }
 
     def _route_after_diagnostics(self, state: AgentGraphState) -> str:
-        if state.get("last_spec_pass"):
-            return "stop"
-        if int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
+        if state.get("stop_reason"):
             return "stop"
         return "write_command"
 
@@ -247,3 +252,17 @@ class DiagnosticAgentLoop:
             self.emit(f"         {knobs}: new_initial={values}")
         for action in application.get("skipped_actions", []):
             self.emit(f"         skipped {action.get('knob')}: {action.get('reason')}")
+
+    def _print_final_result(self, state: AgentGraphState) -> None:
+        rounds = state.get("rounds", [])
+        final_round = rounds[-1] if rounds else {}
+        self.emit("\n" + "=" * 70)
+        self.emit("  LangGraph final result")
+        self.emit("=" * 70)
+        self.emit(f"       stop_reason: {state.get('stop_reason') or 'not set'}")
+        self.emit(f"       completed_iterations: {len(rounds)}")
+        self.emit(f"       max_iterations: {state.get('max_rounds')}")
+        self.emit(f"       final_artifacts: {final_round.get('artifact_dir', state.get('last_artifact_dir', ''))}")
+        self.emit(f"       spec_pass: {final_round.get('spec_pass', state.get('last_spec_pass', False))}")
+        self.emit(f"       failed_targets: {final_round.get('failed_targets', state.get('last_failed_targets', []))}")
+        self.emit(f"       best_loss: {final_round.get('best_loss')}")

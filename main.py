@@ -10,6 +10,9 @@ from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from topologies.legacy import build_design_state
 
 
+DEFAULT_AGENT_MAX_ITERATIONS = 20
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="AnalogRF-IR v0.1 modular analog/RF optimizer")
     parser.add_argument("--env", default="environment.yaml", help="Environment YAML path")
@@ -23,8 +26,8 @@ def _parse_args(argv=None):
     parser.add_argument(
         "--agent-rounds",
         type=int,
-        default=1,
-        help="Run diagnosis-guided schema tuning for N rounds",
+        default=DEFAULT_AGENT_MAX_ITERATIONS,
+        help="Maximum diagnosis-guided schema tuning iterations; stops early when all specs pass",
     )
     parser.add_argument("--llm-provider", default="deepseek", help="LLM planner provider for LangGraph rounds")
     parser.add_argument("--llm-model", default="", help="LLM planner model, defaults to deepseek-v4-flash")

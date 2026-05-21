@@ -189,12 +189,14 @@ python main.py \
   --generations <number_of_generations> \
   --pop-size <population_size> \
   --seed <integer_seed> \
-  --agent-rounds <number_of_agent_rounds> \
+  --agent-rounds 20 \
   --llm-provider deepseek \
   --llm-model deepseek-v4-flash
 ```
 
 Set `DEEPSEEK_API_KEY` before running LLM-guided rounds. The DeepSeek planner uses the OpenAI-compatible `/chat/completions` endpoint with `https://api.deepseek.com` by default. If the key is not set, the flow records an LLM fallback status and keeps the deterministic schema command so local tests remain runnable.
+
+The default LLM-guided stopping condition is spec satisfaction, with a maximum of 20 iterations. Override the maximum with `--agent-rounds <maximum_iterations>`.
 
 The multi-round flow is orchestrated with LangGraph. The graph keeps execution and LLM file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, `llm_write_schema_command` calls the DeepSeek schema planner, and `execute_schema_command` executes that command before writing the next input schema under `runs/agent_loop_*/`.
 
