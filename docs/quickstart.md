@@ -54,6 +54,29 @@ python main.py \
   --agent-rounds 1
 ```
 
+## Configure DeepSeek
+
+LLM-guided agent rounds use `DEEPSEEK_API_KEY` by default. You can provide the
+key through an environment variable:
+
+```bash
+export DEEPSEEK_API_KEY=<your-key>
+python main.py --agent-rounds 20 --llm-provider deepseek --llm-model deepseek-v4-pro
+```
+
+For one-off runs, the CLI can also load the key from a file, standard input, or
+an explicit argument:
+
+```bash
+python main.py --llm-api-key-file ~/.config/analogrf-ir/deepseek.key --agent-rounds 20
+printf '%s\n' "$DEEPSEEK_API_KEY" | python main.py --llm-api-key-stdin --agent-rounds 20
+python main.py --llm-api-key <your-key> --agent-rounds 20
+```
+
+`--llm-api-key-file` and `--llm-api-key-stdin` are preferred for regular use
+because command-line arguments can be captured by shell history or process
+inspection.
+
 ## Import SPICE
 
 Convert a supported flat MOS netlist to YAML:

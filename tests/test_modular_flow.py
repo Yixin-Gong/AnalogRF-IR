@@ -1,4 +1,5 @@
 import json
+import os
 
 from asir.capabilities import detect_circuit_capabilities
 from core.compensation import has_miller_rc_compensation
@@ -10,7 +11,7 @@ from diagnostics import apply_attribution_guided_tuning, execute_tuning_tool_com
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from flow.agent_loop import DiagnosticAgentLoop
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
-from main import DEFAULT_AGENT_MAX_ITERATIONS, _parse_args
+from main import DEFAULT_AGENT_MAX_ITERATIONS, _configure_llm_api_key, _parse_args
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
@@ -602,6 +603,42 @@ def test_agent_loop_defaults_to_twenty_iterations_and_routes_on_stop_reason():
     assert loop._route_after_diagnostics({"stop_reason": "spec satisfied"}) == "stop"
     assert loop._route_after_diagnostics({"stop_reason": "maximum iterations reached"}) == "stop"
     assert loop._route_after_diagnostics({"stop_reason": "", "round_index": 19, "max_rounds": 20}) == "write_command"
+
+
+def test_llm_api_key_sources_configure_selected_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    direct_args = _parse_args(["--llm-api-key", "direct-key"])
+    _configure_llm_api_key(direct_args)
+    assert direct_args.llm_api_key_env == "DEEPSEEK_API_KEY"
+    assert direct_args.llm_api_key == "direct-key"
+    assert direct_args.llm_api_key_file == ""
+    assert direct_args.llm_api_key_stdin is False
+    assert os.environ["DEEPSEEK_API_KEY"] == "direct-key"
+
+    key_file = tmp_path / "deepseek.key"
+    key_file.write_text("file-key\n", encoding="utf-8")
+    file_args = _parse_args(["--llm-api-key-env", "CUSTOM_KEY", "--llm-api-key-file", str(key_file)])
+    _configure_llm_api_key(file_args)
+    assert os.environ["CUSTOM_KEY"] == "file-key"
+
+
+def test_llm_api_key_stdin_and_mutual_exclusion(monkeypatch):
+    class FakeStdin:
+        def read(self):
+            return "stdin-key\n"
+
+    monkeypatch.delenv("STDIN_KEY", raising=False)
+    monkeypatch.setattr("main.sys.stdin", FakeStdin())
+    stdin_args = _parse_args(["--llm-api-key-env", "STDIN_KEY", "--llm-api-key-stdin"])
+    _configure_llm_api_key(stdin_args)
+    assert os.environ["STDIN_KEY"] == "stdin-key"
+
+    try:
+        _parse_args(["--llm-api-key", "one", "--llm-api-key-file", "two"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("mutually exclusive API key sources should fail")
 
 
 def test_agent_loop_read_diagnostics_sets_stop_reason(tmp_path):

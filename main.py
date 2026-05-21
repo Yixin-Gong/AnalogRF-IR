@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+from pathlib import Path
 
 from flow.agent_loop import DiagnosticAgentLoop
 from flow.llm_planner import LLMPlannerConfig
@@ -33,6 +35,22 @@ def _parse_args(argv=None):
     parser.add_argument("--llm-model", default="", help="LLM planner model, defaults to deepseek-v4-flash")
     parser.add_argument("--llm-base-url", default="", help="OpenAI-compatible LLM base URL")
     parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable containing the LLM API key")
+    api_key_group = parser.add_mutually_exclusive_group()
+    api_key_group.add_argument(
+        "--llm-api-key",
+        default="",
+        help="LLM API key value. Prefer --llm-api-key-file or --llm-api-key-env for regular use.",
+    )
+    api_key_group.add_argument(
+        "--llm-api-key-file",
+        default="",
+        help="Path to a file containing the LLM API key.",
+    )
+    api_key_group.add_argument(
+        "--llm-api-key-stdin",
+        action="store_true",
+        help="Read the LLM API key from standard input.",
+    )
     parser.add_argument("--ngspice-bin", default="", help="Override ngspice executable path")
     parser.add_argument(
         "--tail-current-mirror",
@@ -57,24 +75,39 @@ def _parse_args(argv=None):
     return parser.parse_args(argv)
 
 
+def _configure_llm_api_key(args) -> None:
+    key = ""
+    if args.llm_api_key:
+        key = args.llm_api_key
+    elif args.llm_api_key_file:
+        key = Path(args.llm_api_key_file).read_text(encoding="utf-8")
+    elif args.llm_api_key_stdin:
+        key = sys.stdin.read()
+
+    key = key.strip()
+    if key:
+        os.environ[args.llm_api_key_env] = key
+
+
 def main(argv=None) -> int:
     args = _parse_args(argv)
-    config = FlowConfig(
-        env=args.env,
-        schema=args.schema,
-        spice=args.spice or None,
-        spice_yaml_out=args.spice_yaml_out or None,
-        topology=args.topology,
-        pop_size=args.pop_size,
-        generations=args.generations,
-        seed=args.seed,
-        skip_dc_repair=bool(args.skip_dc_repair),
-        skip_comp_tune=bool(args.skip_comp_tune),
-        ngspice_bin=args.ngspice_bin or None,
-        tail_current_mirror=bool(args.tail_current_mirror),
-        run_asir=not bool(args.no_asir),
-    )
     try:
+        _configure_llm_api_key(args)
+        config = FlowConfig(
+            env=args.env,
+            schema=args.schema,
+            spice=args.spice or None,
+            spice_yaml_out=args.spice_yaml_out or None,
+            topology=args.topology,
+            pop_size=args.pop_size,
+            generations=args.generations,
+            seed=args.seed,
+            skip_dc_repair=bool(args.skip_dc_repair),
+            skip_comp_tune=bool(args.skip_comp_tune),
+            ngspice_bin=args.ngspice_bin or None,
+            tail_current_mirror=bool(args.tail_current_mirror),
+            run_asir=not bool(args.no_asir),
+        )
         if args.agent_rounds > 1:
             DiagnosticAgentLoop(
                 config=config,
