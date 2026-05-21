@@ -7,7 +7,8 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from diagnostics import execute_tuning_tool_commands, write_tuning_tool_command
+from diagnostics import execute_tuning_tool_commands
+from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
 from frontends.design_input import StateBuilder
 from schemas.design_state import DesignState
@@ -33,6 +34,7 @@ class AgentGraphState(TypedDict, total=False):
     last_spec_pass: bool
     last_failed_targets: list[str]
     agent_model: dict[str, Any]
+    llm_planner: dict[str, Any]
     last_tool_command: dict[str, Any]
     last_tuning_application: dict[str, Any]
     stop_reason: str
@@ -45,11 +47,13 @@ class DiagnosticAgentLoop:
         config: FlowConfig,
         rounds: int,
         legacy_state_builder: StateBuilder | None = None,
+        llm_config: LLMPlannerConfig | None = None,
         emit: Emit | None = None,
     ) -> None:
         self.config = config
         self.rounds = max(1, int(rounds))
         self.legacy_state_builder = legacy_state_builder
+        self.llm_config = llm_config or LLMPlannerConfig.from_env()
         self.emit = emit or (lambda _msg: None)
         self._final_result: FlowResult | None = None
 
@@ -79,7 +83,7 @@ class DiagnosticAgentLoop:
         graph.add_node("execute_main_flow", self._execute_main_flow_node)
         graph.add_node("read_schema_diagnostics", self._read_schema_diagnostics_node)
         graph.add_node("llm_write_schema_command", self._llm_write_schema_command_node)
-        graph.add_node("agent_edit_schema", self._agent_edit_schema_node)
+        graph.add_node("execute_schema_command", self._execute_schema_command_node)
         graph.set_entry_point("execute_main_flow")
         graph.add_edge("execute_main_flow", "read_schema_diagnostics")
         graph.add_conditional_edges(
@@ -87,9 +91,9 @@ class DiagnosticAgentLoop:
             self._route_after_diagnostics,
             {"write_command": "llm_write_schema_command", "stop": END},
         )
-        graph.add_edge("llm_write_schema_command", "agent_edit_schema")
+        graph.add_edge("llm_write_schema_command", "execute_schema_command")
         graph.add_conditional_edges(
-            "agent_edit_schema",
+            "execute_schema_command",
             self._route_after_schema_edit,
             {"execute": "execute_main_flow", "stop": END},
         )
@@ -145,8 +149,8 @@ class DiagnosticAgentLoop:
             "last_failed_targets": list(status.get("failed_targets", [])),
         }
 
-    def _agent_edit_schema_node(self, state: AgentGraphState) -> AgentGraphState:
-        self.emit("       LangGraph node: agent_edit_schema")
+    def _execute_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
+        self.emit("       LangGraph node: execute_schema_command")
         schema_state = DesignState.from_yaml(Path(state["last_design_state"]))
         round_index = int(state["round_index"])
         application = execute_tuning_tool_commands(schema_state, round_index=round_index)
@@ -170,20 +174,27 @@ class DiagnosticAgentLoop:
         self.emit("       LangGraph node: llm_write_schema_command")
         design_state_path = Path(state["last_design_state"])
         schema_state = DesignState.from_yaml(design_state_path)
-        command = write_tuning_tool_command(
+        planner = DeepSeekSchemaPlanner(self.llm_config)
+        result = planner.write_command(
             schema_state,
             round_index=int(state["round_index"]),
-            author="deterministic_llm_schema_adapter",
-            max_primary_actions_per_failure=3,
-            allowed_priorities=["primary"],
+            agent_model=state.get("agent_model", {}),
         )
+        command = result.command
         schema_state.to_yaml(design_state_path)
         self.emit(
             "       Wrote schema command: "
             f"{command['id']} with {len(command['args'].get('available_actions', []))} available actions "
             f"and {len(command['args'].get('selected_actions', []))} selected actions"
         )
-        return {"last_tool_command": command}
+        self.emit(
+            "       LLM planner: "
+            f"{self.llm_config.provider}/{self.llm_config.model} status={result.status} reason={result.reason}"
+        )
+        return {
+            "last_tool_command": command,
+            "llm_planner": command.get("llm_planner", {}),
+        }
 
     def _route_after_diagnostics(self, state: AgentGraphState) -> str:
         if state.get("last_spec_pass"):

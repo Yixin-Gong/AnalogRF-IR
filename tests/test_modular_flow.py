@@ -7,6 +7,7 @@ from core.environment import default_environment
 from core.rule_registry import list_rules
 from core.validator import Validator
 from diagnostics import apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
+from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
@@ -492,6 +493,102 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     assert m5_gm_id.range.min == 8.0
     assert m5_gm_id.range.max == 18.0
     assert application["skipped_actions"][0]["llm_reason"] == "Hold input gm/ID for this round."
+
+
+def test_deepseek_schema_planner_writes_fallback_command_without_api_key(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["causal_diagnostics"] = {
+        "attribution_guided_tuning": {
+            "by_failure": [
+                {
+                    "actions": [
+                        {
+                            "action_id": "dc_gain_01_M3_L_increase",
+                            "metric": "dc_gain",
+                            "rank": 1,
+                            "priority": "primary",
+                            "knob": "M3.L",
+                            "apply_to": ["M3.L", "M4.L"],
+                            "direction": "increase",
+                            "suggested_next_value": 5.0e-7,
+                            "rationale": "Increase mirror load resistance.",
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+
+    result = DeepSeekSchemaPlanner(
+        LLMPlannerConfig(provider="deepseek", model="deepseek-v4-flash", api_key_env="DEEPSEEK_API_KEY")
+    ).write_command(state, round_index=1, agent_model={"failed_targets": ["dc_gain"]})
+
+    command = result.command
+    assert result.used_llm is False
+    assert command["llm_planner"]["status"] == "fallback"
+    assert command["args"]["selected_actions"][0]["action_id"] == "dc_gain_01_M3_L_increase"
+    assert state.diagnostics["agent_tool_commands"][0]["id"] == command["id"]
+
+
+def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "unit-test-key")
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["causal_diagnostics"] = {
+        "attribution_guided_tuning": {
+            "by_failure": [
+                {
+                    "actions": [
+                        {
+                            "action_id": "gbw_01_M1_gm_id_increase",
+                            "metric": "unity_gain_bandwidth",
+                            "rank": 1,
+                            "priority": "primary",
+                            "knob": "M1.gm_id",
+                            "apply_to": ["M1.gm_id", "M2.gm_id"],
+                            "direction": "increase",
+                            "suggested_next_value": 18.0,
+                            "rationale": "Increase input pair transconductance.",
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+
+    class FakePlanner(DeepSeekSchemaPlanner):
+        def _call_planner(self, command, agent_model, api_key):
+            return {
+                "selected_actions": [
+                    {
+                        "action_id": "gbw_01_M1_gm_id_increase",
+                        "decision": "skip",
+                        "reason": "Preserve headroom in this round.",
+                        "overrides": {},
+                    }
+                ],
+                "custom_actions": [
+                    {
+                        "action_id": "manual_I_tail_increase",
+                        "decision": "apply",
+                        "knob": "global.I_tail",
+                        "suggested_unclipped_value": 6.0e-5,
+                        "range_update": {"type": "expand_upper_bound", "suggested_max": 3.0e-4},
+                        "reason": "Raise bias current to improve bandwidth.",
+                    }
+                ],
+                "rationale": "Use one direct bias move.",
+            }
+
+    result = FakePlanner(
+        LLMPlannerConfig(provider="deepseek", model="deepseek-v4-flash", api_key_env="DEEPSEEK_API_KEY")
+    ).write_command(state, round_index=2, agent_model={"failed_targets": ["unity_gain_bandwidth"]})
+
+    command = result.command
+    assert result.used_llm is True
+    assert command["llm_planner"]["status"] == "ok"
+    assert command["args"]["selected_actions"][0]["decision"] == "skip"
+    assert command["args"]["custom_actions"][0]["knob"] == "global.I_tail"
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

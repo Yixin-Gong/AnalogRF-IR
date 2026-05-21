@@ -5,6 +5,7 @@ import argparse
 import sys
 
 from flow.agent_loop import DiagnosticAgentLoop
+from flow.llm_planner import LLMPlannerConfig
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from topologies.legacy import build_design_state
 
@@ -25,6 +26,10 @@ def _parse_args(argv=None):
         default=1,
         help="Run diagnosis-guided schema tuning for N rounds",
     )
+    parser.add_argument("--llm-provider", default="deepseek", help="LLM planner provider for LangGraph rounds")
+    parser.add_argument("--llm-model", default="", help="LLM planner model, defaults to deepseek-v4-flash")
+    parser.add_argument("--llm-base-url", default="", help="OpenAI-compatible LLM base URL")
+    parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable containing the LLM API key")
     parser.add_argument("--ngspice-bin", default="", help="Override ngspice executable path")
     parser.add_argument(
         "--tail-current-mirror",
@@ -72,6 +77,12 @@ def main(argv=None) -> int:
                 config=config,
                 rounds=args.agent_rounds,
                 legacy_state_builder=build_design_state,
+                llm_config=LLMPlannerConfig.from_env(
+                    provider=args.llm_provider,
+                    model=args.llm_model or None,
+                    base_url=args.llm_base_url or None,
+                    api_key_env=args.llm_api_key_env,
+                ),
                 emit=print,
             ).run()
         else:

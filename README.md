@@ -189,10 +189,14 @@ python main.py \
   --generations <number_of_generations> \
   --pop-size <population_size> \
   --seed <integer_seed> \
-  --agent-rounds <number_of_agent_rounds>
+  --agent-rounds <number_of_agent_rounds> \
+  --llm-provider deepseek \
+  --llm-model deepseek-v4-flash
 ```
 
-The multi-round flow is orchestrated with LangGraph. The graph keeps execution and agent file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, `llm_write_schema_command` writes a schema-level tool command, and `agent_edit_schema` executes that command before writing the next input schema under `runs/agent_loop_*/`.
+Set `DEEPSEEK_API_KEY` before running LLM-guided rounds. The DeepSeek planner uses the OpenAI-compatible `/chat/completions` endpoint with `https://api.deepseek.com` by default. If the key is not set, the flow records an LLM fallback status and keeps the deterministic schema command so local tests remain runnable.
+
+The multi-round flow is orchestrated with LangGraph. The graph keeps execution and LLM file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, `llm_write_schema_command` calls the DeepSeek schema planner, and `execute_schema_command` executes that command before writing the next input schema under `runs/agent_loop_*/`.
 
 The LLM interface is intentionally schema-native. The command is written to `diagnostics.agent_tool_commands[]` with `args.available_actions`, editable `args.selected_actions`, and optional `args.custom_actions`. An LLM can select individual action IDs, skip actions, override fine-grained fields such as `apply_to`, `suggested_next_value`, `agent_step_fraction`, `range_update`, `direction`, and rationale, or add custom per-knob actions with explicit values and range updates. The executor only applies schema actions with `decision: apply`.
 
