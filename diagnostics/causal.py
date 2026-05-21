@@ -827,7 +827,15 @@ def _rank_tuning_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ranked = sorted(actions, key=lambda item: (priority_order.get(item["priority"], 9), -float(item["score"])))
     for idx, action in enumerate(ranked, start=1):
         action["rank"] = idx
+        action["action_id"] = _action_id(action, idx)
     return ranked
+
+
+def _action_id(action: dict[str, Any], rank: int) -> str:
+    metric = str(action.get("metric", "metric")).replace(".", "_")
+    knob = str(action.get("knob", "knob")).replace(".", "_")
+    direction = str(action.get("direction", "tune")).replace(".", "_")
+    return f"{metric}_{rank:02d}_{knob}_{direction}"
 
 
 def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[str, Any]:

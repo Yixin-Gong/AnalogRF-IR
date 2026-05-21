@@ -6,7 +6,7 @@ from asir.profiles import select_circuit_profile
 from core.environment import default_environment
 from core.rule_registry import list_rules
 from core.validator import Validator
-from diagnostics import apply_attribution_guided_tuning
+from diagnostics import apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
@@ -369,6 +369,7 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert "device.M5.ro" not in gain_path
     assert causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
     assert primary_action["knob"] == "M3.L"
+    assert primary_action["action_id"]
     assert primary_action["direction"] == "increase"
     assert primary_action["apply_to"] == ["M3.L", "M4.L"]
     assert primary_action["range_update"]["type"] == "expand_upper_bound"
@@ -383,6 +384,114 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert m3_l.initial > 5.0e-7
     assert m4_l.initial == m3_l.initial
     assert m1_gm_id.initial > 15.0
+
+
+def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 34.0,
+            "unity_gain_bandwidth": 2.0e8,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "total_power": 5.0e-5,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 34.0,
+            "unity_gain_bandwidth": 2.0e8,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "power": 5.0e-5,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"gain_deficit": 1.0},
+    }
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"__global__": {}},
+            "transistor_params": {
+                "M1": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M2": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 4.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M4": {"gm": 2.0e-4, "gds": 3.5e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M5": {"gm": 3.0e-4, "gds": 8.0e-5, "id": 4.0e-5, "vds": 0.15, "vdsat": 0.145, "region": "saturation"},
+            },
+        },
+    )
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=4,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+    state = build_design_state_from_yaml(load_yaml_mapping(artifacts.design_state), default_environment())
+    available = state.diagnostics["causal_diagnostics"]["attribution_guided_tuning"]["by_failure"][0]["actions"]
+    m3_action = next(action for action in available if action["knob"] == "M3.L")
+    m1_action = next(action for action in available if action["knob"] == "M1.gm_id")
+
+    command = write_tuning_tool_command(
+        state,
+        round_index=1,
+        selected_actions=[
+            {
+                "action_id": m3_action["action_id"],
+                "decision": "apply",
+                "reason": "LLM chooses a smaller gain step to protect bandwidth.",
+                "overrides": {
+                    "suggested_unclipped_value": 6.0e-7,
+                    "range_update": {"type": "expand_upper_bound", "suggested_max": 6.5e-7},
+                },
+            },
+            {
+                "action_id": m1_action["action_id"],
+                "decision": "skip",
+                "reason": "Hold input gm/ID for this round.",
+                "overrides": {},
+            },
+        ],
+        custom_actions=[
+            {
+                "action_id": "manual_M5_gm_id_set",
+                "decision": "apply",
+                "knob": "M5.gm_id",
+                "suggested_unclipped_value": 12.0,
+                "range_update": {"type": "set_range", "min": 8.0, "max": 18.0},
+                "reason": "LLM directly lowers tail gm/ID after reading attribution evidence.",
+            }
+        ],
+    )
+    application = execute_tuning_tool_commands(state, round_index=1)
+    m3_l = next(dv for dv in state.design_variables if dv.device == "M3" and dv.variable == "L")
+    m4_l = next(dv for dv in state.design_variables if dv.device == "M4" and dv.variable == "L")
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    m5_gm_id = next(dv for dv in state.design_variables if dv.device == "M5" and dv.variable == "gm_id")
+
+    assert command["args"]["available_actions"]
+    assert command["args"]["custom_actions"][0]["action_id"] == "manual_M5_gm_id_set"
+    assert command["llm_editable_fields"]["decision_values"] == ["apply", "skip"]
+    assert "custom_actions" in command["llm_editable_fields"]
+    assert application["command_id"] == command["id"]
+    assert len(application["applied_actions"]) == 2
+    assert m3_l.initial == 6.0e-7
+    assert m4_l.initial == 6.0e-7
+    assert m3_l.range.max == 6.5e-7
+    assert m1_gm_id.initial == 15.0
+    assert m5_gm_id.initial == 12.0
+    assert m5_gm_id.range.min == 8.0
+    assert m5_gm_id.range.max == 18.0
+    assert application["skipped_actions"][0]["llm_reason"] == "Hold input gm/ID for this round."
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

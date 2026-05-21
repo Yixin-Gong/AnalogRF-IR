@@ -192,7 +192,9 @@ python main.py \
   --agent-rounds <number_of_agent_rounds>
 ```
 
-The multi-round flow is orchestrated with LangGraph. The graph keeps execution and agent file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, and `agent_edit_schema` applies primary schema-level tuning actions with agent-selected step sizes before writing the next input schema under `runs/agent_loop_*/`.
+The multi-round flow is orchestrated with LangGraph. The graph keeps execution and agent file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, `llm_write_schema_command` writes a schema-level tool command, and `agent_edit_schema` executes that command before writing the next input schema under `runs/agent_loop_*/`.
+
+The LLM interface is intentionally schema-native. The command is written to `diagnostics.agent_tool_commands[]` with `args.available_actions`, editable `args.selected_actions`, and optional `args.custom_actions`. An LLM can select individual action IDs, skip actions, override fine-grained fields such as `apply_to`, `suggested_next_value`, `agent_step_fraction`, `range_update`, `direction`, and rationale, or add custom per-knob actions with explicit values and range updates. The executor only applies schema actions with `decision: apply`.
 
 Import a SPICE netlist and write the generated schema:
 

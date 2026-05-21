@@ -7,10 +7,10 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from schemas.design_state import DesignState
-from diagnostics import apply_attribution_guided_tuning
+from diagnostics import execute_tuning_tool_commands, write_tuning_tool_command
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
 from frontends.design_input import StateBuilder
+from schemas.design_state import DesignState
 
 
 Emit = Callable[[str], None]
@@ -33,6 +33,7 @@ class AgentGraphState(TypedDict, total=False):
     last_spec_pass: bool
     last_failed_targets: list[str]
     agent_model: dict[str, Any]
+    last_tool_command: dict[str, Any]
     last_tuning_application: dict[str, Any]
     stop_reason: str
 
@@ -77,14 +78,16 @@ class DiagnosticAgentLoop:
         graph = StateGraph(AgentGraphState)
         graph.add_node("execute_main_flow", self._execute_main_flow_node)
         graph.add_node("read_schema_diagnostics", self._read_schema_diagnostics_node)
+        graph.add_node("llm_write_schema_command", self._llm_write_schema_command_node)
         graph.add_node("agent_edit_schema", self._agent_edit_schema_node)
         graph.set_entry_point("execute_main_flow")
         graph.add_edge("execute_main_flow", "read_schema_diagnostics")
         graph.add_conditional_edges(
             "read_schema_diagnostics",
             self._route_after_diagnostics,
-            {"edit_schema": "agent_edit_schema", "stop": END},
+            {"write_command": "llm_write_schema_command", "stop": END},
         )
+        graph.add_edge("llm_write_schema_command", "agent_edit_schema")
         graph.add_conditional_edges(
             "agent_edit_schema",
             self._route_after_schema_edit,
@@ -146,7 +149,7 @@ class DiagnosticAgentLoop:
         self.emit("       LangGraph node: agent_edit_schema")
         schema_state = DesignState.from_yaml(Path(state["last_design_state"]))
         round_index = int(state["round_index"])
-        application = apply_attribution_guided_tuning(schema_state, round_index=round_index)
+        application = execute_tuning_tool_commands(schema_state, round_index=round_index)
         self._print_application(application)
         if not application["applied_actions"]:
             return {
@@ -163,12 +166,31 @@ class DiagnosticAgentLoop:
             "stop_reason": "",
         }
 
+    def _llm_write_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
+        self.emit("       LangGraph node: llm_write_schema_command")
+        design_state_path = Path(state["last_design_state"])
+        schema_state = DesignState.from_yaml(design_state_path)
+        command = write_tuning_tool_command(
+            schema_state,
+            round_index=int(state["round_index"]),
+            author="deterministic_llm_schema_adapter",
+            max_primary_actions_per_failure=3,
+            allowed_priorities=["primary"],
+        )
+        schema_state.to_yaml(design_state_path)
+        self.emit(
+            "       Wrote schema command: "
+            f"{command['id']} with {len(command['args'].get('available_actions', []))} available actions "
+            f"and {len(command['args'].get('selected_actions', []))} selected actions"
+        )
+        return {"last_tool_command": command}
+
     def _route_after_diagnostics(self, state: AgentGraphState) -> str:
         if state.get("last_spec_pass"):
             return "stop"
         if int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
             return "stop"
-        return "edit_schema"
+        return "write_command"
 
     def _route_after_schema_edit(self, state: AgentGraphState) -> str:
         if state.get("stop_reason"):
