@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from flow.agent_loop import DiagnosticAgentLoop
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from topologies.legacy import build_design_state
 
@@ -18,6 +19,12 @@ def _parse_args(argv=None):
     parser.add_argument("--generations", type=int, default=50, help="NSGA-II generations")
     parser.add_argument("--pop-size", type=int, default=100, help="NSGA-II population size")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument(
+        "--agent-rounds",
+        type=int,
+        default=1,
+        help="Run diagnosis-guided schema tuning for N rounds",
+    )
     parser.add_argument("--ngspice-bin", default="", help="Override ngspice executable path")
     parser.add_argument(
         "--tail-current-mirror",
@@ -60,11 +67,19 @@ def main(argv=None) -> int:
         run_asir=not bool(args.no_asir),
     )
     try:
-        AnalogRFIRFlowRunner(
-            config=config,
-            legacy_state_builder=build_design_state,
-            emit=print,
-        ).run()
+        if args.agent_rounds > 1:
+            DiagnosticAgentLoop(
+                config=config,
+                rounds=args.agent_rounds,
+                legacy_state_builder=build_design_state,
+                emit=print,
+            ).run()
+        else:
+            AnalogRFIRFlowRunner(
+                config=config,
+                legacy_state_builder=build_design_state,
+                emit=print,
+            ).run()
     except RuntimeError as exc:
         print(f"\n[FATAL] {exc}")
         return 1

@@ -473,7 +473,9 @@ def _attribution_guided_tuning(
         actions = []
         for cause in [item for item in causes if metric in item.metrics][:3]:
             actions.extend(_tuning_actions_for_cause(state, metric, cause))
-        actions = _rank_tuning_actions(_dedupe_actions(actions))
+        actions = _dedupe_actions(actions)
+        actions = [_apply_agent_step(action, symptom) for action in actions]
+        actions = _rank_tuning_actions(actions)
         by_failure.append(
             {
                 "metric": metric,
@@ -826,6 +828,98 @@ def _rank_tuning_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for idx, action in enumerate(ranked, start=1):
         action["rank"] = idx
     return ranked
+
+
+def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[str, Any]:
+    direction = action.get("direction")
+    if direction == "set":
+        action["agent_step_basis"] = "explicit target formula"
+        return action
+    current = action.get("current_value")
+    bounds = action.get("range")
+    if current is None or direction not in {"increase", "decrease"}:
+        action["agent_step_basis"] = "no numeric current value"
+        return action
+
+    step = _agent_step_fraction(
+        metric=action.get("metric", ""),
+        variable=str(action.get("knob", "")).split(".")[-1],
+        priority=action.get("priority", ""),
+        score=float(action.get("score", 0.0) or 0.0),
+        symptom=symptom,
+    )
+    current_f = float(current)
+    sign = 1.0 if direction == "increase" else -1.0
+    raw_next = current_f * (1.0 + sign * step)
+    suggested = _clip_to_bounds(raw_next, bounds)
+    action["agent_step_fraction"] = step
+    action["agent_step_basis"] = "spec gap, attribution score, action priority, and schema bounds"
+    action["suggested_unclipped_value"] = raw_next
+    action["suggested_next_value"] = suggested
+    action["limit_status"] = _limit_status_from_suggestion(current_f, raw_next, suggested, bounds, direction)
+    range_update = _range_update_hint(bounds, direction, action["limit_status"], str(action.get("knob", "")).split(".")[-1], current_f, step)
+    if range_update:
+        action["range_update"] = range_update
+    elif "range_update" in action:
+        action.pop("range_update")
+    return action
+
+
+def _agent_step_fraction(metric: str, variable: str, priority: str, score: float, symptom: dict[str, Any]) -> float:
+    gap = _symptom_gap_fraction(symptom)
+    raw = gap * (0.55 + 0.85 * max(score, 0.0))
+    if priority == "secondary":
+        raw *= 0.75
+    elif priority == "guarded":
+        raw *= 0.45
+
+    min_step, max_step = {
+        "L": (0.08, 0.35),
+        "gm_id": (0.04, 0.25),
+        "I_tail": (0.04, 0.18),
+        "I_stage2": (0.04, 0.20),
+        "I_latch": (0.04, 0.20),
+        "Cc": (0.04, 0.30),
+        "Rz": (0.04, 0.25),
+    }.get(variable, (0.05, 0.20))
+    if metric in {"phase_margin"} and variable == "Cc":
+        max_step = 0.40
+    return round(max(min_step, min(raw, max_step)), 4)
+
+
+def _symptom_gap_fraction(symptom: dict[str, Any]) -> float:
+    rel = symptom.get("deviation_rel")
+    if rel is not None:
+        try:
+            return min(abs(float(rel)), 1.0)
+        except (TypeError, ValueError):
+            pass
+    dev = symptom.get("deviation_abs")
+    ref = symptom.get("min") if symptom.get("min") is not None else symptom.get("max")
+    try:
+        if dev is not None and ref not in (None, 0):
+            return min(abs(float(dev) / max(abs(float(ref)), 1e-30)), 1.0)
+    except (TypeError, ValueError):
+        pass
+    return 0.10
+
+
+def _limit_status_from_suggestion(
+    current: float,
+    raw_next: float,
+    suggested: float,
+    bounds: dict[str, Any] | None,
+    direction: str,
+) -> str:
+    if not bounds:
+        return "unbounded"
+    lo = float(bounds["min"])
+    hi = float(bounds["max"])
+    if direction == "increase" and raw_next > hi >= current:
+        return "suggestion_clipped_to_upper_bound"
+    if direction == "decrease" and raw_next < lo <= current:
+        return "suggestion_clipped_to_lower_bound"
+    return _limit_status(current, bounds, direction)
 
 
 def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1218,17 +1312,27 @@ def _limit_status(current: float | None, bounds: dict[str, Any] | None, directio
     return "within_range"
 
 
-def _range_update_hint(bounds: dict[str, Any] | None, direction: str, limit_status: str, variable: str) -> dict[str, Any] | None:
+def _range_update_hint(
+    bounds: dict[str, Any] | None,
+    direction: str,
+    limit_status: str,
+    variable: str,
+    current: float | None = None,
+    step_fraction: float | None = None,
+) -> dict[str, Any] | None:
     if not bounds:
         return None
     lo = float(bounds["min"])
     hi = float(bounds["max"])
-    if limit_status == "at_upper_bound" and direction == "increase":
-        scale = 1.5 if variable == "L" else 1.25
-        return {"type": "expand_upper_bound", "suggested_max": hi * scale}
-    if limit_status == "at_lower_bound" and direction == "decrease":
-        scale = 0.75 if lo > 0 else 0.0
-        return {"type": "expand_lower_bound", "suggested_min": lo * scale}
+    step = float(step_fraction if step_fraction is not None else 0.20)
+    anchor_hi = float(current) if current is not None and current > 0 else hi
+    anchor_lo = float(current) if current is not None and current > 0 else lo
+    if limit_status in {"at_upper_bound", "suggestion_clipped_to_upper_bound"} and direction == "increase":
+        multiplier = 1.0 + min(max(step * 1.5, 0.15), 0.60)
+        return {"type": "expand_upper_bound", "suggested_max": max(hi, anchor_hi * multiplier)}
+    if limit_status in {"at_lower_bound", "suggestion_clipped_to_lower_bound"} and direction == "decrease":
+        multiplier = 1.0 - min(max(step * 1.5, 0.10), 0.50)
+        return {"type": "expand_lower_bound", "suggested_min": max(0.0, min(lo, anchor_lo * multiplier))}
     return None
 
 

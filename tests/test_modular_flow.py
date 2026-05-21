@@ -6,6 +6,7 @@ from asir.profiles import select_circuit_profile
 from core.environment import default_environment
 from core.rule_registry import list_rules
 from core.validator import Validator
+from diagnostics import apply_attribution_guided_tuning
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
@@ -372,6 +373,16 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert primary_action["apply_to"] == ["M3.L", "M4.L"]
     assert primary_action["range_update"]["type"] == "expand_upper_bound"
     assert causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] == "M3.L"
+
+    application = apply_attribution_guided_tuning(state, round_index=1)
+    assert application["applied_actions"]
+    m3_l = next(dv for dv in state.design_variables if dv.device == "M3" and dv.variable == "L")
+    m4_l = next(dv for dv in state.design_variables if dv.device == "M4" and dv.variable == "L")
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    assert m3_l.range.max > 5.0e-7
+    assert m3_l.initial > 5.0e-7
+    assert m4_l.initial == m3_l.initial
+    assert m1_gm_id.initial > 15.0
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

@@ -177,6 +177,23 @@ python main.py \
   --skip-comp-tune
 ```
 
+Run diagnosis-guided schema tuning for multiple rounds:
+
+```bash
+cd <path/to/your/AnalogRF-IR>
+. .venv/bin/activate
+python main.py \
+  --env <path/to/your/environment.yaml> \
+  --schema <path/to/your/circuit_schema.yaml> \
+  --topology yaml \
+  --generations <number_of_generations> \
+  --pop-size <population_size> \
+  --seed <integer_seed> \
+  --agent-rounds <number_of_agent_rounds>
+```
+
+Each agent round reads `diagnostics.causal_diagnostics.attribution_guided_tuning` from the previous `design_state.yaml`, applies the primary schema-level tuning actions with agent-selected step sizes, writes the next input schema under `runs/agent_loop_*/`, and reruns optimization and ngspice.
+
 Import a SPICE netlist and write the generated schema:
 
 ```bash
