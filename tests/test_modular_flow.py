@@ -295,8 +295,70 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     assert "phase_margin" in result_view["status"]["failed_targets"]
     assert any(item["metric"] == "phase_margin" for item in causal["failure_symptom_analysis"])
     assert causal["root_cause_attribution"]
+    assert causal["agent_failure_attribution"]["by_failure"]
     assert causal["counterfactual_predictions"]
     assert causal["suggested_validation_experiments"][0]["sweep"] == ["-10%", "-5%", "+5%", "+10%"]
+
+
+def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 34.0,
+            "unity_gain_bandwidth": 2.0e8,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "total_power": 5.0e-5,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 34.0,
+            "unity_gain_bandwidth": 2.0e8,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "power": 5.0e-5,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"gain_deficit": 1.0},
+    }
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"__global__": {}},
+            "transistor_params": {
+                "M1": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M2": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 3.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M4": {"gm": 2.0e-4, "gds": 3.5e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M5": {"gm": 3.0e-4, "gds": 8.0e-5, "id": 4.0e-5, "vds": 0.15, "vdsat": 0.145, "region": "saturation"},
+            },
+        },
+    )
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=3,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+
+    causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
+    top = causal["root_cause_attribution"][0]
+    gain_path = causal["causal_paths"][0]["chain"]
+
+    assert top["node"] != "device.M5.ro"
+    assert "block.load_stage" in gain_path
+    assert "device.M5.ro" not in gain_path
+    assert causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

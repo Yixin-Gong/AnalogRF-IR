@@ -42,6 +42,7 @@ def build_causal_diagnostics(
     paths = _causal_paths(state, symptoms, causes, capabilities)
     predictions = _counterfactual_predictions(causes)
     experiments = _validation_experiments(causes)
+    attribution = _agent_failure_attribution(state, symptoms, causes, paths)
     return {
         "schema_version": "analogrf_ir.causal_diagnostics.v0_1",
         "method": "directional_dependency_graph_with_ranked_testable_hypotheses",
@@ -58,6 +59,7 @@ def build_causal_diagnostics(
         "failure_symptom_analysis": symptoms,
         "causal_paths": paths,
         "root_cause_attribution": [cause.__dict__ for cause in causes],
+        "agent_failure_attribution": attribution,
         "counterfactual_predictions": predictions,
         "suggested_validation_experiments": experiments,
         "validation_protocol": {
@@ -153,6 +155,18 @@ def _build_dependency_graph(
     for constraint in ("headroom", "stability_margin", "linearity"):
         nodes.append({"id": f"constraint.{constraint}", "type": "constraint", "label": constraint.replace("_", " ")})
 
+    for behavior in (
+        "input_transconductance",
+        "output_resistance",
+        "bias_headroom",
+        "dominant_pole",
+        "non_dominant_pole",
+        "compensation_zero",
+        "large_signal_charge",
+        "latch_regeneration",
+    ):
+        nodes.append({"id": f"behavior.{behavior}", "type": "circuit_behavior", "label": behavior.replace("_", " ")})
+
     metric_names = sorted(set(STANDARD_PERFORMANCE_METRICS) | set(target_status))
     for metric in metric_names:
         status = target_status.get(metric, {})
@@ -175,12 +189,20 @@ def _build_dependency_graph(
 
 def _metric_edges(capabilities) -> list[dict[str, str]]:
     edges = [
-        _edge("block.differential_pair", "metric.dc_gain", "high", "Input gm and first-stage output resistance set low-frequency gain."),
-        _edge("block.differential_pair", "metric.unity_gain_bandwidth", "high", "Input gm drives the gain-bandwidth product through the dominant capacitance."),
-        _edge("block.load_stage", "metric.dc_gain", "high", "Load-stage ro contributes directly to voltage gain."),
-        _edge("block.load_stage", "metric.phase_margin", "medium", "Load capacitance and resistance move non-dominant poles."),
+        _edge("block.differential_pair", "behavior.input_transconductance", "high", "Input-pair gm is the forward transconductance source."),
+        _edge("block.differential_pair", "behavior.dominant_pole", "medium", "First-stage resistance and capacitance can create the dominant pole."),
+        _edge("behavior.input_transconductance", "metric.dc_gain", "high", "Low-frequency gain scales with useful input transconductance."),
+        _edge("behavior.input_transconductance", "metric.unity_gain_bandwidth", "high", "UGBW scales with input gm over effective dominant capacitance."),
+        _edge("block.load_stage", "behavior.output_resistance", "high", "Load-stage ro contributes directly to voltage gain."),
+        _edge("behavior.output_resistance", "metric.dc_gain", "high", "Higher signal-path output resistance increases voltage gain."),
+        _edge("block.load_stage", "behavior.non_dominant_pole", "medium", "Load capacitance and resistance move non-dominant poles."),
+        _edge("behavior.non_dominant_pole", "metric.phase_margin", "high", "Moving the non-dominant pole toward unity gain reduces phase margin."),
         _edge("block.output_stage", "metric.output_swing", "high", "Output device VDSAT and bias define available swing."),
         _edge("block.output_stage", "metric.slew_rate", "high", "Output current charges or discharges the load capacitance."),
+        _edge("block.bias_network", "behavior.bias_headroom", "high", "Bias devices set stack voltage allocation and saturation margin."),
+        _edge("behavior.bias_headroom", "constraint.headroom", "high", "Insufficient bias headroom pushes devices toward triode or weak saturation."),
+        _edge("block.bias_network", "behavior.large_signal_charge", "medium", "Available bias current limits large-signal charging current."),
+        _edge("behavior.large_signal_charge", "metric.slew_rate", "high", "Slew rate is available current over effective capacitance."),
         _edge("constraint.headroom", "metric.output_swing", "high", "Headroom loss clips the output range."),
         _edge("constraint.headroom", "metric.dc_gain", "medium", "Devices leaving saturation reduce effective ro and gain."),
         _edge("constraint.stability_margin", "metric.phase_margin", "high", "Pole-zero separation directly determines phase margin."),
@@ -189,6 +211,9 @@ def _metric_edges(capabilities) -> list[dict[str, str]]:
     if capabilities.has("miller_capacitive_compensation"):
         edges.extend(
             [
+                _edge("block.compensation_network", "behavior.dominant_pole", "high", "Cc intentionally pulls the main pole to lower frequency."),
+                _edge("block.compensation_network", "behavior.compensation_zero", "high", "Rz places the compensation zero."),
+                _edge("behavior.compensation_zero", "constraint.stability_margin", "high", "Zero placement can cancel or reinforce phase lag."),
                 _edge("block.compensation_network", "metric.phase_margin", "high", "Cc/Rz control dominant pole and compensation zero."),
                 _edge("block.compensation_network", "metric.unity_gain_bandwidth", "high", "Increasing Cc lowers UGBW for fixed gm."),
                 _edge("block.compensation_network", "metric.slew_rate", "high", "Cc increases large-signal charge requirement."),
@@ -206,7 +231,8 @@ def _metric_edges(capabilities) -> list[dict[str, str]]:
         edges.extend(
             [
                 _edge("block.dynamic_latch", "metric.delay", "high", "Latch gm and capacitance set regeneration time."),
-                _edge("block.dynamic_latch", "metric.regeneration_time", "high", "Positive-feedback gm over load capacitance controls regeneration."),
+                _edge("block.dynamic_latch", "behavior.latch_regeneration", "high", "Positive-feedback gm over load capacitance controls regeneration."),
+                _edge("behavior.latch_regeneration", "metric.regeneration_time", "high", "Regeneration behavior sets the comparator decision time."),
                 _edge("block.dynamic_latch", "metric.energy", "medium", "Switched latch capacitance sets dynamic energy."),
             ]
         )
@@ -256,7 +282,7 @@ def _causal_paths(state: DesignState, symptoms: list[dict[str, Any]], causes: li
         if not metric_causes:
             continue
         for rank, cause in enumerate(metric_causes[:3], start=1):
-            chain = _path_chain_for_metric(metric, cause.node, capabilities)
+            chain = _path_chain_for_metric(state, metric, cause.node, capabilities)
             paths.append(
                 {
                     "metric": metric,
@@ -304,7 +330,9 @@ def _rank_root_causes(
             if lowest_input_gm:
                 add(f"device.{lowest_input_gm}.gm", metric, 0.58, "Input-pair gm is the forward gain source.", _device_support(state, lowest_input_gm))
             if weakest_headroom:
-                add(f"device.{weakest_headroom}.headroom", metric, 0.50, "Headroom loss can lower ro by pushing devices out of saturation.", _device_support(state, weakest_headroom))
+                add(f"device.{weakest_headroom}.headroom", metric, 0.50, "Headroom loss can lower gain indirectly by moving bias devices or signal devices away from saturation.", _device_support(state, weakest_headroom))
+            if capabilities.has("source_follower_regulation") and regulator:
+                add(f"device.{regulator}.gm", metric, 0.44, "Source-follower local feedback gm boosts effective output resistance.", _device_support(state, regulator))
         elif metric in {"unity_gain_bandwidth", "ugbw", "bandwidth"}:
             if lowest_input_gm:
                 add(f"device.{lowest_input_gm}.gm", metric, 0.82, "UGBW scales with useful input gm over dominant capacitance.", _device_support(state, lowest_input_gm))
@@ -362,6 +390,68 @@ def _rank_root_causes(
     return sorted(normalized, key=lambda cause: cause.score, reverse=True)
 
 
+def _agent_failure_attribution(
+    state: DesignState,
+    symptoms: list[dict[str, Any]],
+    causes: list[CandidateCause],
+    paths: list[dict[str, Any]],
+) -> dict[str, Any]:
+    by_failure = []
+    for symptom in symptoms:
+        metric = symptom["metric"]
+        metric_causes = [cause for cause in causes if metric in cause.metrics]
+        metric_paths = [path for path in paths if path["metric"] == metric]
+        top = metric_causes[:3]
+        by_failure.append(
+            {
+                "metric": metric,
+                "status": symptom["status"],
+                "observed_deviation": {
+                    "value": symptom.get("value"),
+                    "min": symptom.get("min"),
+                    "max": symptom.get("max"),
+                    "direction": symptom.get("direction"),
+                    "deviation_abs": symptom.get("deviation_abs"),
+                    "deviation_rel": symptom.get("deviation_rel"),
+                },
+                "minimal_causal_factor_set": [cause.node for cause in top],
+                "primary_attribution": _primary_attribution_text(state, metric, top[0]) if top else "No ranked cause is available from the current schema state.",
+                "ranked_hypotheses": [
+                    {
+                        "node": cause.node,
+                        "score": cause.score,
+                        "evidence": list(cause.evidence),
+                        "simulation_support": cause.simulation_support,
+                    }
+                    for cause in top
+                ],
+                "strongest_path": metric_paths[0]["chain"] if metric_paths else [],
+                "validation_required": "Run the listed perturbation experiments before treating the attribution as confirmed.",
+            }
+        )
+    return {
+        "author": "analog_circuit_causal_diagnostic_agent",
+        "state_source": "design_state.yaml:diagnostics.causal_diagnostics",
+        "principle": "Ranked causal hypotheses are written into schema state; JSON artifacts are derived views only.",
+        "by_failure": by_failure,
+    }
+
+
+def _primary_attribution_text(state: DesignState, metric: str, cause: CandidateCause) -> str:
+    role = _role_for_cause_node(state, cause.node)
+    if metric in {"dc_gain", "gain"} and cause.node.endswith(".ro") and _is_direct_gain_ro_role(role):
+        return "The leading hypothesis is low signal-path output resistance in the load/output stage, which directly reduces low-frequency gain."
+    if metric in {"dc_gain", "gain"} and cause.node.endswith(".gm") and "input_pair" in role:
+        return "The leading hypothesis is insufficient input-pair transconductance, which limits forward gain and gain-bandwidth."
+    if cause.node.endswith(".headroom") or _is_bias_role(role):
+        return "The leading hypothesis is insufficient operating-point headroom, which can indirectly reduce gain or swing by weakening saturation margins."
+    if metric == "phase_margin" and cause.node in {"block.compensation_network", "global.Cc", "global.Rz"}:
+        return "The leading hypothesis is compensation placement: the dominant pole and zero should be verified by sweeping Cc and Rz around the analytical target."
+    if metric == "phase_margin":
+        return "The leading hypothesis is a non-dominant pole moving too close to unity gain."
+    return f"The leading hypothesis is {cause.node}; validate it with the proposed SPICE perturbation before accepting it."
+
+
 def _counterfactual_predictions(causes: list[CandidateCause]) -> list[dict[str, Any]]:
     predictions = []
     for rank, cause in enumerate(causes[:5], start=1):
@@ -400,6 +490,7 @@ def _block_members(state: DesignState) -> dict[str, list[str]]:
         "differential_pair": [],
         "current_mirror": [],
         "load_stage": [],
+        "bias_network": [],
         "compensation_network": [],
         "source_follower_regulation": [],
         "output_stage": [],
@@ -409,10 +500,12 @@ def _block_members(state: DesignState) -> dict[str, list[str]]:
         role = (dev.role or "").lower()
         if "input_pair" in role:
             blocks["differential_pair"].append(dev.id)
-        if "mirror" in role or "current_source" in role:
+        if "mirror" in role:
             blocks["current_mirror"].append(dev.id)
         if "load" in role:
             blocks["load_stage"].append(dev.id)
+        if _is_bias_role(role):
+            blocks["bias_network"].append(dev.id)
         if "source_follower" in role or "regulated_source" in role or "follower" in role:
             blocks["source_follower_regulation"].append(dev.id)
         if "second_stage" in role or "output" in role:
@@ -493,7 +586,7 @@ def _lowest_output_resistance_device(state: DesignState) -> str | None:
     best_ro = float("inf")
     for dev in state.topology.devices:
         role = (dev.role or "").lower()
-        if not any(token in role for token in ("load", "output", "second_stage", "current_source")):
+        if not _is_direct_gain_ro_role(role):
             continue
         ts = state.transistors.get(dev.id)
         if ts is None or ts.parameters.gds <= 0:
@@ -503,6 +596,27 @@ def _lowest_output_resistance_device(state: DesignState) -> str | None:
             best = dev.id
             best_ro = ro
     return best
+
+
+def _is_direct_gain_ro_role(role: str) -> bool:
+    role = role.lower()
+    if any(token in role for token in ("tail", "bias_mirror", "regulated_source_current_source")):
+        return False
+    return any(
+        token in role
+        for token in (
+            "current_mirror_load",
+            "load",
+            "second_stage_gain",
+            "second_stage_load",
+            "output_current_source",
+        )
+    )
+
+
+def _is_bias_role(role: str) -> bool:
+    role = role.lower()
+    return any(token in role for token in ("tail", "bias", "regulated_source_current_source"))
 
 
 def _largest_capacitance_device(state: DesignState) -> str | None:
@@ -560,20 +674,53 @@ def _compensation_support(state: DesignState) -> str:
     return f"Cc={cc}, Rz={rz}, Rz_target_1_over_gm2={rz_target}"
 
 
-def _path_chain_for_metric(metric: str, cause_node: str, capabilities) -> list[str]:
+def _path_chain_for_metric(state: DesignState, metric: str, cause_node: str, capabilities) -> list[str]:
+    role = _role_for_cause_node(state, cause_node)
     if metric == "phase_margin":
-        if capabilities.has("miller_rc_compensation"):
-            return [cause_node, "block.compensation_network", "constraint.stability_margin", f"metric.{metric}"]
-        return [cause_node, "block.load_stage", "constraint.stability_margin", f"metric.{metric}"]
+        if cause_node in {"block.compensation_network", "global.Cc", "global.Rz"}:
+            return [cause_node, "block.compensation_network", "behavior.compensation_zero", "constraint.stability_margin", f"metric.{metric}"]
+        block = _signal_block_for_role(role)
+        return [cause_node, block, "behavior.non_dominant_pole", "constraint.stability_margin", f"metric.{metric}"]
     if metric in {"unity_gain_bandwidth", "ugbw", "bandwidth"}:
-        return [cause_node, "block.differential_pair", "constraint.stability_margin", f"metric.{metric}"]
+        if cause_node == "global.Cc":
+            return [cause_node, "block.compensation_network", "behavior.dominant_pole", f"metric.{metric}"]
+        return [cause_node, "block.differential_pair", "behavior.input_transconductance", f"metric.{metric}"]
     if metric in {"dc_gain", "gain"}:
-        return [cause_node, "block.load_stage", "constraint.headroom", f"metric.{metric}"]
+        if cause_node.endswith(".gm") and "input_pair" in role:
+            return [cause_node, "block.differential_pair", "behavior.input_transconductance", f"metric.{metric}"]
+        if cause_node.endswith(".ro") and _is_direct_gain_ro_role(role):
+            return [cause_node, _signal_block_for_role(role), "behavior.output_resistance", f"metric.{metric}"]
+        if _is_bias_role(role) or cause_node.endswith(".headroom"):
+            return [cause_node, "block.bias_network", "behavior.bias_headroom", "constraint.headroom", f"metric.{metric}"]
+        if "source_follower" in role or "regulated_source" in role:
+            return [cause_node, "block.source_follower_regulation", "behavior.output_resistance", f"metric.{metric}"]
+        return [cause_node, _signal_block_for_role(role), "behavior.output_resistance", f"metric.{metric}"]
     if metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
-        return [cause_node, "constraint.headroom", f"metric.{metric}"]
+        return [cause_node, "behavior.bias_headroom", "constraint.headroom", f"metric.{metric}"]
     if metric in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
-        return [cause_node, "block.output_stage", f"metric.{metric}"]
+        return [cause_node, "behavior.large_signal_charge", f"metric.{metric}"]
     return [cause_node, f"metric.{metric}"]
+
+
+def _role_for_cause_node(state: DesignState, cause_node: str) -> str:
+    parts = cause_node.split(".")
+    if len(parts) < 3 or parts[0] != "device":
+        return ""
+    dev = state.get_device_def(parts[1])
+    return (dev.role or "").lower() if dev else ""
+
+
+def _signal_block_for_role(role: str) -> str:
+    role = role.lower()
+    if "input_pair" in role:
+        return "block.differential_pair"
+    if "second_stage" in role or "output" in role:
+        return "block.output_stage"
+    if "load" in role:
+        return "block.load_stage"
+    if _is_bias_role(role):
+        return "block.bias_network"
+    return "block.load_stage"
 
 
 def _path_explanation(metric: str, cause_node: str) -> str:
