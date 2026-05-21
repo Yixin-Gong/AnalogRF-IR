@@ -178,6 +178,7 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "notes": "optional English notes",
         },
         "agent_model": agent_model,
+        "write_policy": command.get("write_policy", {}),
         "available_actions": args.get("available_actions", []),
         "default_selected_actions": args.get("selected_actions", []),
         "editable_fields": command.get("llm_editable_fields", {}),

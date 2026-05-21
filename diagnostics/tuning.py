@@ -6,6 +6,48 @@ from typing import Any
 from schemas.design_state import DesignState, Range
 
 
+AGENT_WRITABLE_DESIGN_STATE_FIELDS = (
+    "design_variables[*].initial",
+    "design_variables[*].range.min",
+    "design_variables[*].range.max",
+    "constraints.global.<existing_global_design_variable>.min",
+    "constraints.global.<existing_global_design_variable>.max",
+    "constraints.per_device.<device>.gm_id.min",
+    "constraints.per_device.<device>.gm_id.max",
+    "constraints.per_device.<device>.L.min",
+    "constraints.per_device.<device>.L.max",
+    "transistors.<device>.gm_id_strategy",
+    "transistors.<device>.L_strategy",
+    "global_parameters.<existing_global_design_variable>",
+    "diagnostics.agent_tuning_applications",
+)
+
+AGENT_FORBIDDEN_DESIGN_STATE_FIELDS = (
+    "topology",
+    "targets",
+    "loss_terms",
+    "evaluations",
+    "corrections",
+    "process",
+    "simulation",
+    "transistors.<device>.parameters",
+    "transistors.<device>.connections",
+)
+
+AGENT_RANGE_UPDATE_TYPES = ("expand_upper_bound", "expand_lower_bound", "set_range")
+
+
+def agent_write_policy() -> dict[str, Any]:
+    return {
+        "schema_version": "analogrf_ir.agent_write_policy.v0_1",
+        "principle": "The agent may only tune existing schema decision variables through explicit knob actions.",
+        "allowed_fields": list(AGENT_WRITABLE_DESIGN_STATE_FIELDS),
+        "forbidden_fields": list(AGENT_FORBIDDEN_DESIGN_STATE_FIELDS),
+        "knob_format": "Use '<device>.<variable>' for device variables or 'global.<variable>' for global variables. Each knob must already exist in design_variables.",
+        "range_update_types": list(AGENT_RANGE_UPDATE_TYPES),
+    }
+
+
 @dataclass
 class TuningApplication:
     schema_version: str = "analogrf_ir.agent_tuning_application.v0_1"
@@ -51,6 +93,7 @@ def write_tuning_tool_command(
         "status": "requested",
         "round_index": round_index,
         "state_source": "design_state.yaml:diagnostics.causal_diagnostics.attribution_guided_tuning",
+        "write_policy": agent_write_policy(),
         "args": {
             "max_primary_actions_per_failure": max_primary_actions_per_failure,
             "allowed_priorities": priorities,
@@ -85,8 +128,8 @@ def write_tuning_tool_command(
                 "reason",
             ],
             "decision_values": ["apply", "skip"],
-            "range_update_types": ["expand_upper_bound", "expand_lower_bound", "set_range"],
-            "notes": "Select existing actions by action_id or add custom per-knob actions. The executor only applies actions with decision=apply.",
+            "range_update_types": list(AGENT_RANGE_UPDATE_TYPES),
+            "notes": "Select existing actions by action_id or add custom per-knob actions. The executor only applies actions with decision=apply and rejects edits outside write_policy.",
         },
         "rationale": "Call the tuning executor through schema command state instead of direct in-memory invocation.",
     }
@@ -153,6 +196,10 @@ def apply_attribution_guided_tuning(
             continue
         if action.get("priority") == "guarded":
             application.skipped_actions.append({**_action_summary(action), "reason": "guarded action is not applied automatically"})
+            continue
+        policy_error = _write_policy_error(state, action)
+        if policy_error:
+            application.skipped_actions.append({**_action_summary(action), "reason": policy_error})
             continue
         result = _apply_action(state, action)
         if result["applied"]:
@@ -321,7 +368,7 @@ def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
         device, variable = _parse_knob(knob)
         design_var = _find_design_variable(state, device, variable)
         if design_var is None:
-            return {**_action_summary(action), "applied": False, "reason": f"schema variable not found: {knob}"}
+            return {**_action_summary(action), "applied": False, "reason": f"agent write policy rejected knob outside design_variables: {knob}"}
         _apply_range_update(design_var, action)
         _apply_constraint_update(state, device, variable, design_var.range)
         next_value = _value_after_range_update(action, design_var.range)
@@ -345,6 +392,48 @@ def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
         "applied": True,
         "applied_knobs": applied_knobs,
     }
+
+
+def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
+    target_knobs = action.get("apply_to") or [action.get("knob")]
+    if not target_knobs:
+        return "agent write policy rejected action with no target knobs"
+    if not all(isinstance(knob, str) and knob.strip() for knob in target_knobs):
+        return "agent write policy rejected non-string target knob"
+    update_error = _range_update_policy_error(action.get("range_update") or {})
+    if update_error:
+        return update_error
+    for knob in target_knobs:
+        device, variable = _parse_knob(knob)
+        design_var = _find_design_variable(state, device, variable)
+        if design_var is None:
+            return f"agent write policy rejected knob outside design_variables: {knob}"
+        if device and variable not in {"gm_id", "L"}:
+            return f"agent write policy rejected unsupported device strategy variable: {knob}"
+    return ""
+
+
+def _range_update_policy_error(update: dict[str, Any]) -> str:
+    update_type = update.get("type")
+    if not update_type:
+        return ""
+    if update_type not in AGENT_RANGE_UPDATE_TYPES:
+        return f"agent write policy rejected range_update type: {update_type}"
+    allowed_keys = {
+        "expand_upper_bound": {"type", "suggested_max"},
+        "expand_lower_bound": {"type", "suggested_min"},
+        "set_range": {"type", "min", "max"},
+    }[update_type]
+    unknown = sorted(set(update) - allowed_keys)
+    if unknown:
+        return f"agent write policy rejected range_update keys: {unknown}"
+    if update_type == "expand_upper_bound" and update.get("suggested_max") is None:
+        return "agent write policy rejected expand_upper_bound without suggested_max"
+    if update_type == "expand_lower_bound" and update.get("suggested_min") is None:
+        return "agent write policy rejected expand_lower_bound without suggested_min"
+    if update_type == "set_range" and update.get("min") is None and update.get("max") is None:
+        return "agent write policy rejected set_range without min or max"
+    return ""
 
 
 def _action_summary(action: dict[str, Any]) -> dict[str, Any]:

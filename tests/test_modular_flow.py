@@ -7,7 +7,7 @@ from asir.profiles import select_circuit_profile
 from core.environment import default_environment
 from core.rule_registry import list_rules
 from core.validator import Validator
-from diagnostics import apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
+from diagnostics import agent_write_policy, apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from flow.agent_loop import DiagnosticAgentLoop
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
@@ -501,6 +501,8 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
 
     assert command["args"]["available_actions"]
     assert command["args"]["custom_actions"][0]["action_id"] == "manual_M5_gm_id_set"
+    assert "design_variables[*].initial" in command["write_policy"]["allowed_fields"]
+    assert "topology" in command["write_policy"]["forbidden_fields"]
     assert command["llm_editable_fields"]["decision_values"] == ["apply", "skip"]
     assert "custom_actions" in command["llm_editable_fields"]
     assert application["command_id"] == command["id"]
@@ -513,6 +515,41 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     assert m5_gm_id.range.min == 8.0
     assert m5_gm_id.range.max == 18.0
     assert application["skipped_actions"][0]["llm_reason"] == "Hold input gm/ID for this round."
+
+
+def test_agent_write_policy_rejects_non_design_variable_edits():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    original_role = state.topology.devices[0].role
+    policy = agent_write_policy()
+
+    application = apply_attribution_guided_tuning(
+        state,
+        round_index=1,
+        custom_actions=[
+            {
+                "action_id": "illegal_topology_edit",
+                "decision": "apply",
+                "knob": "topology.devices.0.role",
+                "suggested_unclipped_value": 1.0,
+                "reason": "This should not be allowed.",
+            },
+            {
+                "action_id": "illegal_range_update",
+                "decision": "apply",
+                "knob": "M1.gm_id",
+                "suggested_unclipped_value": 16.0,
+                "range_update": {"type": "replace_topology", "value": 1.0},
+                "reason": "Bad range update type.",
+            },
+        ],
+    )
+
+    assert "topology" in policy["forbidden_fields"]
+    assert not application["applied_actions"]
+    reasons = [item["reason"] for item in application["skipped_actions"]]
+    assert any("outside design_variables" in reason for reason in reasons)
+    assert any("range_update type" in reason for reason in reasons)
+    assert state.topology.devices[0].role == original_role
 
 
 def test_deepseek_schema_planner_writes_fallback_command_without_api_key(monkeypatch):
