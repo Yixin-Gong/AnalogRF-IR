@@ -35,7 +35,7 @@ simulator/            ngspice execution and measurement extraction
 scripts/              CLI helpers for feasibility, Pareto, and SPICE conversion
 tables/               Lookup tables for supported process examples
 tests/                Regression tests
-docs/                 Development notes and method reports
+docs/                 Maintained usage, architecture, schema, and development docs
 ```
 
 ## Requirements
