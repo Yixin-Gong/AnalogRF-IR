@@ -239,7 +239,9 @@ class AnalogRFIRFlowRunner:
             "stage": stage,
             "schema_valid": bool(report.schema_valid),
             "error_count": len(report.errors()),
-            "summary": report.summary(by_layer=True),
+            "warning_count": len(report.warnings()),
+            "info_count": len(report.info()),
+            "check_count": len(report.results),
         }
         self.validation_reports.append(summary)
         self.emit(report.summary(by_layer=True))

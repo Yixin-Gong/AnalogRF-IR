@@ -94,22 +94,19 @@ class ArtifactWriter:
                 ),
             },
         }
-        state.diagnostics = {
-            "schema_version": "analogrf_ir.state_diagnostics.v0_1",
-            "iteration": iteration,
-            "simulation_log": sim_log,
-            "agent_diagnostics": diagnostics,
-            "causal_diagnostics": diagnostics["causal_diagnostics"],
-            "result": result,
-        }
-        state.to_yaml(design_state_path)
-        sim_log_path.write_text(json.dumps(state.diagnostics["simulation_log"], indent=2), encoding="utf-8")
-        diagnostics_path.write_text(json.dumps(state.diagnostics["agent_diagnostics"], indent=2), encoding="utf-8")
+        state.diagnostics = _build_state_diagnostics_view(
+            iteration=iteration,
+            result=result,
+            causal_diagnostics=diagnostics["causal_diagnostics"],
+        )
+        state.to_yaml(design_state_path, include_runtime_context=False)
+        sim_log_path.write_text(json.dumps(sim_log, indent=2), encoding="utf-8")
+        diagnostics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
         causal_diagnostics_path.write_text(
-            json.dumps(state.diagnostics["causal_diagnostics"], indent=2),
+            json.dumps(diagnostics["causal_diagnostics"], indent=2),
             encoding="utf-8",
         )
-        result_path.write_text(json.dumps(state.diagnostics["result"], indent=2), encoding="utf-8")
+        result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
         return RunArtifacts(
             output_dir=output_dir,
@@ -120,6 +117,151 @@ class ArtifactWriter:
             causal_diagnostics=causal_diagnostics_path,
             result_json=result_path,
         )
+
+
+_SCHEMA_MEASUREMENT_KEYS = (
+    "dc_gain_db",
+    "unity_gain_bandwidth",
+    "phase_margin",
+    "slew_rate",
+    "slew_rate_pos",
+    "slew_rate_neg",
+    "output_swing",
+    "icmr",
+    "icmr_min",
+    "icmr_max",
+    "total_power",
+    "delay",
+    "decision_time",
+    "propagation_delay",
+    "regeneration_time",
+    "reset_time",
+    "energy",
+    "energy_per_comparison",
+    "pdp",
+    "edp",
+    "input_referred_offset",
+    "input_referred_noise",
+    "kickback_noise",
+    "input_capacitance",
+    "max_sample_rate",
+)
+
+
+def _build_state_diagnostics_view(
+    *,
+    iteration: int,
+    result: dict[str, Any],
+    causal_diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_2",
+        "iteration": iteration,
+        "artifacts": {
+            "design_state": "design_state.yaml",
+            "netlist": "netlist.cir",
+            "sim_log": "sim_log.json",
+            "agent_diagnostics": "agent_diagnostics.json",
+            "causal_diagnostics": "causal_diagnostics.json",
+            "result": "result.json",
+        },
+        "result": _compact_result(result),
+        "causal_diagnostics": _compact_causal_diagnostics(causal_diagnostics),
+    }
+
+
+def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": result.get("schema_version", "analogrf_ir.result.v0_1"),
+        "iteration": result.get("iteration"),
+        "status": result.get("status", {}),
+        "measurements": _compact_measurements(result.get("measurements", {}) or {}),
+        "causal_summary": _compact_causal_summary(result.get("causal_summary", {}) or {}),
+    }
+
+
+def _compact_measurements(measurements: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: measurements[key]
+        for key in _SCHEMA_MEASUREMENT_KEYS
+        if key in measurements
+    }
+
+
+def _compact_causal_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    top = summary.get("top_root_cause")
+    if isinstance(top, dict):
+        top = {
+            "node": top.get("node"),
+            "score": top.get("score"),
+            "metrics": top.get("metrics", []),
+        }
+    return {
+        "failed_symptoms": summary.get("failed_symptoms", []),
+        "top_root_cause": top,
+    }
+
+
+def _compact_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
+    tuning = causal.get("attribution_guided_tuning", {}) or {}
+    return {
+        "schema_version": causal.get("schema_version", "analogrf_ir.causal_diagnostics.v0_1"),
+        "method": causal.get("method", ""),
+        "failure_symptom_analysis": causal.get("failure_symptom_analysis", []),
+        "root_cause_attribution": _compact_root_causes(causal.get("root_cause_attribution", []) or []),
+        "attribution_guided_tuning": {
+            "author": tuning.get("author", ""),
+            "by_failure": _compact_tuning_failures(tuning.get("by_failure", []) or []),
+        },
+    }
+
+
+def _compact_root_causes(root_causes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "node": item.get("node"),
+            "score": item.get("score"),
+            "metrics": item.get("metrics", []),
+        }
+        for item in root_causes[:5]
+    ]
+
+
+def _compact_tuning_failures(failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "metric": item.get("metric"),
+            "observed_direction": item.get("observed_direction"),
+            "target_gap": item.get("target_gap", {}),
+            "strategy": item.get("strategy", ""),
+            "actions": [_compact_tuning_action(action) for action in item.get("actions", [])],
+        }
+        for item in failures
+    ]
+
+
+def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "action_id",
+        "metric",
+        "cause_node",
+        "priority",
+        "knob",
+        "apply_to",
+        "direction",
+        "current_value",
+        "suggested_next_value",
+        "suggested_unclipped_value",
+        "target_value",
+        "target_formula",
+        "agent_step_fraction",
+        "range",
+        "range_update",
+        "expected_effect",
+        "tradeoffs",
+        "rationale",
+    )
+    return {key: action[key] for key in keep if key in action}
 
 
 def build_simulation_log(

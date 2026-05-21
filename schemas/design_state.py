@@ -292,18 +292,28 @@ class DesignState:
 
     # Internal implementation note.
 
-    def to_dict(self) -> dict:
-        return _dataclass_to_dict(self)
+    def to_dict(self, *, include_runtime_context: bool = True) -> dict:
+        data = _dataclass_to_dict(self)
+        if not include_runtime_context:
+            data.pop("process", None)
+            data.pop("simulation", None)
+        return data
 
     @classmethod
     def from_dict(cls, d: dict) -> "DesignState":
         return _dict_to_design_state(d)
 
-    def to_yaml(self, path: Union[str, Path]) -> None:
+    def to_yaml(self, path: Union[str, Path], *, include_runtime_context: bool = True) -> None:
         self._ensure_wl_on_grid()
         path = Path(path)
         with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            yaml.dump(
+                self.to_dict(include_runtime_context=include_runtime_context),
+                f,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+            )
 
     def _ensure_wl_on_grid(self) -> None:
         import math

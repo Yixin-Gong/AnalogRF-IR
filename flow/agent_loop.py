@@ -7,6 +7,7 @@ from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from core.environment import build_process_info, build_simulation_config, load_environment
 from diagnostics import execute_tuning_tool_commands
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
@@ -56,6 +57,7 @@ class DiagnosticAgentLoop:
         self.llm_config = llm_config or LLMPlannerConfig.from_env()
         self.emit = emit or (lambda _msg: None)
         self._final_result: FlowResult | None = None
+        self._environment = load_environment(config.env)
 
     def run(self) -> AgentLoopResult:
         loop_dir = Path(self.config.runs_dir) / f"agent_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -127,7 +129,7 @@ class DiagnosticAgentLoop:
     def _read_schema_diagnostics_node(self, state: AgentGraphState) -> AgentGraphState:
         self.emit("       LangGraph node: read_schema_diagnostics")
         design_state_path = Path(state["last_design_state"])
-        schema_state = DesignState.from_yaml(design_state_path)
+        schema_state = self._load_design_state(design_state_path)
         status = schema_state.diagnostics.get("result", {}).get("status", {})
         causal = schema_state.diagnostics.get("causal_diagnostics", {})
         tuning = causal.get("attribution_guided_tuning", {})
@@ -158,7 +160,7 @@ class DiagnosticAgentLoop:
 
     def _execute_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
         self.emit("       LangGraph node: execute_schema_command")
-        schema_state = DesignState.from_yaml(Path(state["last_design_state"]))
+        schema_state = self._load_design_state(Path(state["last_design_state"]))
         round_index = int(state["round_index"])
         application = execute_tuning_tool_commands(schema_state, round_index=round_index)
         self._print_application(application)
@@ -168,7 +170,8 @@ class DiagnosticAgentLoop:
                 "stop_reason": "no automatic schema edits were available",
             }
         tuned_schema = Path(state["loop_dir"]) / f"round_{round_index + 1:03d}_input.yaml"
-        schema_state.to_yaml(tuned_schema)
+        schema_state.diagnostics = _next_round_diagnostics(application)
+        schema_state.to_yaml(tuned_schema, include_runtime_context=False)
         self.emit(f"       Next schema: {tuned_schema}")
         return {
             "current_schema": str(tuned_schema),
@@ -180,7 +183,7 @@ class DiagnosticAgentLoop:
     def _llm_write_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
         self.emit("       LangGraph node: llm_write_schema_command")
         design_state_path = Path(state["last_design_state"])
-        schema_state = DesignState.from_yaml(design_state_path)
+        schema_state = self._load_design_state(design_state_path)
         planner = DeepSeekSchemaPlanner(self.llm_config)
         result = planner.write_command(
             schema_state,
@@ -188,7 +191,7 @@ class DiagnosticAgentLoop:
             agent_model=state.get("agent_model", {}),
         )
         command = result.command
-        schema_state.to_yaml(design_state_path)
+        schema_state.to_yaml(design_state_path, include_runtime_context=False)
         self.emit(
             "       Wrote schema command: "
             f"{command['id']} with {len(command['args'].get('available_actions', []))} available actions "
@@ -202,6 +205,17 @@ class DiagnosticAgentLoop:
             "last_tool_command": command,
             "llm_planner": command.get("llm_planner", {}),
         }
+
+    def _load_design_state(self, path: Path) -> DesignState:
+        schema_state = DesignState.from_yaml(path)
+        env = getattr(self, "_environment", None)
+        if env is None:
+            config = getattr(self, "config", None)
+            env = load_environment(config.env if config else None)
+            self._environment = env
+        schema_state.process = build_process_info(env)
+        schema_state.simulation = build_simulation_config(env)
+        return schema_state
 
     def _route_after_diagnostics(self, state: AgentGraphState) -> str:
         if state.get("stop_reason"):
@@ -266,3 +280,24 @@ class DiagnosticAgentLoop:
         self.emit(f"       spec_pass: {final_round.get('spec_pass', state.get('last_spec_pass', False))}")
         self.emit(f"       failed_targets: {final_round.get('failed_targets', state.get('last_failed_targets', []))}")
         self.emit(f"       best_loss: {final_round.get('best_loss')}")
+
+
+def _next_round_diagnostics(application: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_2",
+        "previous_agent_tuning": {
+            "round_index": application.get("round_index"),
+            "command_id": application.get("command_id", ""),
+            "applied_action_count": len(application.get("applied_actions", []) or []),
+            "skipped_action_count": len(application.get("skipped_actions", []) or []),
+            "applied_actions": [
+                {
+                    "action_id": action.get("action_id"),
+                    "knob": action.get("knob"),
+                    "apply_to": action.get("apply_to", []),
+                    "applied_knobs": action.get("applied_knobs", []),
+                }
+                for action in application.get("applied_actions", []) or []
+            ],
+        },
+    }

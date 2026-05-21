@@ -123,7 +123,7 @@ and best candidate.
 Each optimization run writes `runs/iter_###/` with:
 
 ```text
-design_state.yaml          Canonical state after optimization and validation
+design_state.yaml          Canonical state with compact result/tuning summary
 netlist.cir                Generated SPICE netlist
 sim_log.json               Simulation-focused diagnostic view
 agent_diagnostics.json     Agent-facing pass/fail and tuning context
@@ -133,3 +133,9 @@ result.json                Compact final result view
 
 If `ngspice` is unavailable, the flow still writes structured outputs, but the
 simulation result is marked unsuccessful.
+
+`design_state.yaml` intentionally omits environment-derived process/simulation
+settings, the full simulation log, agent diagnostics, dependency graph, and
+validation transcript so the schema remains human-readable. Use the active
+environment file for process context and the JSON artifacts in the same
+directory when you need the full diagnostic detail.

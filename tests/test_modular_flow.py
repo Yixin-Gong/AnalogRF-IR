@@ -238,19 +238,30 @@ def test_artifact_writer_emits_result_json(tmp_path):
         sim_result=result,
         iteration=1,
         netlist_str="* netlist\n.end\n",
-        flow_meta={"options": {}},
+        flow_meta={"options": {}, "validation": [{"summary": "verbose validation report"}]},
     )
 
     assert artifacts.design_state.exists()
     assert artifacts.netlist.exists()
     assert artifacts.causal_diagnostics.exists()
-    assert "!!python" not in artifacts.design_state.read_text(encoding="utf-8")
+    design_state_text = artifacts.design_state.read_text(encoding="utf-8")
+    assert "!!python" not in design_state_text
+    assert "\n  simulation_log:" not in design_state_text
+    assert "\n  agent_diagnostics:" not in design_state_text
+    assert "verbose validation report" not in design_state_text
     payload = json.loads(artifacts.result_json.read_text(encoding="utf-8"))
     assert payload["status"]["spec_pass"] is True
     state_payload = load_yaml_mapping(artifacts.design_state)
     assert "diagnostics" in state_payload
+    assert "process" not in state_payload
+    assert "simulation" not in state_payload
     assert state_payload["diagnostics"]["result"]["status"]["spec_pass"] is True
-    assert state_payload["diagnostics"]["causal_diagnostics"]["dependency_graph"]["nodes"]
+    assert "phase_at_unity_meas" not in state_payload["diagnostics"]["result"]["measurements"]
+    assert "simulation_log" not in state_payload["diagnostics"]
+    assert "agent_diagnostics" not in state_payload["diagnostics"]
+    assert "dependency_graph" not in state_payload["diagnostics"]["causal_diagnostics"]
+    full_causal = json.loads(artifacts.causal_diagnostics.read_text(encoding="utf-8"))
+    assert full_causal["dependency_graph"]["nodes"]
 
 
 def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
@@ -294,17 +305,22 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     )
 
     state_payload = load_yaml_mapping(artifacts.design_state)
-    causal = state_payload["diagnostics"]["causal_diagnostics"]
+    causal = json.loads(artifacts.causal_diagnostics.read_text(encoding="utf-8"))
+    compact_causal = state_payload["diagnostics"]["causal_diagnostics"]
     result_view = state_payload["diagnostics"]["result"]
 
     assert "phase_margin" in result_view["status"]["failed_targets"]
     assert any(item["metric"] == "phase_margin" for item in causal["failure_symptom_analysis"])
+    assert any(item["metric"] == "phase_margin" for item in compact_causal["failure_symptom_analysis"])
+    assert "suggested_validation_experiments" not in compact_causal
+    assert "dependency_graph" not in compact_causal
+    assert "agent_failure_attribution" not in compact_causal
     assert causal["root_cause_attribution"]
     assert causal["agent_failure_attribution"]["by_failure"]
-    assert causal["attribution_guided_tuning"]["by_failure"]
+    assert compact_causal["attribution_guided_tuning"]["by_failure"]
     assert any(
         action["knob"] == "global.Rz" and action["target_formula"] == "1/gm(second_stage_gain)"
-        for item in causal["attribution_guided_tuning"]["by_failure"]
+        for item in compact_causal["attribution_guided_tuning"]["by_failure"]
         for action in item["actions"]
     )
     assert causal["counterfactual_predictions"]
@@ -363,21 +379,22 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     )
 
     causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
+    full_causal = json.loads(artifacts.causal_diagnostics.read_text(encoding="utf-8"))
     top = causal["root_cause_attribution"][0]
-    gain_path = causal["causal_paths"][0]["chain"]
+    gain_path = full_causal["causal_paths"][0]["chain"]
     tuning_actions = causal["attribution_guided_tuning"]["by_failure"][0]["actions"]
     primary_action = tuning_actions[0]
 
     assert top["node"] != "device.M5.ro"
     assert "block.load_stage" in gain_path
     assert "device.M5.ro" not in gain_path
-    assert causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
+    assert full_causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
     assert primary_action["knob"] == "M3.L"
     assert primary_action["action_id"]
     assert primary_action["direction"] == "increase"
     assert primary_action["apply_to"] == ["M3.L", "M4.L"]
     assert primary_action["range_update"]["type"] == "expand_upper_bound"
-    assert causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] == "M3.L"
+    assert full_causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] == "M3.L"
 
     application = apply_attribution_guided_tuning(state, round_index=1)
     assert application["applied_actions"]
