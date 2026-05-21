@@ -42,10 +42,11 @@ def build_causal_diagnostics(
     paths = _causal_paths(state, symptoms, causes, capabilities)
     predictions = _counterfactual_predictions(causes)
     experiments = _validation_experiments(causes)
-    attribution = _agent_failure_attribution(state, symptoms, causes, paths)
+    tuning = _attribution_guided_tuning(state, symptoms, causes)
+    attribution = _agent_failure_attribution(state, symptoms, causes, paths, tuning)
     return {
         "schema_version": "analogrf_ir.causal_diagnostics.v0_1",
-        "method": "directional_dependency_graph_with_ranked_testable_hypotheses",
+        "method": "directional_dependency_graph_with_attribution_guided_tuning",
         "scope": {
             "design_name": state.design_name,
             "topology": state.topology.name,
@@ -60,11 +61,12 @@ def build_causal_diagnostics(
         "causal_paths": paths,
         "root_cause_attribution": [cause.__dict__ for cause in causes],
         "agent_failure_attribution": attribution,
+        "attribution_guided_tuning": tuning,
         "counterfactual_predictions": predictions,
         "suggested_validation_experiments": experiments,
         "validation_protocol": {
-            "principle": "Perturb each proposed cause by 5-10 percent and compare predicted metric direction against SPICE.",
-            "acceptance": "A hypothesis gains support when the predicted metric direction appears without creating a larger primary-target violation.",
+            "principle": "Apply the attribution-guided tuning plan first, then use SPICE to close the loop.",
+            "acceptance": "A tuning action is useful when the targeted metric improves without creating a larger primary-target violation.",
             "uncertainty_rule": "Scores are ranked hypotheses, not single-point certainty.",
         },
         "input_support": {
@@ -395,12 +397,17 @@ def _agent_failure_attribution(
     symptoms: list[dict[str, Any]],
     causes: list[CandidateCause],
     paths: list[dict[str, Any]],
+    tuning: dict[str, Any],
 ) -> dict[str, Any]:
     by_failure = []
     for symptom in symptoms:
         metric = symptom["metric"]
         metric_causes = [cause for cause in causes if metric in cause.metrics]
         metric_paths = [path for path in paths if path["metric"] == metric]
+        tuning_items = [
+            item for item in tuning.get("by_failure", [])
+            if item.get("metric") == metric
+        ]
         top = metric_causes[:3]
         by_failure.append(
             {
@@ -426,13 +433,14 @@ def _agent_failure_attribution(
                     for cause in top
                 ],
                 "strongest_path": metric_paths[0]["chain"] if metric_paths else [],
-                "validation_required": "Run the listed perturbation experiments before treating the attribution as confirmed.",
+                "tuning_plan": tuning_items[0].get("actions", []) if tuning_items else [],
+                "next_step": "Apply the tuning plan to the schema variables, rerun OP, then rerun AC/performance extraction.",
             }
         )
     return {
         "author": "analog_circuit_causal_diagnostic_agent",
         "state_source": "design_state.yaml:diagnostics.causal_diagnostics",
-        "principle": "Ranked causal hypotheses are written into schema state; JSON artifacts are derived views only.",
+        "principle": "Ranked causal hypotheses and derived tuning actions are written into schema state; JSON artifacts are derived views only.",
         "by_failure": by_failure,
     }
 
@@ -450,6 +458,386 @@ def _primary_attribution_text(state: DesignState, metric: str, cause: CandidateC
     if metric == "phase_margin":
         return "The leading hypothesis is a non-dominant pole moving too close to unity gain."
     return f"The leading hypothesis is {cause.node}; validate it with the proposed SPICE perturbation before accepting it."
+
+
+def _attribution_guided_tuning(
+    state: DesignState,
+    symptoms: list[dict[str, Any]],
+    causes: list[CandidateCause],
+) -> dict[str, Any]:
+    by_failure = []
+    for symptom in symptoms:
+        if symptom["status"] != "fail":
+            continue
+        metric = symptom["metric"]
+        actions = []
+        for cause in [item for item in causes if metric in item.metrics][:3]:
+            actions.extend(_tuning_actions_for_cause(state, metric, cause))
+        actions = _rank_tuning_actions(_dedupe_actions(actions))
+        by_failure.append(
+            {
+                "metric": metric,
+                "observed_direction": symptom.get("direction"),
+                "target_gap": {
+                    "value": symptom.get("value"),
+                    "min": symptom.get("min"),
+                    "max": symptom.get("max"),
+                    "deviation_abs": symptom.get("deviation_abs"),
+                    "deviation_rel": symptom.get("deviation_rel"),
+                },
+                "strategy": _tuning_strategy_text(metric),
+                "actions": actions,
+            }
+        )
+    return {
+        "author": "analog_circuit_causal_diagnostic_agent",
+        "principle": "Translate ranked root causes into direct schema-variable tuning actions.",
+        "by_failure": by_failure,
+    }
+
+
+def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateCause) -> list[dict[str, Any]]:
+    node = cause.node
+    if node == "block.compensation_network":
+        return _compensation_tuning_actions(state, metric, node, cause.score)
+    if node.startswith("global."):
+        return _global_tuning_action(state, metric, node, cause.score)
+
+    parts = node.split(".")
+    if len(parts) < 3 or parts[0] != "device":
+        return []
+
+    dev_id = parts[1]
+    param = parts[2]
+    role = _role_for_cause_node(state, node)
+
+    if param == "ro":
+        if _is_direct_gain_ro_role(role):
+            return [
+                _knob_action(
+                    state,
+                    metric=metric,
+                    cause_node=node,
+                    score=cause.score,
+                    device=dev_id,
+                    variable="L",
+                    direction="increase",
+                    step_hint="increase by 10-25%; if already at the upper bound, expand the L upper bound before re-optimizing",
+                    rationale="Increasing channel length raises signal-path ro and therefore DC gain.",
+                    expected_effect={"dc_gain": "increase", "unity_gain_bandwidth": "may decrease", "phase_margin": "watch for lower pole frequency"},
+                    tradeoffs=["Higher L can add capacitance and lower bandwidth.", "Keep mirrored load devices symmetric."],
+                    priority="primary",
+                )
+            ]
+        return _headroom_tuning_actions(state, metric, dev_id, node, cause.score)
+
+    if param == "gm":
+        return _gm_tuning_actions(state, metric, dev_id, role, node, cause.score)
+
+    if param in {"headroom", "Vov"}:
+        return _headroom_tuning_actions(state, metric, dev_id, node, cause.score)
+
+    if param == "capacitance":
+        return _capacitance_tuning_actions(state, metric, dev_id, node, cause.score)
+
+    if param == "bias_current":
+        return _bias_current_tuning_actions(state, metric, dev_id, role, node, cause.score)
+
+    return []
+
+
+def _gm_tuning_actions(state: DesignState, metric: str, dev_id: str, role: str, cause_node: str, score: float) -> list[dict[str, Any]]:
+    actions = [
+        _knob_action(
+            state,
+            metric=metric,
+            cause_node=cause_node,
+            score=score,
+            device=dev_id,
+            variable="gm_id",
+            direction="increase",
+            step_hint="increase by 5-15% within the allowed gm/ID range",
+            rationale="Higher gm/ID increases useful transconductance for the same bias current and usually reduces VDSAT.",
+            expected_effect={"dc_gain": "increase", "unity_gain_bandwidth": "increase", "headroom": "improve"},
+            tradeoffs=["Larger device width can increase parasitic capacitance.", "Check phase margin after the OP is repaired."],
+            priority="primary",
+        )
+    ]
+    current_name = _current_variable_for_role(role)
+    if current_name:
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score * 0.72,
+                device="",
+                variable=current_name,
+                direction="increase",
+                step_hint="increase by 5-10% only when the power target still has margin",
+                rationale="Increasing bias current raises gm directly when the gm/ID choice alone is not enough.",
+                expected_effect={"gm": "increase", "unity_gain_bandwidth": "increase", "power": "increase"},
+                tradeoffs=["Power rises directly.", "Extra current can worsen headroom in stacked devices."],
+                priority="secondary",
+            )
+        )
+    return actions
+
+
+def _headroom_tuning_actions(state: DesignState, metric: str, dev_id: str, cause_node: str, score: float) -> list[dict[str, Any]]:
+    role = _role_for_cause_node(state, cause_node)
+    actions = [
+        _knob_action(
+            state,
+            metric=metric,
+            cause_node=cause_node,
+            score=score,
+            device=dev_id,
+            variable="gm_id",
+            direction="increase",
+            step_hint="increase by 5-15% to reduce required VDSAT/Vov",
+            rationale="Higher gm/ID lowers overdrive for the same current, recovering saturation headroom.",
+            expected_effect={"headroom": "increase", "output_swing": "increase", "dc_gain": "increase if saturation margin improves"},
+            tradeoffs=["Device width and capacitance can increase.", "Do not push into excessive weak inversion if speed is already marginal."],
+            priority="primary",
+        )
+    ]
+    current_name = _current_variable_for_role(role)
+    if current_name:
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score * 0.65,
+                device="",
+                variable=current_name,
+                direction="decrease",
+                step_hint="decrease by 5-10% only if gm, bandwidth, and slew-rate margins allow it",
+                rationale="Reducing current lowers required overdrive and can recover headroom in the limiting stack.",
+                expected_effect={"headroom": "increase", "power": "decrease", "gm": "decrease"},
+                tradeoffs=["Can reduce gain-bandwidth and slew rate.", "Use after gm/ID and length actions if gain is also failing."],
+                priority="guarded",
+            )
+        )
+    return actions
+
+
+def _capacitance_tuning_actions(state: DesignState, metric: str, dev_id: str, cause_node: str, score: float) -> list[dict[str, Any]]:
+    return [
+        _knob_action(
+            state,
+            metric=metric,
+            cause_node=cause_node,
+            score=score,
+            device=dev_id,
+            variable="L",
+            direction="decrease",
+            step_hint="decrease by 5-15% if gain and matching constraints still pass",
+            rationale="Reducing channel length can lower parasitic capacitance and push a non-dominant pole upward.",
+            expected_effect={"phase_margin": "increase when the non-dominant pole moves higher", "unity_gain_bandwidth": "increase", "dc_gain": "may decrease"},
+            tradeoffs=["Lower L reduces ro and can hurt gain.", "Keep symmetric devices matched."],
+            priority="primary",
+        )
+    ]
+
+
+def _bias_current_tuning_actions(state: DesignState, metric: str, dev_id: str, role: str, cause_node: str, score: float) -> list[dict[str, Any]]:
+    current_name = _current_variable_for_role(role) or "I_tail"
+    direction = "increase"
+    expected = {"slew_rate": "increase", "unity_gain_bandwidth": "may increase", "power": "increase"}
+    rationale = "Increasing available bias current raises large-signal charging current."
+    tradeoffs = ["Power rises directly.", "Headroom must be rechecked after the OP update."]
+    if metric in {"power", "energy", "energy_per_comparison", "pdp", "edp"}:
+        direction = "decrease"
+        expected = {"power": "decrease", "energy": "decrease", "speed": "may decrease"}
+        rationale = "Reducing bias current lowers static and dynamic energy pressure."
+        tradeoffs = ["Delay, slew rate, and regeneration speed can worsen."]
+    return [
+        _knob_action(
+            state,
+            metric=metric,
+            cause_node=cause_node,
+            score=score,
+            device="",
+            variable=current_name,
+            direction=direction,
+            step_hint=f"{direction} by 5-15% within the schema range",
+            rationale=rationale,
+            expected_effect=expected,
+            tradeoffs=tradeoffs,
+            priority="primary",
+        )
+    ]
+
+
+def _compensation_tuning_actions(state: DesignState, metric: str, cause_node: str, score: float) -> list[dict[str, Any]]:
+    actions = []
+    if metric == "phase_margin":
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score,
+                device="",
+                variable="Cc",
+                direction="increase",
+                step_hint="increase by 10-25% to pull the dominant pole lower",
+                rationale="For a two-stage OTA with low PM, the main pole should be pulled to lower frequency before fine zero placement.",
+                expected_effect={"phase_margin": "increase", "unity_gain_bandwidth": "decrease", "slew_rate": "decrease"},
+                tradeoffs=["Bandwidth and slew rate fall as Cc grows."],
+                priority="primary",
+            )
+        )
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score * 0.92,
+                device="",
+                variable="Rz",
+                direction="set",
+                step_hint="set Rz to 1/gm(second_stage_gain), then let optimization fine tune around that value",
+                rationale="The compensation zero should be placed from the second-stage gm relation requested by the architecture rule.",
+                expected_effect={"phase_margin": "increase when the zero placement was limiting"},
+                tradeoffs=["Wrong zero placement can reduce PM even when Cc is adequate."],
+                priority="primary",
+                target_formula="1/gm(second_stage_gain)",
+                target_value=_rz_target_from_second_stage(state),
+            )
+        )
+    elif metric in {"unity_gain_bandwidth", "ugbw", "bandwidth", "slew_rate", "slew_rate_pos", "slew_rate_neg"}:
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score,
+                device="",
+                variable="Cc",
+                direction="decrease",
+                step_hint="decrease by 5-15% only if phase-margin target remains satisfied",
+                rationale="Lower Cc improves bandwidth and slew rate when stability has enough margin.",
+                expected_effect={"unity_gain_bandwidth": "increase", "slew_rate": "increase", "phase_margin": "decrease"},
+                tradeoffs=["Phase margin is the guardrail."],
+                priority="guarded",
+            )
+        )
+    return actions
+
+
+def _global_tuning_action(state: DesignState, metric: str, node: str, score: float) -> list[dict[str, Any]]:
+    name = node.split(".", 1)[1]
+    if name == "Cc":
+        direction = "increase" if metric == "phase_margin" else "decrease"
+        return [
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=node,
+                score=score,
+                device="",
+                variable="Cc",
+                direction=direction,
+                step_hint=f"{direction} Cc by 5-15% with phase margin as the guardrail",
+                rationale="Cc directly trades stability against bandwidth and slew rate.",
+                expected_effect={"phase_margin": "moves with Cc", "unity_gain_bandwidth": "moves opposite Cc", "slew_rate": "moves opposite Cc"},
+                tradeoffs=["Do not tune Cc without rerunning PM."],
+                priority="primary",
+            )
+        ]
+    if name == "Rz":
+        return [
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=node,
+                score=score,
+                device="",
+                variable="Rz",
+                direction="set",
+                step_hint="set Rz to 1/gm(second_stage_gain)",
+                rationale="Rz should align the compensation zero to the second-stage gm target.",
+                expected_effect={"phase_margin": "increase when the zero was misplaced"},
+                tradeoffs=["Rz is meaningful only with an explicit Miller RC compensation network."],
+                priority="primary",
+                target_formula="1/gm(second_stage_gain)",
+                target_value=_rz_target_from_second_stage(state),
+            )
+        ]
+    return []
+
+
+def _knob_action(
+    state: DesignState,
+    *,
+    metric: str,
+    cause_node: str,
+    score: float,
+    device: str,
+    variable: str,
+    direction: str,
+    step_hint: str,
+    rationale: str,
+    expected_effect: dict[str, str],
+    tradeoffs: list[str],
+    priority: str,
+    target_formula: str | None = None,
+    target_value: float | None = None,
+) -> dict[str, Any]:
+    knobs = _knob_group(state, device, variable)
+    current = _current_variable_value(state, device, variable)
+    bounds = _variable_range(state, device, variable)
+    suggested = _suggested_next_value(current, bounds, direction, target_value)
+    limit_status = _limit_status(current, bounds, direction)
+    action = {
+        "metric": metric,
+        "cause_node": cause_node,
+        "score": round(float(score), 4),
+        "priority": priority,
+        "knob": _format_knob(device, variable),
+        "apply_to": knobs,
+        "direction": direction,
+        "current_value": current,
+        "suggested_next_value": suggested,
+        "range": bounds,
+        "limit_status": limit_status,
+        "step_hint": step_hint,
+        "rationale": rationale,
+        "expected_effect": expected_effect,
+        "tradeoffs": tradeoffs,
+        "schema_variable_present": bool(_design_variables_for_knob(state, device, variable)),
+    }
+    if target_formula:
+        action["target_formula"] = target_formula
+    if target_value is not None:
+        action["target_value"] = target_value
+    range_update = _range_update_hint(bounds, direction, limit_status, variable)
+    if range_update:
+        action["range_update"] = range_update
+    return action
+
+
+def _rank_tuning_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority_order = {"primary": 0, "secondary": 1, "guarded": 2}
+    ranked = sorted(actions, key=lambda item: (priority_order.get(item["priority"], 9), -float(item["score"])))
+    for idx, action in enumerate(ranked, start=1):
+        action["rank"] = idx
+    return ranked
+
+
+def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    seen = set()
+    for action in actions:
+        key = (tuple(action.get("apply_to", [])), action.get("direction"), action.get("cause_node"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(action)
+    return out
 
 
 def _counterfactual_predictions(causes: list[CandidateCause]) -> list[dict[str, Any]]:
@@ -672,6 +1060,176 @@ def _compensation_support(state: DesignState) -> str:
             break
     rz_target = 1.0 / gm2 if gm2 > 1e-12 else None
     return f"Cc={cc}, Rz={rz}, Rz_target_1_over_gm2={rz_target}"
+
+
+def _tuning_strategy_text(metric: str) -> str:
+    if metric in {"dc_gain", "gain"}:
+        return "Raise signal-path ro first, then raise useful gm, while repairing any headroom limiter that can collapse ro."
+    if metric == "phase_margin":
+        return "Move the main pole lower for two-stage OTA compensation, align Rz to 1/gm(second_stage_gain), then push non-dominant poles higher."
+    if metric in {"unity_gain_bandwidth", "ugbw", "bandwidth"}:
+        return "Increase input/stage gm and reduce avoidable dominant capacitance, with phase margin as the guardrail."
+    if metric in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
+        return "Increase available charging current or reduce compensation/load capacitance, with power and PM as guardrails."
+    if metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
+        return "Reduce VDSAT/Vov of the limiting stack and rebalance bias currents to recover voltage headroom."
+    if metric in {"delay", "decision_time", "propagation_delay", "regeneration_time"}:
+        return "Increase latch/input gm and reduce switched capacitance to shorten regeneration time."
+    if metric in {"power", "energy", "energy_per_comparison", "pdp", "edp"}:
+        return "Reduce bias current and switched capacitance while checking delay and noise constraints."
+    return "Tune the highest-ranked causal knobs first, then rerun OP before measuring performance."
+
+
+def _current_variable_for_role(role: str) -> str | None:
+    role = role.lower()
+    if any(token in role for token in ("second_stage", "output_current", "stage2")):
+        return "I_stage2"
+    if "latch" in role:
+        return "I_latch"
+    if any(token in role for token in ("tail", "input_pair", "current_mirror_load", "bias")):
+        return "I_tail"
+    return None
+
+
+def _rz_target_from_second_stage(state: DesignState) -> float | None:
+    gm = _gm_for_role(state, "second_stage_gain")
+    if gm and gm > 1e-12:
+        return 1.0 / gm
+    return None
+
+
+def _gm_for_role(state: DesignState, role: str) -> float | None:
+    for dev in state.topology.devices:
+        if dev.role == role and dev.id in state.transistors:
+            gm = state.transistors[dev.id].parameters.gm
+            if gm > 0:
+                return gm
+    return None
+
+
+def _format_knob(device: str, variable: str) -> str:
+    return f"{device}.{variable}" if device else f"global.{variable}"
+
+
+def _design_variables_for_knob(state: DesignState, device: str, variable: str) -> list[Any]:
+    return [dv for dv in state.design_variables if dv.device == device and dv.variable == variable]
+
+
+def _primary_design_variable(state: DesignState, device: str, variable: str):
+    matches = _design_variables_for_knob(state, device, variable)
+    return matches[0] if matches else None
+
+
+def _knob_group(state: DesignState, device: str, variable: str) -> list[str]:
+    dv = _primary_design_variable(state, device, variable)
+    if not dv or not dv.symmetry_label:
+        return [_format_knob(device, variable)]
+    group = [
+        _format_knob(item.device, item.variable)
+        for item in state.design_variables
+        if item.symmetry_label == dv.symmetry_label and item.variable == variable
+    ]
+    return group or [_format_knob(device, variable)]
+
+
+def _variable_range(state: DesignState, device: str, variable: str) -> dict[str, Any] | None:
+    dv = _primary_design_variable(state, device, variable)
+    if dv and dv.range:
+        return {"min": float(dv.range.min), "max": float(dv.range.max), "unit": dv.unit}
+    if device and variable == "gm_id":
+        r = state.constraints.get_gm_id_range(device)
+        return {"min": float(r.min), "max": float(r.max), "unit": ""}
+    if device and variable == "L":
+        r = state.constraints.get_L_range(device)
+        return {"min": float(r.min), "max": float(r.max), "unit": "m"}
+    return None
+
+
+def _current_variable_value(state: DesignState, device: str, variable: str) -> float | None:
+    if not device:
+        if variable in state.global_parameters:
+            return float(state.global_parameters[variable])
+        dv = _primary_design_variable(state, device, variable)
+        return float(dv.initial) if dv and dv.initial is not None else None
+
+    ts = state.transistors.get(device)
+    if ts is None:
+        dv = _primary_design_variable(state, device, variable)
+        return float(dv.initial) if dv and dv.initial is not None else None
+    if variable == "L":
+        if ts.parameters.L > 0:
+            return float(ts.parameters.L)
+        return float(ts.L_strategy) if ts.L_strategy else None
+    if variable == "gm_id":
+        if ts.gm_id_strategy:
+            return float(ts.gm_id_strategy)
+        if ts.parameters.gm_id_realized:
+            return float(ts.parameters.gm_id_realized)
+    value = getattr(ts.parameters, variable, None)
+    if value is not None:
+        return float(value)
+    dv = _primary_design_variable(state, device, variable)
+    return float(dv.initial) if dv and dv.initial is not None else None
+
+
+def _suggested_next_value(
+    current: float | None,
+    bounds: dict[str, Any] | None,
+    direction: str,
+    target_value: float | None,
+) -> float | None:
+    if direction == "set" and target_value is not None:
+        return _clip_to_bounds(float(target_value), bounds)
+    if current is None:
+        if not bounds:
+            return target_value
+        if direction == "increase":
+            return float(bounds["min"] + 0.65 * (bounds["max"] - bounds["min"]))
+        if direction == "decrease":
+            return float(bounds["min"] + 0.35 * (bounds["max"] - bounds["min"]))
+        return target_value
+    if direction == "increase":
+        return _clip_to_bounds(float(current) * 1.15, bounds)
+    if direction == "decrease":
+        return _clip_to_bounds(float(current) * 0.90, bounds)
+    return _clip_to_bounds(float(current), bounds)
+
+
+def _clip_to_bounds(value: float, bounds: dict[str, Any] | None) -> float:
+    if not bounds:
+        return value
+    return min(max(value, float(bounds["min"])), float(bounds["max"]))
+
+
+def _limit_status(current: float | None, bounds: dict[str, Any] | None, direction: str) -> str:
+    if current is None or not bounds:
+        return "unknown"
+    lo = float(bounds["min"])
+    hi = float(bounds["max"])
+    if hi <= lo:
+        return "invalid_range"
+    position = (float(current) - lo) / (hi - lo)
+    if direction == "increase" and position >= 0.95:
+        return "at_upper_bound"
+    if direction == "decrease" and position <= 0.05:
+        return "at_lower_bound"
+    if direction == "set":
+        return "setpoint"
+    return "within_range"
+
+
+def _range_update_hint(bounds: dict[str, Any] | None, direction: str, limit_status: str, variable: str) -> dict[str, Any] | None:
+    if not bounds:
+        return None
+    lo = float(bounds["min"])
+    hi = float(bounds["max"])
+    if limit_status == "at_upper_bound" and direction == "increase":
+        scale = 1.5 if variable == "L" else 1.25
+        return {"type": "expand_upper_bound", "suggested_max": hi * scale}
+    if limit_status == "at_lower_bound" and direction == "decrease":
+        scale = 0.75 if lo > 0 else 0.0
+        return {"type": "expand_lower_bound", "suggested_min": lo * scale}
+    return None
 
 
 def _path_chain_for_metric(state: DesignState, metric: str, cause_node: str, capabilities) -> list[str]:

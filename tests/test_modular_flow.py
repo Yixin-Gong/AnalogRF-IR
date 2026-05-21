@@ -296,6 +296,12 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     assert any(item["metric"] == "phase_margin" for item in causal["failure_symptom_analysis"])
     assert causal["root_cause_attribution"]
     assert causal["agent_failure_attribution"]["by_failure"]
+    assert causal["attribution_guided_tuning"]["by_failure"]
+    assert any(
+        action["knob"] == "global.Rz" and action["target_formula"] == "1/gm(second_stage_gain)"
+        for item in causal["attribution_guided_tuning"]["by_failure"]
+        for action in item["actions"]
+    )
     assert causal["counterfactual_predictions"]
     assert causal["suggested_validation_experiments"][0]["sweep"] == ["-10%", "-5%", "+5%", "+10%"]
 
@@ -335,7 +341,7 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
             "transistor_params": {
                 "M1": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
                 "M2": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
-                "M3": {"gm": 2.0e-4, "gds": 3.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 4.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
                 "M4": {"gm": 2.0e-4, "gds": 3.5e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
                 "M5": {"gm": 3.0e-4, "gds": 8.0e-5, "id": 4.0e-5, "vds": 0.15, "vdsat": 0.145, "region": "saturation"},
             },
@@ -354,11 +360,18 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
     top = causal["root_cause_attribution"][0]
     gain_path = causal["causal_paths"][0]["chain"]
+    tuning_actions = causal["attribution_guided_tuning"]["by_failure"][0]["actions"]
+    primary_action = tuning_actions[0]
 
     assert top["node"] != "device.M5.ro"
     assert "block.load_stage" in gain_path
     assert "device.M5.ro" not in gain_path
     assert causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
+    assert primary_action["knob"] == "M3.L"
+    assert primary_action["direction"] == "increase"
+    assert primary_action["apply_to"] == ["M3.L", "M4.L"]
+    assert primary_action["range_update"]["type"] == "expand_upper_bound"
+    assert causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] == "M3.L"
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

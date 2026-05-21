@@ -251,7 +251,7 @@ causal_diagnostics.json    Derived view of diagnostics.causal_diagnostics
 result.json                Derived compact view of diagnostics.result
 ```
 
-`design_state.yaml` is the unique state source after a run. The JSON files are convenience views generated from the `diagnostics` section in that schema. Causal diagnostics include a directed dependency graph, failure symptoms, ranked causal paths, root-cause attribution scores, counterfactual predictions, and SPICE perturbation experiments for validation.
+`design_state.yaml` is the unique state source after a run. The JSON files are convenience views generated from the `diagnostics` section in that schema. Causal diagnostics include a directed dependency graph, failure symptoms, ranked causal paths, root-cause attribution scores, and an attribution-guided tuning plan that maps each root cause to schema-level parameter moves such as `M3.L increase`, `global.Cc decrease`, or `global.Rz set to 1/gm(second_stage_gain)`. Validation experiments are kept as a secondary closed-loop check after the tuning plan is applied.
 
 ## Tests
 
