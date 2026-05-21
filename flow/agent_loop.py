@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
+from langgraph.graph import END, StateGraph
+
+from schemas.design_state import DesignState
 from diagnostics import apply_attribution_guided_tuning
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
 from frontends.design_input import StateBuilder
@@ -17,6 +20,21 @@ Emit = Callable[[str], None]
 class AgentLoopResult:
     rounds: list[dict[str, Any]]
     final_result: FlowResult
+
+
+class AgentGraphState(TypedDict, total=False):
+    current_schema: str
+    loop_dir: str
+    round_index: int
+    max_rounds: int
+    rounds: list[dict[str, Any]]
+    last_design_state: str
+    last_artifact_dir: str
+    last_spec_pass: bool
+    last_failed_targets: list[str]
+    agent_model: dict[str, Any]
+    last_tuning_application: dict[str, Any]
+    stop_reason: str
 
 
 class DiagnosticAgentLoop:
@@ -32,46 +50,130 @@ class DiagnosticAgentLoop:
         self.rounds = max(1, int(rounds))
         self.legacy_state_builder = legacy_state_builder
         self.emit = emit or (lambda _msg: None)
+        self._final_result: FlowResult | None = None
 
     def run(self) -> AgentLoopResult:
         loop_dir = Path(self.config.runs_dir) / f"agent_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         loop_dir.mkdir(parents=True, exist_ok=True)
-        current_schema = self.config.schema
-        summaries: list[dict[str, Any]] = []
-        final_result: FlowResult | None = None
-
-        for round_index in range(1, self.rounds + 1):
-            self.emit("\n" + "=" * 70)
-            self.emit(f"  Diagnostic agent round {round_index}/{self.rounds}")
-            self.emit("=" * 70)
-            round_seed = None if self.config.seed is None else int(self.config.seed) + round_index - 1
-            round_config = replace(self.config, schema=current_schema, seed=round_seed)
-            result = AnalogRFIRFlowRunner(
-                config=round_config,
-                legacy_state_builder=self.legacy_state_builder,
-                emit=self.emit,
-            ).run()
-            final_result = result
-            summary = self._round_summary(round_index, result)
-            summaries.append(summary)
-            self._print_round_summary(summary)
-
-            if round_index >= self.rounds or summary["spec_pass"]:
-                break
-
-            application = apply_attribution_guided_tuning(result.state, round_index=round_index)
-            self._print_application(application)
-            if not application["applied_actions"]:
-                self.emit("       No automatic tuning actions were applied; stopping diagnostic loop.")
-                break
-            tuned_schema = loop_dir / f"round_{round_index + 1:03d}_input.yaml"
-            result.state.to_yaml(tuned_schema)
-            current_schema = tuned_schema
-            self.emit(f"       Next schema: {tuned_schema}")
-
-        if final_result is None:
+        graph = self._build_graph()
+        final_state = graph.invoke(
+            {
+                "current_schema": str(self.config.schema),
+                "loop_dir": str(loop_dir),
+                "round_index": 1,
+                "max_rounds": self.rounds,
+                "rounds": [],
+                "stop_reason": "",
+            },
+            config={"recursion_limit": max(12, self.rounds * 5 + 4)},
+        )
+        if self._final_result is None:
             raise RuntimeError("Diagnostic agent loop did not run any rounds")
-        return AgentLoopResult(rounds=summaries, final_result=final_result)
+        if final_state.get("stop_reason"):
+            self.emit(f"       Agent graph stopped: {final_state['stop_reason']}")
+        return AgentLoopResult(rounds=final_state.get("rounds", []), final_result=self._final_result)
+
+    def _build_graph(self):
+        graph = StateGraph(AgentGraphState)
+        graph.add_node("execute_main_flow", self._execute_main_flow_node)
+        graph.add_node("read_schema_diagnostics", self._read_schema_diagnostics_node)
+        graph.add_node("agent_edit_schema", self._agent_edit_schema_node)
+        graph.set_entry_point("execute_main_flow")
+        graph.add_edge("execute_main_flow", "read_schema_diagnostics")
+        graph.add_conditional_edges(
+            "read_schema_diagnostics",
+            self._route_after_diagnostics,
+            {"edit_schema": "agent_edit_schema", "stop": END},
+        )
+        graph.add_conditional_edges(
+            "agent_edit_schema",
+            self._route_after_schema_edit,
+            {"execute": "execute_main_flow", "stop": END},
+        )
+        return graph.compile()
+
+    def _execute_main_flow_node(self, state: AgentGraphState) -> AgentGraphState:
+        round_index = int(state["round_index"])
+        self.emit("\n" + "=" * 70)
+        self.emit(f"  LangGraph node: execute_main_flow ({round_index}/{state['max_rounds']})")
+        self.emit("=" * 70)
+        round_seed = None if self.config.seed is None else int(self.config.seed) + round_index - 1
+        round_config = replace(self.config, schema=state["current_schema"], seed=round_seed)
+        result = AnalogRFIRFlowRunner(
+            config=round_config,
+            legacy_state_builder=self.legacy_state_builder,
+            emit=self.emit,
+        ).run()
+        self._final_result = result
+        summary = self._round_summary(round_index, result)
+        self._print_round_summary(summary)
+        return {
+            "rounds": list(state.get("rounds", [])) + [summary],
+            "last_design_state": str(result.artifacts.design_state),
+            "last_artifact_dir": str(result.artifacts.output_dir),
+            "last_spec_pass": bool(summary["spec_pass"]),
+            "last_failed_targets": list(summary["failed_targets"]),
+            "stop_reason": "",
+        }
+
+    def _read_schema_diagnostics_node(self, state: AgentGraphState) -> AgentGraphState:
+        self.emit("       LangGraph node: read_schema_diagnostics")
+        design_state_path = Path(state["last_design_state"])
+        schema_state = DesignState.from_yaml(design_state_path)
+        status = schema_state.diagnostics.get("result", {}).get("status", {})
+        causal = schema_state.diagnostics.get("causal_diagnostics", {})
+        tuning = causal.get("attribution_guided_tuning", {})
+        agent_model = {
+            "state_source": str(design_state_path),
+            "status": status,
+            "failed_targets": list(status.get("failed_targets", [])),
+            "tuning_failures": [
+                {
+                    "metric": item.get("metric"),
+                    "strategy": item.get("strategy"),
+                    "actions": item.get("actions", [])[:3],
+                }
+                for item in tuning.get("by_failure", [])
+            ],
+        }
+        return {
+            "agent_model": agent_model,
+            "last_spec_pass": bool(status.get("spec_pass", False)),
+            "last_failed_targets": list(status.get("failed_targets", [])),
+        }
+
+    def _agent_edit_schema_node(self, state: AgentGraphState) -> AgentGraphState:
+        self.emit("       LangGraph node: agent_edit_schema")
+        schema_state = DesignState.from_yaml(Path(state["last_design_state"]))
+        round_index = int(state["round_index"])
+        application = apply_attribution_guided_tuning(schema_state, round_index=round_index)
+        self._print_application(application)
+        if not application["applied_actions"]:
+            return {
+                "last_tuning_application": application,
+                "stop_reason": "no automatic schema edits were available",
+            }
+        tuned_schema = Path(state["loop_dir"]) / f"round_{round_index + 1:03d}_input.yaml"
+        schema_state.to_yaml(tuned_schema)
+        self.emit(f"       Next schema: {tuned_schema}")
+        return {
+            "current_schema": str(tuned_schema),
+            "round_index": round_index + 1,
+            "last_tuning_application": application,
+            "stop_reason": "",
+        }
+
+    def _route_after_diagnostics(self, state: AgentGraphState) -> str:
+        if state.get("last_spec_pass"):
+            return "stop"
+        if int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
+            return "stop"
+        return "edit_schema"
+
+    def _route_after_schema_edit(self, state: AgentGraphState) -> str:
+        if state.get("stop_reason"):
+            return "stop"
+        return "execute"
 
     def _round_summary(self, round_index: int, result: FlowResult) -> dict[str, Any]:
         status = result.state.diagnostics.get("result", {}).get("status", {})
@@ -112,4 +214,3 @@ class DiagnosticAgentLoop:
             self.emit(f"         {knobs}: new_initial={values}")
         for action in application.get("skipped_actions", []):
             self.emit(f"         skipped {action.get('knob')}: {action.get('reason')}")
-

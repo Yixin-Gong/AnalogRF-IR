@@ -192,7 +192,7 @@ python main.py \
   --agent-rounds <number_of_agent_rounds>
 ```
 
-Each agent round reads `diagnostics.causal_diagnostics.attribution_guided_tuning` from the previous `design_state.yaml`, applies the primary schema-level tuning actions with agent-selected step sizes, writes the next input schema under `runs/agent_loop_*/`, and reruns optimization and ngspice.
+The multi-round flow is orchestrated with LangGraph. The graph keeps execution and agent file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, and `agent_edit_schema` applies primary schema-level tuning actions with agent-selected step sizes before writing the next input schema under `runs/agent_loop_*/`.
 
 Import a SPICE netlist and write the generated schema:
 
