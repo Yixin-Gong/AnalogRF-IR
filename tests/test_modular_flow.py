@@ -19,6 +19,7 @@ from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter
+from postprocess.ota import _select_two_phase_candidate, tune_single_stage_ota_operating_point
 from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from postprocess.source_follower import _candidate_points
 from postprocess.two_stage import tune_two_stage_compensation
@@ -105,6 +106,10 @@ def test_ir_profile_drives_objectives_and_rule_filtering():
 
 
 def test_optimization_problem_and_postprocess_registry_are_capability_driven(tmp_path):
+    five_transistor = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"),
+        default_environment(),
+    )
     two_stage = build_design_state_from_yaml(
         load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
         default_environment(),
@@ -114,10 +119,19 @@ def test_optimization_problem_and_postprocess_registry_are_capability_driven(tmp
         default_environment(),
     )
 
+    five_transistor_problem = OptimizationProblem.from_state(five_transistor)
     two_stage_problem = OptimizationProblem.from_state(two_stage)
     source_follower_problem = OptimizationProblem.from_state(source_follower)
     registry = PostprocessRegistry()
 
+    five_transistor_context = PostprocessContext(
+        state=five_transistor,
+        sim=NgspiceSimulator(),
+        work_dir=tmp_path,
+        config=PostprocessConfig(),
+        profile=five_transistor_problem.profile,
+        capabilities=five_transistor_problem.capabilities,
+    )
     two_stage_context = PostprocessContext(
         state=two_stage,
         sim=NgspiceSimulator(),
@@ -135,8 +149,10 @@ def test_optimization_problem_and_postprocess_registry_are_capability_driven(tmp
         capabilities=source_follower_problem.capabilities,
     )
 
+    assert five_transistor_problem.estimator_key == "ota_compact"
     assert two_stage_problem.estimator_key == "ota_two_stage_miller"
     assert source_follower_problem.estimator_key == "ota_compact"
+    assert [item.name for item in registry.resolve(five_transistor_context)] == ["single_stage_ota_operating_point"]
     assert [item.name for item in registry.resolve(two_stage_context)] == ["two_stage"]
     assert [item.name for item in registry.resolve(source_follower_context)] == ["source_follower_operating_point"]
 
@@ -199,6 +215,146 @@ def test_source_follower_op_tune_includes_width_repair_candidates():
     assert (0.81, 0.47, 2.5) in points
     assert (0.80, 0.50, 2.0) in points
     assert (0.82, 0.55, 1.0) in points
+
+
+def test_single_stage_ota_postprocess_selects_ngspice_guided_bias(tmp_path):
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"),
+        default_environment(),
+    )
+    for dev_id in ("M1", "M2"):
+        state.transistors[dev_id].parameters.W = 1.0e-6
+        state.transistors[dev_id].parameters.L = 2.0e-7
+        state.transistors[dev_id].parameters.vgs = 0.55
+    for dev_id in ("M3", "M4"):
+        state.transistors[dev_id].parameters.W = 2.0e-6
+        state.transistors[dev_id].parameters.L = 3.0e-7
+    state.transistors["M5"].parameters.W = 1.0e-6
+    state.transistors["M5"].parameters.L = 2.0e-7
+    state.transistors["M5"].parameters.vgs = 0.50
+    state.global_parameters["vbias"] = 0.50
+
+    class FakeOTASimulator:
+        timeout_sec = 30.0
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            self.calls += 1
+            vbias = state.global_parameters.get("vbias", 0.0)
+            load_l = state.transistors["M3"].parameters.L
+            input_w = state.transistors["M1"].parameters.W
+            input_l = state.transistors["M1"].parameters.L
+            passing = vbias >= 0.56 and load_l >= 4.5e-7 and input_w >= 1.2e-6 and input_l >= 3.0e-7
+            if passing:
+                measurements = {
+                    "dc_gain_db": 48.0,
+                    "unity_gain_bandwidth": 1.2e8,
+                    "phase_margin": 70.0,
+                    "output_swing": 0.7,
+                    "total_power": 1.0e-4,
+                }
+                margin = 0.2
+            else:
+                measurements = {
+                    "dc_gain_db": 24.0,
+                    "unity_gain_bandwidth": 2.0e7,
+                    "phase_margin": 80.0,
+                    "output_swing": 0.6,
+                    "total_power": 5.0e-6,
+                }
+                margin = 0.1
+            operating_points = {
+                f"M{dev_id}": {"vds": margin + 0.12, "vdsat": 0.12, "gm": 1.0e-4, "gds": 1.0e-6, "id": 1.0e-5}
+                for dev_id in ("M1", "M2", "M3", "M4", "M5")
+            }
+            return SimulationResult(success=True, return_code=0, measurements=measurements, operating_points=operating_points)
+
+    sim = FakeOTASimulator()
+    result = tune_single_stage_ota_operating_point(state, sim, tmp_path)
+
+    assert result["spec_pass"] is True
+    assert result["candidate_count"] > 1
+    assert result["new_vbias"] >= 0.56
+    assert result["load_length_scale"] > 1.0
+    assert result["input_width_scale"] > 1.0
+    assert result["input_length_scale"] > 1.0
+    assert state.global_parameters["vbias"] == result["new_vbias"]
+
+
+def test_single_stage_ota_postprocess_keeps_bandwidth_guardrail():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"),
+        default_environment(),
+    )
+    records = [
+        {
+            "phase": "gain",
+            "vbias": 0.18,
+            "load_length_scale": 2.0,
+            "input_length_scale": 6.0,
+            "input_width_scale": 2.3,
+            "tail_width_scale": 0.8,
+            "tail_length_scale": 2.0,
+            "success": True,
+            "spec_pass": False,
+            "op_required_margin": 0.10,
+            "measurements": {
+                "dc_gain_db": 30.0,
+                "unity_gain_bandwidth": 6.0e5,
+                "phase_margin": 88.0,
+                "total_power": 1.0e-7,
+            },
+            "score": 1.0,
+        },
+        {
+            "phase": "bandwidth",
+            "vbias": 0.46,
+            "load_length_scale": 1.5,
+            "input_length_scale": 3.0,
+            "input_width_scale": 2.0,
+            "tail_width_scale": 1.4,
+            "tail_length_scale": 1.5,
+            "success": True,
+            "spec_pass": False,
+            "op_required_margin": 0.09,
+            "measurements": {
+                "dc_gain_db": 27.0,
+                "unity_gain_bandwidth": 6.0e7,
+                "phase_margin": 82.0,
+                "total_power": 8.0e-6,
+            },
+            "score": 2.0,
+        },
+        {
+            "phase": "bandwidth",
+            "vbias": 0.58,
+            "load_length_scale": 1.0,
+            "input_length_scale": 1.0,
+            "input_width_scale": 1.0,
+            "tail_width_scale": 2.0,
+            "tail_length_scale": 1.0,
+            "success": True,
+            "spec_pass": False,
+            "op_required_margin": 0.06,
+            "measurements": {
+                "dc_gain_db": 20.0,
+                "unity_gain_bandwidth": 1.4e8,
+                "phase_margin": 70.0,
+                "total_power": 2.0e-5,
+            },
+            "score": 3.0,
+        },
+    ]
+
+    selected = _select_two_phase_candidate(state, records)
+
+    assert selected["phase"] == "bandwidth"
+    assert selected["selected_phase"] == "bandwidth_guarded_after_gain"
+    assert selected["measurements"]["unity_gain_bandwidth"] == 6.0e7
+    assert selected["gain_anchor"]["unity_gain_bandwidth"] == 6.0e5
+    assert selected["bandwidth_guard_floor"] > 0.0
 
 
 def test_artifact_writer_emits_result_json(tmp_path):
@@ -389,12 +545,15 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert "block.load_stage" in gain_path
     assert "device.M5.ro" not in gain_path
     assert full_causal["agent_failure_attribution"]["by_failure"][0]["minimal_causal_factor_set"]
-    assert primary_action["knob"] == "M3.L"
+    assert primary_action["knob"] in {"M3.L", "M4.L"}
     assert primary_action["action_id"]
     assert primary_action["direction"] == "increase"
     assert primary_action["apply_to"] == ["M3.L", "M4.L"]
+    assert top["score_components"]["intervention"] > 0
+    assert top["propagation_path"]
+    assert causal["sensitivity_ranking_comparison"]["decision_rule"] == "causal_graph_ranking"
     assert primary_action["range_update"]["type"] == "expand_upper_bound"
-    assert full_causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] == "M3.L"
+    assert full_causal["agent_failure_attribution"]["by_failure"][0]["tuning_plan"][0]["knob"] in {"M3.L", "M4.L"}
 
     application = apply_attribution_guided_tuning(state, round_index=1)
     assert application["applied_actions"]
@@ -405,6 +564,71 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert m3_l.initial > 5.0e-7
     assert m4_l.initial == m3_l.initial
     assert m1_gm_id.initial > 15.0
+
+
+def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 34.0,
+            "unity_gain_bandwidth": 5.0e7,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "total_power": 5.0e-5,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 34.0,
+            "unity_gain_bandwidth": 5.0e7,
+            "phase_margin": 75.0,
+            "output_swing": 0.82,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "power": 5.0e-5,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"gain_deficit": 1.0, "bw_deficit": 1.0},
+    }
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"__global__": {}},
+            "transistor_params": {
+                "M1": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M2": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 4.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M4": {"gm": 2.0e-4, "gds": 3.5e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M5": {"gm": 3.0e-4, "gds": 8.0e-5, "id": 4.0e-5, "vds": 0.15, "vdsat": 0.145, "region": "saturation"},
+            },
+        },
+    )
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=5,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+    causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
+    gain_failure = next(item for item in causal["attribution_guided_tuning"]["by_failure"] if item["metric"] == "dc_gain")
+    gain_length_actions = [
+        action
+        for action in gain_failure["actions"]
+        if action["direction"] == "increase" and action["knob"].endswith(".L")
+    ]
+
+    assert gain_length_actions
+    assert all(action["priority"] == "secondary" for action in gain_length_actions)
+    assert all(action["max_step_fraction"] <= 0.10 for action in gain_length_actions)
+    assert all(action["multi_objective_guardrail"]["policy"].startswith("small secondary L increase") for action in gain_length_actions)
+    assert any(action["knob"] == "M1.gm_id" and action["priority"] == "primary" for action in gain_failure["actions"])
 
 
 def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(tmp_path):
@@ -459,7 +683,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     )
     state = build_design_state_from_yaml(load_yaml_mapping(artifacts.design_state), default_environment())
     available = state.diagnostics["causal_diagnostics"]["attribution_guided_tuning"]["by_failure"][0]["actions"]
-    m3_action = next(action for action in available if action["knob"] == "M3.L")
+    load_l_action = next(action for action in available if action["knob"] in {"M3.L", "M4.L"})
     m1_action = next(action for action in available if action["knob"] == "M1.gm_id")
 
     command = write_tuning_tool_command(
@@ -467,7 +691,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
         round_index=1,
         selected_actions=[
             {
-                "action_id": m3_action["action_id"],
+                "action_id": load_l_action["action_id"],
                 "decision": "apply",
                 "reason": "LLM chooses a smaller gain step to protect bandwidth.",
                 "overrides": {

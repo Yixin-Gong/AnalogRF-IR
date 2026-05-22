@@ -338,6 +338,23 @@ class AnalogRFIRFlowRunner:
                 f"evals={event.get('candidate_count', 0)}"
                 f"{scale_text}"
             )
+        elif etype == "single_stage_ota_op_tune":
+            meas = event.get("measurements", {}) or {}
+            self.emit(
+                f"       Single-stage OTA OP tune: "
+                f"phase={event.get('selected_phase', '')}, "
+                f"vbias={event.get('new_vbias', 0.0):.4f}V, "
+                f"M1/M2_W/L scale={event.get('input_width_scale', 1.0):.2f}/"
+                f"{event.get('input_length_scale', 1.0):.2f}, "
+                f"M3/M4_L scale={event.get('load_length_scale', 1.0):.2f}, "
+                f"M5_W/L scale={event.get('tail_width_scale', 1.0):.2f}/"
+                f"{event.get('tail_length_scale', 1.0):.2f}, "
+                f"gain~{meas.get('dc_gain_db', 0.0):.2f}dB, "
+                f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
+                f"PM~{meas.get('phase_margin', 0.0):.1f}deg, "
+                f"power~{meas.get('total_power', 0.0):.3e}W, "
+                f"evals={event.get('candidate_count', 0)}"
+            )
 
     def _print_simulation_summary(self, result: SimulationResult) -> None:
         if result.success:

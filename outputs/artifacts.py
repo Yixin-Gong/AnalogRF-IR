@@ -209,6 +209,7 @@ def _compact_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
         "method": causal.get("method", ""),
         "failure_symptom_analysis": causal.get("failure_symptom_analysis", []),
         "root_cause_attribution": _compact_root_causes(causal.get("root_cause_attribution", []) or []),
+        "sensitivity_ranking_comparison": _compact_sensitivity_comparison(causal.get("sensitivity_ranking_comparison", {}) or {}),
         "attribution_guided_tuning": {
             "author": tuning.get("author", ""),
             "by_failure": _compact_tuning_failures(tuning.get("by_failure", []) or []),
@@ -222,9 +223,25 @@ def _compact_root_causes(root_causes: list[dict[str, Any]]) -> list[dict[str, An
             "node": item.get("node"),
             "score": item.get("score"),
             "metrics": item.get("metrics", []),
+            "component": item.get("component"),
+            "score_components": item.get("score_components", {}),
+            "structural_reason": item.get("structural_reason", ""),
+            "propagation_path": item.get("propagation_path", []),
+            "spec_impact": item.get("spec_impact", ""),
         }
         for item in root_causes[:5]
     ]
+
+
+def _compact_sensitivity_comparison(comparison: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "decision_rule": comparison.get("decision_rule", ""),
+        "legacy_role": comparison.get("legacy_role", ""),
+        "causal_top": comparison.get("causal_top", [])[:5],
+        "legacy_sensitivity_top": comparison.get("legacy_sensitivity_top", [])[:5],
+        "top5_overlap_count": comparison.get("top5_overlap_count", 0),
+        "divergences": comparison.get("divergences", [])[:3],
+    }
 
 
 def _compact_tuning_failures(failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -255,8 +272,10 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "target_value",
         "target_formula",
         "agent_step_fraction",
+        "max_step_fraction",
         "range",
         "range_update",
+        "multi_objective_guardrail",
         "expected_effect",
         "tradeoffs",
         "rationale",

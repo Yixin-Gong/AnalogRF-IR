@@ -187,6 +187,7 @@ def apply_attribution_guided_tuning(
     else:
         selected = _actions_from_llm_selection(plan, selected_actions)
     selected.extend(_actions_from_custom_actions(custom_actions or []))
+    selected = _dedupe_execution_actions(selected)
     for action in selected:
         if action.get("_selection_error"):
             application.skipped_actions.append({**_action_summary(action), "reason": action["_selection_error"]})
@@ -334,6 +335,26 @@ def _actions_from_custom_actions(custom_actions: list[dict[str, Any]]) -> list[d
                 "llm_reason": custom.get("reason", ""),
             }
         )
+    return out
+
+
+def _dedupe_execution_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    seen: dict[tuple[tuple[str, ...], str], str] = {}
+    for action in actions:
+        if action.get("_selection_error") or action.get("llm_decision", "apply") != "apply":
+            out.append(action)
+            continue
+        target_knobs = tuple(action.get("apply_to") or [action.get("knob", "")])
+        key = (target_knobs, str(action.get("direction", "")))
+        previous = seen.get(key)
+        if previous:
+            duplicate = dict(action)
+            duplicate["_selection_error"] = f"duplicate tuning action for {', '.join(target_knobs)}; already covered by {previous}"
+            out.append(duplicate)
+            continue
+        seen[key] = str(action.get("action_id", "earlier action"))
+        out.append(action)
     return out
 
 

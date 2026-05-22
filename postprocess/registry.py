@@ -6,6 +6,7 @@ from typing import Protocol
 
 from asir.capabilities import CircuitCapabilities
 from asir.profiles import CircuitProfile
+from postprocess.ota import tune_single_stage_ota_operating_point
 from postprocess.source_follower import tune_source_follower_operating_point
 from postprocess.two_stage import TwoStagePostProcessor
 from schemas.design_state import DesignState
@@ -54,6 +55,24 @@ class TwoStagePass:
 
 
 @dataclass(frozen=True)
+class SingleStageOTAPass:
+    name: str = "single_stage_ota_operating_point"
+
+    def applies(self, context: PostprocessContext) -> bool:
+        return (
+            context.profile.name == "ota"
+            and context.capabilities.has("explicit_bias_ports")
+            and not context.capabilities.has("two_stage_gain")
+            and not context.capabilities.has("source_follower_regulation")
+            and not context.config.skip_dc_repair
+        )
+
+    def run(self, context: PostprocessContext) -> list[dict]:
+        event = tune_single_stage_ota_operating_point(context.state, context.sim, context.work_dir)
+        return [{"type": "single_stage_ota_op_tune", **event}] if event else []
+
+
+@dataclass(frozen=True)
 class SourceFollowerOperatingPointPass:
     name: str = "source_follower_operating_point"
 
@@ -72,6 +91,7 @@ class PostprocessRegistry:
     def __init__(self, passes: list[PostprocessPass] | None = None) -> None:
         self.passes = passes or [
             TwoStagePass(),
+            SingleStageOTAPass(),
             SourceFollowerOperatingPointPass(),
         ]
 

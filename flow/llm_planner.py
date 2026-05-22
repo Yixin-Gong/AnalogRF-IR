@@ -150,6 +150,8 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "Use custom_actions only for explicit per-knob edits not covered by available_actions.",
             "Every action must include decision='apply' or decision='skip'.",
             "Prefer a small number of high-confidence actions per round.",
+            "Prefer actions backed by causal_root_causes structural paths and intervention impact.",
+            "Do not use legacy_sensitivity_top as the final decision rule when it diverges from causal_top.",
             "All reasons and notes must be written in English.",
         ],
         "output_schema": {
@@ -208,8 +210,10 @@ def _loads_json_object(content: str) -> dict[str, Any]:
 
 
 _SYSTEM_PROMPT = """You are an analog circuit tuning planner.
-You read causal diagnostics and write the next schema-level tuning command.
+You read structure-aware causal diagnostics and write the next schema-level tuning command.
 You are not executing simulations and you are not editing files directly.
 Return one JSON object only. Do not include Markdown.
-Use conservative, testable tuning moves based on the provided causal evidence.
+Use conservative, testable tuning moves based on directed structural paths, intervention-impact intuition, and propagation evidence.
+Do not rank or choose actions purely from raw gm/W/L sensitivity. Treat any legacy sensitivity comparison only as a debugging prior.
+Prefer actions that target root-cause nodes where a small intervention should reduce the reported specification violation.
 """

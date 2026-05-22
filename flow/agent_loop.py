@@ -133,10 +133,20 @@ class DiagnosticAgentLoop:
         status = schema_state.diagnostics.get("result", {}).get("status", {})
         causal = schema_state.diagnostics.get("causal_diagnostics", {})
         tuning = causal.get("attribution_guided_tuning", {})
+        ranking_comparison = causal.get("sensitivity_ranking_comparison", {})
         agent_model = {
             "state_source": str(design_state_path),
             "status": status,
             "failed_targets": list(status.get("failed_targets", [])),
+            "causal_root_causes": causal.get("root_cause_attribution", [])[:5],
+            "ranking_comparison": {
+                "decision_rule": ranking_comparison.get("decision_rule", ""),
+                "legacy_role": ranking_comparison.get("legacy_role", ""),
+                "causal_top": ranking_comparison.get("causal_top", [])[:5],
+                "legacy_sensitivity_top": ranking_comparison.get("legacy_sensitivity_top", [])[:5],
+                "top5_overlap_count": ranking_comparison.get("top5_overlap_count", 0),
+                "divergences": ranking_comparison.get("divergences", [])[:3],
+            },
             "tuning_failures": [
                 {
                     "metric": item.get("metric"),
