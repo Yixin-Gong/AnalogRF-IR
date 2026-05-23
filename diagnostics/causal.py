@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from asir.capabilities import detect_circuit_capabilities
+from diagnostics.action_optimizer import (
+    apply_optimized_action_plan,
+    build_surrogate_intervention_model,
+    optimize_tuning_actions,
+)
 from schemas.design_state import DesignState
 from simulator.ngspice import SimulationResult
 from specs.models import CircuitSpecModel
@@ -72,6 +77,18 @@ def build_causal_diagnostics(
     predictions = _counterfactual_predictions(causes)
     experiments = _validation_experiments(causes)
     tuning = _attribution_guided_tuning(state, symptoms, causes)
+    intervention_model = (flow_meta or {}).get("local_intervention_model")
+    if not intervention_model:
+        intervention_model = build_surrogate_intervention_model(
+            tuning=tuning,
+            target_status=target_status,
+        )
+    action_optimizer = optimize_tuning_actions(
+        tuning=tuning,
+        target_status=target_status,
+        intervention_model=intervention_model,
+    )
+    tuning = apply_optimized_action_plan(tuning, action_optimizer)
     attribution = _agent_failure_attribution(state, symptoms, causes, paths, tuning)
     sensitivity_comparison = _sensitivity_ranking_comparison(state, symptoms, causes)
     return {
@@ -102,6 +119,8 @@ def build_causal_diagnostics(
         "root_cause_attribution": [cause.__dict__ for cause in causes],
         "agent_failure_attribution": attribution,
         "attribution_guided_tuning": tuning,
+        "local_intervention_model": intervention_model,
+        "constrained_action_optimizer": action_optimizer,
         "sensitivity_ranking_comparison": sensitivity_comparison,
         "counterfactual_predictions": predictions,
         "suggested_validation_experiments": experiments,

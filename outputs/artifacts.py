@@ -210,8 +210,11 @@ def _compact_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
         "failure_symptom_analysis": causal.get("failure_symptom_analysis", []),
         "root_cause_attribution": _compact_root_causes(causal.get("root_cause_attribution", []) or []),
         "sensitivity_ranking_comparison": _compact_sensitivity_comparison(causal.get("sensitivity_ranking_comparison", {}) or {}),
+        "local_intervention_model": _compact_intervention_model(causal.get("local_intervention_model", {}) or {}),
+        "constrained_action_optimizer": _compact_action_optimizer(causal.get("constrained_action_optimizer", {}) or {}),
         "attribution_guided_tuning": {
             "author": tuning.get("author", ""),
+            "decision_model": tuning.get("decision_model", {}),
             "by_failure": _compact_tuning_failures(tuning.get("by_failure", []) or []),
         },
     }
@@ -276,11 +279,62 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "range",
         "range_update",
         "multi_objective_guardrail",
+        "optimizer_selected",
+        "optimizer",
         "expected_effect",
         "tradeoffs",
         "rationale",
     )
     return {key: action[key] for key in keep if key in action}
+
+
+def _compact_intervention_model(model: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": model.get("schema_version", "analogrf_ir.local_intervention_model.v0_1"),
+        "method": model.get("method", ""),
+        "status": model.get("status", ""),
+        "metrics": model.get("metrics", []),
+        "base_violation_vector": model.get("base_violation_vector", {}),
+        "A": model.get("A", {}),
+        "action_effects": [
+            {
+                "action_id": item.get("action_id"),
+                "knob": item.get("knob"),
+                "source": item.get("source"),
+                "status": item.get("status"),
+                "delta_violation_vector": item.get("delta_violation_vector", {}),
+                "violation_reduction": item.get("violation_reduction"),
+                "uncertainty": item.get("uncertainty"),
+                "interpretation": item.get("interpretation", ""),
+            }
+            for item in (model.get("action_effects", []) or [])[:8]
+        ],
+    }
+
+
+def _compact_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": optimizer.get("schema_version", "analogrf_ir.constrained_action_optimizer.v0_1"),
+        "status": optimizer.get("status", ""),
+        "model_source": optimizer.get("model_source", ""),
+        "objective_before": optimizer.get("objective_before"),
+        "objective_after": optimizer.get("objective_after"),
+        "objective_improvement": optimizer.get("objective_improvement"),
+        "selected_actions": [
+            {
+                "action_id": item.get("action_id"),
+                "metric": item.get("metric"),
+                "priority": item.get("priority"),
+                "knob": item.get("knob"),
+                "apply_to": item.get("apply_to", []),
+                "direction": item.get("direction"),
+                "objective_delta": item.get("objective_delta"),
+                "local_model_source": item.get("local_model_source"),
+                "selection_reason": item.get("selection_reason", ""),
+            }
+            for item in (optimizer.get("selected_actions", []) or [])[:5]
+        ],
+    }
 
 
 def build_simulation_log(

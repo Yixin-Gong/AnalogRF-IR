@@ -20,6 +20,8 @@ class LLMPlannerConfig:
     timeout_seconds: float = 45.0
     temperature: float = 0.0
     max_tokens: int = 1400
+    thinking: str = "disabled"
+    reasoning_effort: str = ""
 
     @classmethod
     def from_env(
@@ -29,6 +31,11 @@ class LLMPlannerConfig:
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str = "DEEPSEEK_API_KEY",
+        timeout_seconds: float | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        thinking: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> "LLMPlannerConfig":
         selected_provider = os.environ.get("ANALOGRF_IR_LLM_PROVIDER", provider)
         selected_model = model or os.environ.get("ANALOGRF_IR_LLM_MODEL") or "deepseek-v4-flash"
@@ -44,9 +51,23 @@ class LLMPlannerConfig:
             model=selected_model,
             base_url=selected_base_url,
             api_key_env=selected_key_env,
-            timeout_seconds=float(os.environ.get("ANALOGRF_IR_LLM_TIMEOUT_SECONDS", "45")),
-            temperature=float(os.environ.get("ANALOGRF_IR_LLM_TEMPERATURE", "0")),
-            max_tokens=int(os.environ.get("ANALOGRF_IR_LLM_MAX_TOKENS", "1400")),
+            timeout_seconds=(
+                timeout_seconds
+                if timeout_seconds is not None
+                else float(os.environ.get("ANALOGRF_IR_LLM_TIMEOUT_SECONDS", "45"))
+            ),
+            temperature=(
+                temperature
+                if temperature is not None
+                else float(os.environ.get("ANALOGRF_IR_LLM_TEMPERATURE", "0"))
+            ),
+            max_tokens=(
+                max_tokens
+                if max_tokens is not None
+                else int(os.environ.get("ANALOGRF_IR_LLM_MAX_TOKENS", "1400"))
+            ),
+            thinking=thinking or os.environ.get("ANALOGRF_IR_LLM_THINKING", "disabled"),
+            reasoning_effort=reasoning_effort or os.environ.get("ANALOGRF_IR_LLM_REASONING_EFFORT", ""),
         )
 
 
@@ -82,6 +103,10 @@ class DeepSeekSchemaPlanner:
             command["llm_planner"] = {
                 "provider": self.config.provider,
                 "model": self.config.model,
+                "thinking": self.config.thinking,
+                "reasoning_effort": self.config.reasoning_effort,
+                "temperature": self.config.temperature,
+                "max_tokens": self.config.max_tokens,
                 "status": "ok",
                 "reason": planner_payload.get("rationale", "LLM returned a schema tuning command."),
             }
@@ -101,8 +126,10 @@ class DeepSeekSchemaPlanner:
             "max_tokens": self.config.max_tokens,
             "stream": False,
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": self.config.thinking},
         }
+        if self.config.thinking == "enabled" and self.config.reasoning_effort:
+            body["reasoning_effort"] = self.config.reasoning_effort
         request = urllib.request.Request(
             _completion_url(self.config.base_url),
             data=json.dumps(body).encode("utf-8"),
@@ -134,6 +161,10 @@ class DeepSeekSchemaPlanner:
         command["llm_planner"] = {
             "provider": self.config.provider,
             "model": self.config.model,
+            "thinking": self.config.thinking,
+            "reasoning_effort": self.config.reasoning_effort,
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
             "status": "fallback",
             "reason": reason,
         }
@@ -203,10 +234,49 @@ def _loads_json_object(content: str) -> dict[str, Any]:
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         text = "\n".join(lines).strip()
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        extracted = _extract_first_json_object(text)
+        if extracted is None:
+            prefix = text[:160].replace("\n", "\\n")
+            raise ValueError(f"LLM response was not parseable JSON; prefix={prefix!r}") from exc
+        try:
+            data = json.loads(extracted)
+        except json.JSONDecodeError as nested_exc:
+            prefix = extracted[:160].replace("\n", "\\n")
+            raise ValueError(f"LLM JSON object extraction failed; prefix={prefix!r}") from nested_exc
     if not isinstance(data, dict):
         raise ValueError("LLM response must be a JSON object")
     return data
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
 
 
 _SYSTEM_PROMPT = """You are an analog circuit tuning planner.

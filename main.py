@@ -35,6 +35,20 @@ def _parse_args(argv=None):
     parser.add_argument("--llm-model", default="", help="LLM planner model, defaults to deepseek-v4-flash")
     parser.add_argument("--llm-base-url", default="", help="OpenAI-compatible LLM base URL")
     parser.add_argument("--llm-api-key-env", default="DEEPSEEK_API_KEY", help="Environment variable containing the LLM API key")
+    parser.add_argument("--llm-timeout", type=float, default=None, help="LLM planner request timeout in seconds")
+    parser.add_argument("--llm-temperature", type=float, default=None, help="LLM planner sampling temperature")
+    parser.add_argument("--llm-max-tokens", type=int, default=None, help="LLM planner max output tokens")
+    parser.add_argument(
+        "--llm-thinking",
+        choices=("disabled", "enabled"),
+        default="",
+        help="LLM planner thinking mode for providers that support it",
+    )
+    parser.add_argument(
+        "--llm-reasoning-effort",
+        default="",
+        help="LLM planner reasoning effort, for example max",
+    )
     api_key_group = parser.add_mutually_exclusive_group()
     api_key_group.add_argument(
         "--llm-api-key",
@@ -66,6 +80,23 @@ def _parse_args(argv=None):
         "--skip-comp-tune",
         action="store_true",
         help="Skip ngspice-driven Cc/Rz compensation sweep before final verification",
+    )
+    parser.add_argument(
+        "--enable-intervention-model",
+        action="store_true",
+        help="Build a local action-to-spec model with small SPICE perturbations before agent action selection",
+    )
+    parser.add_argument(
+        "--intervention-max-actions",
+        type=int,
+        default=4,
+        help="Maximum causal tuning actions to perturb with SPICE for the local intervention model",
+    )
+    parser.add_argument(
+        "--intervention-perturbation",
+        type=float,
+        default=0.10,
+        help="Default fractional perturbation for local intervention modeling when an action has no explicit value",
     )
     parser.add_argument(
         "--no-asir",
@@ -107,6 +138,9 @@ def main(argv=None) -> int:
             ngspice_bin=args.ngspice_bin or None,
             tail_current_mirror=bool(args.tail_current_mirror),
             run_asir=not bool(args.no_asir),
+            enable_intervention_model=bool(args.enable_intervention_model or args.agent_rounds > 1),
+            intervention_max_actions=max(0, int(args.intervention_max_actions)),
+            intervention_perturbation_fraction=float(args.intervention_perturbation),
         )
         if args.agent_rounds > 1:
             DiagnosticAgentLoop(
@@ -118,6 +152,11 @@ def main(argv=None) -> int:
                     model=args.llm_model or None,
                     base_url=args.llm_base_url or None,
                     api_key_env=args.llm_api_key_env,
+                    timeout_seconds=args.llm_timeout,
+                    temperature=args.llm_temperature,
+                    max_tokens=args.llm_max_tokens,
+                    thinking=args.llm_thinking or None,
+                    reasoning_effort=args.llm_reasoning_effort or None,
                 ),
                 emit=print,
             ).run()

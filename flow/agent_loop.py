@@ -134,11 +134,26 @@ class DiagnosticAgentLoop:
         causal = schema_state.diagnostics.get("causal_diagnostics", {})
         tuning = causal.get("attribution_guided_tuning", {})
         ranking_comparison = causal.get("sensitivity_ranking_comparison", {})
+        intervention_model = causal.get("local_intervention_model", {})
+        action_optimizer = causal.get("constrained_action_optimizer", {})
         agent_model = {
             "state_source": str(design_state_path),
             "status": status,
             "failed_targets": list(status.get("failed_targets", [])),
             "causal_root_causes": causal.get("root_cause_attribution", [])[:5],
+            "local_intervention_model": {
+                "method": intervention_model.get("method", ""),
+                "status": intervention_model.get("status", ""),
+                "A": intervention_model.get("A", {}),
+                "action_effects": intervention_model.get("action_effects", [])[:5],
+            },
+            "constrained_action_optimizer": {
+                "status": action_optimizer.get("status", ""),
+                "model_source": action_optimizer.get("model_source", ""),
+                "objective_before": action_optimizer.get("objective_before"),
+                "objective_after": action_optimizer.get("objective_after"),
+                "selected_actions": action_optimizer.get("selected_actions", [])[:5],
+            },
             "ranking_comparison": {
                 "decision_rule": ranking_comparison.get("decision_rule", ""),
                 "legacy_role": ranking_comparison.get("legacy_role", ""),

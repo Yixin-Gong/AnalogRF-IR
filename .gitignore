@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 *.py[cod]
+runs/
 runs/iter_*/
 runs/agent_loop_*/
 runs/debug_*/

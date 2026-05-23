@@ -7,8 +7,16 @@ from asir.profiles import select_circuit_profile
 from core.environment import default_environment
 from core.rule_registry import list_rules
 from core.validator import Validator
-from diagnostics import agent_write_policy, apply_attribution_guided_tuning, execute_tuning_tool_commands, write_tuning_tool_command
-from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
+from diagnostics import (
+    agent_write_policy,
+    apply_optimized_action_plan,
+    apply_attribution_guided_tuning,
+    build_spice_intervention_model,
+    execute_tuning_tool_commands,
+    optimize_tuning_actions,
+    write_tuning_tool_command,
+)
+from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object
 from flow.agent_loop import DiagnosticAgentLoop
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from main import DEFAULT_AGENT_MAX_ITERATIONS, _configure_llm_api_key, _parse_args
@@ -631,6 +639,168 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
     assert any(action["knob"] == "M1.gm_id" and action["priority"] == "primary" for action in gain_failure["actions"])
 
 
+def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    spec_model = SpecRegistry().select(state)
+    base_measurements = {
+        "dc_gain_db": 58.0,
+        "unity_gain_bandwidth": 5.0e7,
+        "phase_margin": 60.0,
+        "slew_rate": 3.0e7,
+        "output_swing": 0.7,
+        "total_power": 2.0e-4,
+    }
+    target_status = {
+        name: spec_model.target_status(name, target, base_measurements, {})
+        for name, target in state.targets.items()
+    }
+    cc = state.global_parameters["Cc"]
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "unity_gain_bandwidth",
+                "actions": [
+                    {
+                        "action_id": "ugbw_01_global_Cc_decrease",
+                        "metric": "unity_gain_bandwidth",
+                        "rank": 1,
+                        "priority": "primary",
+                        "knob": "global.Cc",
+                        "apply_to": ["global.Cc"],
+                        "direction": "decrease",
+                        "current_value": cc,
+                        "suggested_unclipped_value": cc * 0.75,
+                        "expected_effect": {
+                            "unity_gain_bandwidth": "increase",
+                            "slew_rate": "increase",
+                            "phase_margin": "decrease",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    class FakeInterventionSim:
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            return SimulationResult(
+                success=True,
+                return_code=0,
+                measurements={
+                    "dc_gain_db": 58.0,
+                    "unity_gain_bandwidth": 1.2e8,
+                    "phase_margin": 54.0,
+                    "slew_rate": 8.0e7,
+                    "output_swing": 0.7,
+                    "total_power": 2.0e-4,
+                },
+            )
+
+    model = build_spice_intervention_model(
+        state=state,
+        sim=FakeInterventionSim(),
+        work_dir=tmp_path,
+        spec_model=spec_model,
+        target_status=target_status,
+        tuning=tuning,
+        max_actions=1,
+    )
+
+    assert model["method"] == "spice_small_perturbation"
+    assert model["A"]["columns"] == ["ugbw_01_global_Cc_decrease"]
+    row = model["A"]["rows"].index("unity_gain_bandwidth")
+    assert model["A"]["values"][row][0] < 0
+    effect = model["action_effects"][0]
+    assert effect["source"] == "spice_small_perturbation"
+    assert effect["violation_reduction"] > 0
+
+
+def test_constrained_optimizer_selects_action_with_best_local_model_support():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    target_status = {
+        "unity_gain_bandwidth": {
+            "status": "fail",
+            "value": 5.0e7,
+            "min": 1.0e8,
+            "max": None,
+            "priority": 1,
+        },
+        "phase_margin": {
+            "status": "pass",
+            "value": 60.0,
+            "min": 50.0,
+            "max": None,
+            "priority": 1,
+        },
+    }
+    tuning = {
+        "author": "unit",
+        "by_failure": [
+            {
+                "metric": "unity_gain_bandwidth",
+                "actions": [
+                    {
+                        "action_id": "bad_Cc_increase",
+                        "metric": "unity_gain_bandwidth",
+                        "rank": 1,
+                        "priority": "primary",
+                        "knob": "global.Cc",
+                        "apply_to": ["global.Cc"],
+                        "direction": "increase",
+                        "expected_effect": {"unity_gain_bandwidth": "decrease"},
+                    },
+                    {
+                        "action_id": "good_Cc_decrease",
+                        "metric": "unity_gain_bandwidth",
+                        "rank": 2,
+                        "priority": "primary",
+                        "knob": "global.Cc",
+                        "apply_to": ["global.Cc"],
+                        "direction": "decrease",
+                        "expected_effect": {"unity_gain_bandwidth": "increase"},
+                    },
+                ],
+            }
+        ],
+    }
+    intervention_model = {
+        "base_violation_vector": {"unity_gain_bandwidth": 0.5, "phase_margin": 0.0},
+        "action_effects": [
+            {
+                "action_id": "bad_Cc_increase",
+                "status": "ok",
+                "source": "spice_small_perturbation",
+                "delta_violation_vector": {"unity_gain_bandwidth": 0.2, "phase_margin": 0.0},
+                "uncertainty": 0.1,
+            },
+            {
+                "action_id": "good_Cc_decrease",
+                "status": "ok",
+                "source": "spice_small_perturbation",
+                "delta_violation_vector": {"unity_gain_bandwidth": -0.35, "phase_margin": 0.0},
+                "uncertainty": 0.1,
+            },
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(
+        tuning=tuning,
+        target_status=target_status,
+        intervention_model=intervention_model,
+    )
+    optimized_tuning = apply_optimized_action_plan(tuning, optimizer)
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": optimizer,
+        "attribution_guided_tuning": optimized_tuning,
+    }
+    command = write_tuning_tool_command(state, round_index=1)
+
+    assert optimizer["status"] == "ok"
+    assert optimizer["selected_actions"][0]["action_id"] == "good_Cc_decrease"
+    assert optimized_tuning["decision_model"]["selected_action_ids"] == ["good_Cc_decrease"]
+    assert command["args"]["selected_actions"][0]["action_id"] == "good_Cc_decrease"
+
+
 def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(tmp_path):
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
     result = SimulationResult(
@@ -862,14 +1032,72 @@ def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeyp
             }
 
     result = FakePlanner(
-        LLMPlannerConfig(provider="deepseek", model="deepseek-v4-flash", api_key_env="DEEPSEEK_API_KEY")
+        LLMPlannerConfig(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key_env="DEEPSEEK_API_KEY",
+            thinking="enabled",
+            reasoning_effort="max",
+            temperature=0.2,
+            max_tokens=2048,
+        )
     ).write_command(state, round_index=2, agent_model={"failed_targets": ["unity_gain_bandwidth"]})
 
     command = result.command
     assert result.used_llm is True
     assert command["llm_planner"]["status"] == "ok"
+    assert command["llm_planner"]["model"] == "deepseek-v4-pro"
+    assert command["llm_planner"]["thinking"] == "enabled"
+    assert command["llm_planner"]["reasoning_effort"] == "max"
+    assert command["llm_planner"]["temperature"] == 0.2
+    assert command["llm_planner"]["max_tokens"] == 2048
     assert command["args"]["selected_actions"][0]["decision"] == "skip"
     assert command["args"]["custom_actions"][0]["knob"] == "global.I_tail"
+
+
+def test_langgraph_llm_ai_options_are_configurable_from_cli():
+    args = _parse_args(
+        [
+            "--llm-model",
+            "deepseek-v4-pro",
+            "--llm-thinking",
+            "enabled",
+            "--llm-reasoning-effort",
+            "max",
+            "--llm-temperature",
+            "0.1",
+            "--llm-max-tokens",
+            "4096",
+            "--llm-timeout",
+            "90",
+        ]
+    )
+    config = LLMPlannerConfig.from_env(
+        model=args.llm_model or None,
+        thinking=args.llm_thinking or None,
+        reasoning_effort=args.llm_reasoning_effort or None,
+        temperature=args.llm_temperature,
+        max_tokens=args.llm_max_tokens,
+        timeout_seconds=args.llm_timeout,
+    )
+
+    assert config.model == "deepseek-v4-pro"
+    assert config.thinking == "enabled"
+    assert config.reasoning_effort == "max"
+    assert config.temperature == 0.1
+    assert config.max_tokens == 4096
+    assert config.timeout_seconds == 90
+
+
+def test_llm_json_loader_extracts_object_from_non_strict_response():
+    data = _loads_json_object(
+        "The selected actions are:\n"
+        '{"selected_actions": [{"action_id": "a", "decision": "apply"}], "rationale": "ok"}\n'
+        "Done."
+    )
+
+    assert data["selected_actions"][0]["action_id"] == "a"
+    assert data["rationale"] == "ok"
 
 
 def test_agent_loop_defaults_to_twenty_iterations_and_routes_on_stop_reason():

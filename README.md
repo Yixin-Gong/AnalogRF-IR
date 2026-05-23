@@ -1,321 +1,229 @@
 # AnalogRF-IR
 
-Version: v0.1
+AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow. It converts circuit intent into a typed intermediate representation, runs gm/ID-aware sizing and multi-objective optimization, validates candidates with ngspice, and records structured diagnostics for engineer-in-the-loop and agent-assisted design iteration.
 
-AnalogRF-IR is a schema-driven analog and RF circuit optimization flow. It uses an intermediate representation (IR), ASIR semantic extraction, gm/ID sizing, physics-informed validation, NSGA-II optimization, and ngspice-backed measurements to iterate on analog circuit designs.
+The current development focus is **structure-aware diagnosis and optimization for OTA-class analog circuits**, including five-transistor OTAs and two-stage Miller OTAs. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
 
-The project is intended for reusable circuit-family workflows: OTA, comparator, sample-and-hold, and future RF blocks should each select their own IR profile, rule checks, constraints, and objectives.
+> License notice: this repository is source-available only. All rights are reserved. See [LICENSE](LICENSE).
 
-## Core Capabilities
+## Highlights
 
-- YAML-first circuit descriptions with structured devices, variables, targets, and simulation requests.
-- ASIR semantic extraction for topology roles, symmetry groups, compensation networks, and dynamic comparator structure.
-- IR-level circuit profiles that select family-specific metrics, required context, rule checks, constraints, and auto-generated objectives.
-- gm/ID-based compact sizing and NSGA-II optimization.
-- Physics-informed validation for operating regions, bias feasibility, symmetry, compensation, and dynamic comparator context.
-- ngspice-backed AC, DC, transient, slew-rate, headroom, and operating-point checks.
-- Structured run artifacts for agents, scripts, and manual review.
+- YAML-first design state for devices, variables, targets, evaluations, and diagnostics.
+- ASIR semantic extraction for circuit roles, symmetry groups, bias paths, gain stages, and compensation networks.
+- Profile-driven behavior for OTA, comparator, and future RF circuit families.
+- gm/ID-based compact sizing with NSGA-II exploration.
+- ngspice-backed AC, DC, transient, operating-point, slew-rate, and headroom measurements.
+- Postprocess hooks for bias repair, OP validation, and compensation tuning.
+- LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
+- DeepSeek-compatible LLM planner with deterministic fallback behavior.
+- Local SPICE intervention modeling for action-to-spec attribution.
+- Constrained action optimization over schema-safe tuning moves.
+- Structured run artifacts for reproducibility, debugging, and human review.
 
 ## Repository Layout
 
 ```text
-asir/                 Semantic IR, profile selection, and extraction helpers
-core/                 Validation, design rules, regions, and environment models
-feasibility/          Physics-informed feasibility estimators
-flow/                 End-to-end orchestration
-frontends/            YAML and SPICE input frontends
-inputs/               Circuit-family schema library
-netlist/              Schema-to-SPICE netlist generation
-optimizer/            NSGA-II and compact circuit evaluator
-outputs/              Structured result and diagnostic artifact writers
-postprocess/          ngspice-guided repair and compensation tuning
-pygmid/               gm/ID lookup-table adapter and generation helpers
-schemas/              Dataclasses for the design state schema
-simulator/            ngspice execution and measurement extraction
-scripts/              CLI helpers for feasibility, Pareto, and SPICE conversion
-tables/               Lookup tables for supported process examples
-tests/                Regression tests
-docs/                 Maintained usage, architecture, schema, and development docs
+asir/          Semantic IR, profile selection, and extraction helpers
+core/          Design rules, validation, regions, and process environment models
+diagnostics/   Causal diagnostics, ranking, and agent-readable reports
+feasibility/   Physics-informed feasibility estimation
+flow/          End-to-end orchestration and agent loop control
+frontends/     YAML and SPICE input frontends
+inputs/        Maintained circuit-family schema examples
+netlist/       Schema-to-SPICE generation
+optimizer/     Compact evaluators and NSGA-II optimization
+postprocess/   ngspice-guided repair and compensation tuning
+schemas/       Typed design-state schema definitions
+simulator/     ngspice execution and measurement extraction
+specs/         Specification and metric utilities
+tests/         Regression tests
+docs/          Architecture, quickstart, schema, and development notes
 ```
 
 ## Requirements
 
-- Ubuntu Linux
+- Ubuntu Linux or WSL Ubuntu
 - Python 3.10 or newer
-- `python3-venv` and `pip`
-- NumPy and the Python packages listed in `requirements.txt`
-- pytest for regression tests
-- ngspice for simulator-backed validation
-- Process model files or lookup tables for the target technology
+- `python3-venv`, `pip`, and `ngspice`
+- Python packages in `requirements.txt`
+- Process model files and lookup tables for the target technology
 
-Install common Ubuntu packages:
+Install system dependencies:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 python3-venv python3-pip ngspice
 ```
 
-Create a fresh Python environment:
+Create a local Python environment:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
-rm -rf .venv
+cd /path/to/AnalogRF-IR
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-## Inputs
-
-The main inputs are:
-
-- Environment YAML: technology, supply, simulator, model paths, and lookup-table configuration.
-- Circuit schema YAML: topology, devices, roles, design variables, targets, loss terms, and evaluation requests.
-- Optional SPICE netlist: imported before optimization when `--spice` is provided.
-
-Use explicit paths in production runs. Do not rely on CLI defaults:
-
-```bash
---env <path/to/your/environment.yaml>
---schema <path/to/your/circuit_schema.yaml>
---spice <path/to/your/input_netlist.spice>
-```
-
-Example schemas are organized by circuit family:
-
-```text
-inputs/
-  ota/
-    five_transistor/
-      five_transistor_ota.yaml
-    two_stage_miller/
-      two_stage_miller_ota.yaml
-    source_follower_boosted/
-      source_follower_boosted_ota.yaml
-  comparator/
-    strongarm/
-      strongarm_v1.yaml
-    double_tail/
-      double_tail_v1.yaml
-    sense_amplifier/
-      sense_amplifier_v1.yaml
-```
-
-`inputs/ota/two_stage_miller/two_stage_miller_ota.yaml` is the more complex OTA example. It models a five-transistor input OTA, a second-stage inverter, Miller capacitor `Cc`, zero-setting resistor `Rz`, and bias mirror devices.
-
-`inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml` is a source-follower-regulated OTA example. It intentionally has no `Rz-Cc` compensation network; the source follower is treated as local output-resistance boosting with output common-mode headroom as the key trade-off.
-
-## IR Profiles
-
-Circuit-family behavior is selected in the IR layer through `asir/profiles.py`.
-
-Each profile maps circuit class and architecture to:
-
-- Metric aliases and metric groups.
-- Required context parameters.
-- Dynamic-device role policy.
-- Static validation behavior.
-- Auto-generated objective terms.
-- Rule filters used by the validator.
-
-The validator, spec registry, optimizer, and netlist generator consume the selected profile instead of hard-coding OTA or comparator behavior locally. To add a new circuit family, define a profile first, then attach only the rules, constraints, objectives, estimators, and simulator measurements that belong to that profile.
-
-After profile selection, the IR layer derives a capability set such as `two_stage_gain`, `miller_rc_compensation`, `source_follower_regulation`, `dynamic_latch`, or `tail_current_mirror`. The optimizer receives one `OptimizationProblem` regardless of topology, and post-optimization repair is selected through a `PostprocessRegistry` from those capabilities. This keeps circuit structure separate from the optimization algorithm: a topology changes the active objectives, constraints, estimator, and postprocess passes, not the optimizer API.
-
-Example profile-driven behavior:
-
-- OTA profiles use static operating-region checks, symmetry checks, compensation objectives, and two-stage stability diagnostics.
-- Comparator profiles use dynamic-role checks, comparator metric coverage, clock/load context checks, and comparator-specific compact metrics.
-- Sample-and-hold profiles can add acquisition, hold, droop, charge-injection, and settling objectives without changing OTA or comparator code paths.
-
-## Running Optimization
+## Quick Start
 
 Run a two-stage OTA optimization:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
+cd /path/to/AnalogRF-IR
 . .venv/bin/activate
+
 python main.py \
-  --env <path/to/your/environment.yaml> \
-  --schema <path/to/your/two_stage_ota.yaml> \
-  --topology yaml \
-  --generations <number_of_generations> \
-  --pop-size <population_size> \
-  --seed <integer_seed>
+  --env environment_ihp_sg13g2.yaml \
+  --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
+  --topology two_stage \
+  --generations 4 \
+  --pop-size 20 \
+  --seed 17
 ```
 
-Run a dynamic comparator optimization:
+Run a five-transistor OTA optimization:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
-. .venv/bin/activate
 python main.py \
-  --env <path/to/your/environment.yaml> \
-  --schema <path/to/your/comparator.yaml> \
-  --topology yaml \
-  --generations <number_of_generations> \
-  --pop-size <population_size> \
-  --seed <integer_seed> \
-  --skip-dc-repair \
-  --skip-comp-tune
+  --env environment_ihp_sg13g2.yaml \
+  --schema inputs/ota/five_transistor/five_transistor_ota.yaml \
+  --topology five \
+  --generations 4 \
+  --pop-size 20 \
+  --seed 17
 ```
 
-Run a fast smoke test:
+Run the regression suite:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
 . .venv/bin/activate
-python main.py \
-  --env <path/to/your/environment.yaml> \
-  --schema <path/to/your/circuit_schema.yaml> \
-  --topology yaml \
-  --generations 3 \
-  --pop-size 10 \
-  --seed <integer_seed> \
-  --skip-dc-repair \
-  --skip-comp-tune
+python -m pytest -q
 ```
 
-Run diagnosis-guided schema tuning for multiple rounds:
+## LLM-Guided Diagnosis
+
+The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the source of truth and only applies edits through schema-level actions.
+
+Set a DeepSeek API key before running LLM-guided rounds:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
-. .venv/bin/activate
+export DEEPSEEK_API_KEY="..."
+```
+
+Run a DeepSeek-guided two-stage OTA flow:
+
+```bash
 python main.py \
-  --env <path/to/your/environment.yaml> \
-  --schema <path/to/your/circuit_schema.yaml> \
-  --topology yaml \
-  --generations <number_of_generations> \
-  --pop-size <population_size> \
-  --seed <integer_seed> \
+  --env environment_ihp_sg13g2.yaml \
+  --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
+  --topology two_stage \
+  --generations 4 \
+  --pop-size 20 \
+  --seed 17 \
   --agent-rounds 20 \
   --llm-provider deepseek \
-  --llm-model deepseek-v4-flash
+  --llm-model deepseek-v4-pro \
+  --llm-thinking enabled \
+  --llm-reasoning-effort max \
+  --llm-timeout 180 \
+  --llm-max-tokens 12000 \
+  --intervention-max-actions 3
 ```
 
-Set `DEEPSEEK_API_KEY` before running LLM-guided rounds. The DeepSeek planner uses the OpenAI-compatible `/chat/completions` endpoint with `https://api.deepseek.com` by default. If the key is not set, the flow records an LLM fallback status and keeps the deterministic schema command so local tests remain runnable.
+If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
 
-The default LLM-guided stopping condition is spec satisfaction, with a maximum of 20 iterations. Override the maximum with `--agent-rounds <maximum_iterations>`.
+## Causal Action Planning
 
-The multi-round flow is orchestrated with LangGraph. The graph keeps execution and LLM file work separate: `execute_main_flow` runs the optimizer/ngspice flow and emits artifacts, `read_schema_diagnostics` reads the previous `design_state.yaml` as the state source, `llm_write_schema_command` calls the DeepSeek schema planner, and `execute_schema_command` executes that command before writing the next input schema under `runs/agent_loop_*/`.
+The agent action layer is modeled as a local constrained optimization problem rather than a raw candidate-selection heuristic.
 
-The LLM interface is intentionally schema-native. The command is written to `diagnostics.agent_tool_commands[]` with `args.available_actions`, editable `args.selected_actions`, and optional `args.custom_actions`. An LLM can select individual action IDs, skip actions, override fine-grained fields such as `apply_to`, `suggested_next_value`, `agent_step_fraction`, `range_update`, `direction`, and rationale, or add custom per-knob actions with explicit values and range updates. The executor only applies schema actions with `decision: apply`.
+Each agent round follows three steps:
 
-Import a SPICE netlist and write the generated schema:
+1. **Causal graph diagnosis** ranks structural root-cause nodes from the dependency graph, operating-point evidence, propagation paths, and weak sensitivity priors.
+2. **Local intervention modeling** perturbs a small number of schema-safe actions in SPICE and builds a local matrix `A`, where each column estimates how one action changes normalized spec violation.
+3. **Constrained action optimization** selects the next schema edits by minimizing residual weighted violation plus penalties for uncertainty, duplicate knob writes, guarded actions, and cross-metric regressions.
 
-```bash
-cd <path/to/your/AnalogRF-IR>
-. .venv/bin/activate
-python main.py \
-  --env <path/to/your/environment.yaml> \
-  --spice <path/to/your/input_netlist.spice> \
-  --spice-yaml-out <path/to/your/generated_schema.yaml> \
-  --schema <path/to/your/generated_schema.yaml> \
-  --topology yaml
-```
+When SPICE intervention data is available, automatic action selection is restricted to actions that were actually perturbed in the local `A` matrix. Surrogate estimates are retained as fallback evidence and debugging context, not as the preferred decision rule.
 
-## Feasibility Check
+The resulting artifacts are written into `diagnostics.causal_diagnostics.local_intervention_model`, `diagnostics.causal_diagnostics.constrained_action_optimizer`, and `diagnostics.causal_diagnostics.attribution_guided_tuning`.
 
-Run the physics-informed feasibility checker before a full optimization:
+## Design State Contract
 
-```bash
-cd <path/to/your/AnalogRF-IR>
-. .venv/bin/activate
-python scripts/run_feasibility_check.py \
-  --env <path/to/your/environment.yaml> \
-  --schema <path/to/your/circuit_schema.yaml> \
-  --topology yaml \
-  --samples <number_of_samples> \
-  --seed <integer_seed>
-```
+AnalogRF-IR treats the generated design state as the canonical interface between optimization, simulation, diagnosis, and agent actions.
 
-## Validation Semantics
-
-The flow validates the operating point before trusting higher-level metrics.
-
-For two-stage Miller OTAs:
-
-- Confirm bias and operating regions first.
-- Preserve device symmetry for matched pairs and mirror/reference groups.
-- Pull the dominant pole lower with `Cc` when diagnosing two-stage stability failures.
-- Place the compensation zero with `Rz ~= 1/gm2`, where `gm2` is the second-stage transconductance.
-- Use ngspice AC and operating-point measurements as the final authority after compact optimization.
-
-For OTAs without explicit `Rz-Cc` compensation:
-
-- Do not synthesize `Cc`, `Rz`, or Miller zero objectives from architecture alone.
-- Derive stability diagnostics from the declared poles, loads, and local feedback paths.
-- Treat source-follower regulation as output-resistance boosting, not compensation.
-- Retune source-follower bias voltages after sizing so the regulated load, input pair, and tail source all land in a valid OP region.
-- Allow a bounded regulated-source current-source width repair when bias-only retuning cannot satisfy phase margin, bandwidth, and OP headroom together.
-- Check output common-mode headroom before trusting gain and bandwidth estimates.
-
-For dynamic comparators:
-
-- Check clock, load, input step, and dynamic role context.
-- Measure or estimate delay, regeneration time, reset time, offset, input-referred noise, kickback, energy, PDP/EDP, input capacitance, output swing, ICMR, metastability margin, maximum sample rate, area, and average dynamic power.
-- Treat compact estimates as optimizer guidance until dedicated transient, noise, and Monte Carlo testbenches are available.
+- User-authored inputs define the initial circuit, process environment, targets, and editable variables.
+- Generated schemas capture the current design state, operating-point data, simulation measurements, diagnostics, and available schema actions.
+- Agent actions are restricted to explicit schema-edit commands. The planner should not modify topology, simulator output, or hidden internal state directly.
+- Derived JSON files are convenience views; `design_state.yaml` remains the authoritative run artifact.
 
 ## Outputs
 
-Each run writes a new directory under:
+Each execution writes a run directory under:
 
 ```text
-<path/to/your/AnalogRF-IR>/runs/iter_###/
+runs/iter_###/
 ```
 
 Typical artifacts:
 
 ```text
-design_state.yaml          Updated schema, transistor state, simulation outputs, and diagnostics
+design_state.yaml          Canonical design state and diagnostics
 netlist.cir                Generated SPICE netlist
-sim_log.json               Derived view of diagnostics.simulation_log
-agent_diagnostics.json     Derived view of diagnostics.agent_diagnostics
-causal_diagnostics.json    Derived view of diagnostics.causal_diagnostics
-result.json                Derived compact view of diagnostics.result
+result.json                Compact metric and pass/fail summary
+agent_diagnostics.json     Agent-facing diagnosis and action context
+causal_diagnostics.json    Structural causal diagnosis view
+sim_log.json               Simulator log view derived from design_state.yaml
 ```
 
-`design_state.yaml` is the unique state source after a run. The JSON files are convenience views generated from the `diagnostics` section in that schema. Causal diagnostics include a directed dependency graph, failure symptoms, ranked causal paths, root-cause attribution scores, and an attribution-guided tuning plan that maps each root cause to schema-level parameter moves such as `M3.L increase`, `global.Cc decrease`, or `global.Rz set to 1/gm(second_stage_gain)`. Validation experiments are kept as a secondary closed-loop check after the tuning plan is applied.
+The causal diagnostics layer records failure symptoms, dependency paths, ranked causal candidates, and tuning recommendations. This layer is under active development toward intervention-calibrated, structure-aware action planning.
 
-## Tests
+## Documentation
 
-Run the regression suite:
+Additional project notes are maintained in [docs](docs/):
+
+- [Quick Start](docs/quickstart.md)
+- [Architecture](docs/architecture.md)
+- [Schema Guide](docs/schema_guide.md)
+- [Development Guide](docs/development.md)
+
+## Development
+
+Recommended workflow:
 
 ```bash
-cd <path/to/your/AnalogRF-IR>
 . .venv/bin/activate
 python -m pytest -q
+python -m compileall asir core diagnostics flow frontends netlist optimizer postprocess schemas simulator specs tests
 ```
 
-Run a syntax check over the main packages:
+When adding a new circuit family:
 
-```bash
-cd <path/to/your/AnalogRF-IR>
-. .venv/bin/activate
-python -m compileall asir core flow frontends netlist optimizer specs tests
-```
-
-## Extending The Flow
-
-Recommended order for adding a new circuit type:
-
-1. Add or update an IR profile in `asir/profiles.py`.
-2. Add schema examples with clear device roles, symmetry labels, variables, targets, and evaluations.
-3. Register profile-specific rules with `circuit_profiles=(...)`.
-4. Add compact estimator support in the optimizer only for metrics that have defensible analytical models.
+1. Define or update the IR profile in `asir/profiles.py`.
+2. Add schema examples with explicit device roles, symmetry labels, variables, targets, and evaluations.
+3. Register profile-specific rules and validation behavior.
+4. Add compact estimators only where the analytical model is defensible.
 5. Add simulator measurements for final validation.
-6. Add tests that prove the selected profile triggers the expected rules, constraints, and objectives.
+6. Add regression tests for profile selection, constraints, diagnostics, and output artifacts.
 
-Keep profile-specific behavior behind the IR profile boundary. Generic validation should stay generic; OTA, comparator, sample-and-hold, and RF-specific behavior should be activated by the selected profile.
+## Current Limitations
 
-## Known Limitations
+- Compact models are optimization guidance, not signoff results.
+- Output swing and ICMR are primarily OP/headroom estimates unless explicit sweeps are added.
+- Comparator delay, offset, kickback, noise, energy, and metastability require dedicated transient, noise, and Monte Carlo testbenches.
+- RF-specific flows still need S-parameter, noise figure, compression, matching, linearity, and stability extensions.
+- LLM-guided diagnosis is experimental and should be treated as a planner/explainer layer over simulator-backed evidence.
 
-- Compact estimates are optimizer guidance, not signoff.
-- Output swing and ICMR are currently operating-point headroom estimates unless explicit sweeps are added.
-- Comparator offset, noise, kickback, energy, and metastability need dedicated transient, noise, or Monte Carlo testbenches for signoff-grade validation.
-- RF-specific blocks still require profile, schema, estimator, and simulator extensions for S-parameters, noise figure, matching, compression, linearity, and stability metrics.
+## Roadmap
 
-## Project Vision
+- Structure-aware causal diagnosis with explicit graph dependencies.
+- Intervention-calibrated action ranking from small SPICE perturbations.
+- Constrained local optimization for agent action selection.
+- Cleaner OP-first and dynamic-performance-first decomposition.
+- More complete comparator and RF signoff testbenches.
+- Tighter reproducibility metadata for process, simulator, model, and planner configuration.
 
-AnalogRF-IR aims to bridge human-readable circuit intent and simulator-backed analog/RF design automation. The goal is to encode enough topology, physics, feasibility reasoning, and measurement structure that an engineer or agent can iterate faster, diagnose failures more clearly, and reuse optimization logic across circuit families.
+## License
+
+This project is provided under a proprietary, all-rights-reserved license. No permission is granted to use, copy, modify, distribute, sublicense, publish, host, or create derivative works except by explicit written permission from the copyright holder.
+
+See [LICENSE](LICENSE) for the complete terms.

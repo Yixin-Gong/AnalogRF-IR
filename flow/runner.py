@@ -9,6 +9,7 @@ from core.environment import load_environment, resolve_project_path
 from core.compensation import has_miller_capacitive_compensation, has_miller_rc_compensation
 from core.validator import Validator
 import core.design_rules  # noqa: F401
+from diagnostics import build_causal_diagnostics, build_spice_intervention_model
 from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import StateBuilder, load_design_input
 from netlist.generator import generate_netlist
@@ -43,6 +44,9 @@ class FlowConfig:
     tail_current_mirror: bool = False
     run_asir: bool = True
     runs_dir: str | Path = "runs"
+    enable_intervention_model: bool = False
+    intervention_max_actions: int = 4
+    intervention_perturbation_fraction: float = 0.10
 
 
 @dataclass
@@ -220,6 +224,15 @@ class AnalogRFIRFlowRunner:
         backfill_state_from_ngspice(state, sim_result)
         self._validate_or_raise(state, "post_ngspice")
         self._print_simulation_summary(sim_result)
+        self._maybe_build_local_intervention_model(
+            state=state,
+            best_meta=best_meta,
+            sim_result=sim_result,
+            sim=sim,
+            output_dir=output_dir,
+            spec_model=spec_model,
+            flow_meta=flow_meta,
+        )
 
         artifacts = self.artifact_writer.write(
             state=state,
@@ -232,6 +245,74 @@ class AnalogRFIRFlowRunner:
         self._print_artifacts(artifacts)
         self._print_comparison(state, best_meta, sim_result, spec_model)
         return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
+
+    def _maybe_build_local_intervention_model(
+        self,
+        *,
+        state: DesignState,
+        best_meta: dict[str, Any],
+        sim_result: SimulationResult,
+        sim: NgspiceSimulator,
+        output_dir: Path,
+        spec_model,
+        flow_meta: dict[str, Any],
+    ) -> None:
+        cfg = self.config
+        if not cfg.enable_intervention_model:
+            flow_meta["local_intervention_model"] = {
+                "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+                "method": "disabled",
+                "status": "disabled",
+                "reason": "FlowConfig.enable_intervention_model is false.",
+            }
+            return
+        if not sim_result.success:
+            flow_meta["local_intervention_model"] = {
+                "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+                "method": "spice_small_perturbation",
+                "status": "skipped",
+                "reason": "Base ngspice run did not produce usable measurements.",
+            }
+            return
+
+        self.emit("\n[8b] Building local intervention model ...")
+        perf_est = best_meta.get("performance", {}) or {}
+        target_status = {
+            name: spec_model.target_status(name, target, sim_result.measurements or {}, perf_est)
+            for name, target in state.targets.items()
+        }
+        provisional = build_causal_diagnostics(
+            state=state,
+            best_meta=best_meta,
+            sim_result=sim_result,
+            target_status=target_status,
+            spec_model=spec_model,
+            flow_meta={**flow_meta, "local_intervention_model": None},
+        )
+        model = build_spice_intervention_model(
+            state=state,
+            sim=sim,
+            work_dir=output_dir / "interventions",
+            spec_model=spec_model,
+            target_status=target_status,
+            tuning=provisional.get("attribution_guided_tuning", {}),
+            max_actions=max(0, int(cfg.intervention_max_actions)),
+            perturbation_fraction=float(cfg.intervention_perturbation_fraction),
+        )
+        flow_meta["local_intervention_model"] = model
+        effects = model.get("action_effects", []) or []
+        ok_effects = [item for item in effects if item.get("status") == "ok"]
+        self.emit(
+            "       Local model: "
+            f"{model.get('method')} status={model.get('status')} "
+            f"actions={len(ok_effects)}/{len(effects)}"
+        )
+        for effect in ok_effects[:3]:
+            self.emit(
+                "       intervention: "
+                f"{effect.get('knob')} reduction={effect.get('violation_reduction')} "
+                f"{effect.get('interpretation', '')}"
+            )
 
     def _validate_or_raise(self, state: DesignState, stage: str) -> None:
         report = Validator().validate(state)

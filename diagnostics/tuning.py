@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from diagnostics.action_optimizer import default_selected_actions_from_optimizer
 from schemas.design_state import DesignState, Range
 
 
@@ -79,6 +80,11 @@ def write_tuning_tool_command(
     available_actions = _available_actions(state)
     priorities = allowed_priorities or ["primary"]
     selected = selected_actions
+    if selected is None:
+        selected = default_selected_actions_from_optimizer(
+            state,
+            allowed_priorities=priorities,
+        )
     if selected is None:
         selected = _default_selected_actions(
             available_actions,
