@@ -40,6 +40,9 @@ class FlowConfig:
     seed: int | None = None
     skip_dc_repair: bool = False
     skip_comp_tune: bool = False
+    postprocess_policy: str = "fallback"
+    postprocess_near_feasible_ratio: float = 0.20
+    force_postprocess_fallback: bool = False
     ngspice_bin: str | None = None
     tail_current_mirror: bool = False
     run_asir: bool = True
@@ -47,6 +50,9 @@ class FlowConfig:
     enable_intervention_model: bool = False
     intervention_max_actions: int = 4
     intervention_perturbation_fraction: float = 0.10
+    reopt_generations: int | None = None
+    reopt_pop_size: int | None = None
+    action_strategy: str = "combo_coarse_fine"
 
 
 @dataclass
@@ -124,17 +130,25 @@ class AnalogRFIRFlowRunner:
         optimizer, evaluator = OptimizerRegistry.create(opt_config, problem, pygmid)
         self.emit(f"       Optimizer: {cfg.optimizer}")
         self.emit(f"       Estimator: {problem.estimator_key}")
-        self.emit(f"       Variables: {evaluator.n_vars}")
+        if evaluator.symmetry_reduced:
+            self.emit(f"       Variables: {evaluator.n_vars} encoded / {len(state.design_variables)} schema")
+        else:
+            self.emit(f"       Variables: {evaluator.n_vars}")
         self.emit(f"       Load cap:  {state.simulation.cload * 1e12:.1f}pF")
 
         self.emit("\n[5/8] Running optimizer ...")
         t0 = time.time()
         _best_x, best_meta = optimizer.optimize()
         opt_elapsed = time.time() - t0
+        formal_tail_current_mirror = bool(problem.capabilities.has("tail_current_mirror"))
         flow_options = {
             "skip_dc_repair": bool(cfg.skip_dc_repair),
             "skip_comp_tune": bool(cfg.skip_comp_tune),
-            "tail_current_mirror": bool(problem.capabilities.has("tail_current_mirror") or cfg.tail_current_mirror),
+            "postprocess_policy": cfg.postprocess_policy,
+            "postprocess_near_feasible_ratio": float(cfg.postprocess_near_feasible_ratio),
+            "force_postprocess_fallback": bool(cfg.force_postprocess_fallback),
+            "action_strategy": cfg.action_strategy,
+            "tail_current_mirror": bool(formal_tail_current_mirror or cfg.tail_current_mirror),
             "stage2_current_mirror": bool(problem.capabilities.has("output_bias_mirror")),
             "input_kind": design_input.source_kind,
             "asir_enabled": bool(cfg.run_asir),
@@ -176,6 +190,13 @@ class AnalogRFIRFlowRunner:
             "options": flow_options,
             "validation": self.validation_reports,
             "postprocess": [],
+            "postprocess_decision": {},
+            "optimizer_encoding": {
+                "n_encoded_variables": evaluator.n_vars,
+                "n_schema_variables": len(state.design_variables),
+                "symmetry_reduced": evaluator.symmetry_reduced,
+                "encoded_variable_groups": evaluator.encoded_variable_groups,
+            },
         }
         if not sim.check_available():
             self.emit("       ngspice not available; writing structured outputs without simulation.")
@@ -194,18 +215,25 @@ class AnalogRFIRFlowRunner:
             )
             return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
 
-        post_context = PostprocessContext(
-            state=state,
-            sim=sim,
-            work_dir=output_dir,
-            config=PostprocessConfig(
-                skip_dc_repair=cfg.skip_dc_repair,
-                skip_comp_tune=cfg.skip_comp_tune,
-            ),
-            profile=problem.profile,
-            capabilities=problem.capabilities,
-        )
-        post_events = PostprocessRegistry().run(post_context)
+        post_decision = self._postprocess_decision(state, best_meta, spec_model)
+        flow_meta["postprocess_decision"] = post_decision
+        post_events = []
+        if post_decision["run"]:
+            self.emit(f"       Postprocess fallback: {post_decision['reason']}")
+            post_context = PostprocessContext(
+                state=state,
+                sim=sim,
+                work_dir=output_dir,
+                config=PostprocessConfig(
+                    skip_dc_repair=cfg.skip_dc_repair,
+                    skip_comp_tune=cfg.skip_comp_tune,
+                ),
+                profile=problem.profile,
+                capabilities=problem.capabilities,
+            )
+            post_events = PostprocessRegistry().run(post_context)
+        else:
+            self.emit(f"       Postprocess skipped: {post_decision['reason']}")
         flow_meta["postprocess"] = post_events
         for event in post_events:
             self._print_postprocess_event(event)
@@ -313,6 +341,83 @@ class AnalogRFIRFlowRunner:
                 f"{effect.get('knob')} reduction={effect.get('violation_reduction')} "
                 f"{effect.get('interpretation', '')}"
             )
+
+    def _postprocess_decision(
+        self,
+        state: DesignState,
+        best_meta: dict[str, Any],
+        spec_model,
+    ) -> dict[str, Any]:
+        policy = str(self.config.postprocess_policy or "fallback").lower()
+        if self.config.skip_dc_repair and self.config.skip_comp_tune:
+            return {
+                "policy": policy,
+                "run": False,
+                "reason": "all postprocess repair passes are disabled",
+            }
+        if policy == "off":
+            return {"policy": policy, "run": False, "reason": "postprocess policy is off"}
+        if policy == "always":
+            return {"policy": policy, "run": True, "reason": "postprocess policy is always"}
+        if self.config.force_postprocess_fallback:
+            return {
+                "policy": policy,
+                "run": True,
+                "reason": "stagnation fallback requested by adaptive agent loop",
+            }
+
+        near = self._estimated_near_feasible(state, best_meta, spec_model)
+        decision = {
+            "policy": policy,
+            "run": bool(near["near_feasible"]),
+            "reason": "near-feasible optimizer estimate" if near["near_feasible"] else "not near-feasible; keep postprocess disabled for method cleanliness",
+        }
+        decision.update(near)
+        return decision
+
+    def _estimated_near_feasible(
+        self,
+        state: DesignState,
+        best_meta: dict[str, Any],
+        spec_model,
+    ) -> dict[str, Any]:
+        perf_est = best_meta.get("performance", {}) or {}
+        statuses = {
+            name: spec_model.target_status(name, target, {}, perf_est)
+            for name, target in state.targets.items()
+        }
+        violations = {
+            name: self._normalized_status_violation(status)
+            for name, status in statuses.items()
+        }
+        max_violation = max(violations.values() or [0.0])
+        failed = [
+            name
+            for name, status in statuses.items()
+            if status.get("status") in {"fail", "unverified"}
+        ]
+        return {
+            "near_feasible": bool(failed) and max_violation <= float(self.config.postprocess_near_feasible_ratio),
+            "max_normalized_violation": round(float(max_violation), 6),
+            "near_feasible_ratio": float(self.config.postprocess_near_feasible_ratio),
+            "estimated_failed_or_unverified": failed,
+        }
+
+    @staticmethod
+    def _normalized_status_violation(status: dict[str, Any]) -> float:
+        value = status.get("value")
+        if value is None:
+            return 1.0 if status.get("status") in {"fail", "unverified"} else 0.0
+        violation = 0.0
+        if status.get("min") is not None:
+            ref = max(abs(float(status["min"])), 1e-30)
+            violation = max(violation, max(0.0, (float(status["min"]) - float(value)) / ref))
+        if status.get("max") is not None:
+            ref = max(abs(float(status["max"])), 1e-30)
+            violation = max(violation, max(0.0, (float(value) - float(status["max"])) / ref))
+        if status.get("status") == "unverified" and violation == 0.0:
+            return 0.0
+        return violation
 
     def _validate_or_raise(self, state: DesignState, stage: str) -> None:
         report = Validator().validate(state)

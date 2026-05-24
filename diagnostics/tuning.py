@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.validator import Validator
 from diagnostics.action_optimizer import default_selected_actions_from_optimizer
 from schemas.design_state import DesignState, Range
 
@@ -201,14 +202,14 @@ def apply_attribution_guided_tuning(
         if action.get("llm_decision", "apply") != "apply":
             application.skipped_actions.append({**_action_summary(action), "reason": action.get("llm_reason", "LLM skipped action")})
             continue
-        if action.get("priority") == "guarded":
-            application.skipped_actions.append({**_action_summary(action), "reason": "guarded action is not applied automatically"})
+        if action.get("priority") == "guarded" and not _evidence_gate_passed(action):
+            application.skipped_actions.append({**_action_summary(action), "reason": "guarded action lacks passing local intervention evidence_gate"})
             continue
         policy_error = _write_policy_error(state, action)
         if policy_error:
             application.skipped_actions.append({**_action_summary(action), "reason": policy_error})
             continue
-        result = _apply_action(state, action)
+        result = _apply_validated_action(state, action)
         if result["applied"]:
             application.applied_actions.append(result)
         else:
@@ -242,8 +243,12 @@ def _action_for_llm(action: dict[str, Any]) -> dict[str, Any]:
         "suggested_next_value": action.get("suggested_next_value"),
         "suggested_unclipped_value": action.get("suggested_unclipped_value"),
         "agent_step_fraction": action.get("agent_step_fraction"),
+        "tuning_mode": action.get("tuning_mode"),
         "range": action.get("range"),
         "range_update": action.get("range_update"),
+        "hard_physical_gate": action.get("hard_physical_gate", {}),
+        "optimizer": action.get("optimizer", {}),
+        "evidence_gate": action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate"),
         "expected_effect": action.get("expected_effect", {}),
         "tradeoffs": action.get("tradeoffs", []),
         "rationale": action.get("rationale", ""),
@@ -335,7 +340,9 @@ def _actions_from_custom_actions(custom_actions: list[dict[str, Any]]) -> list[d
                 "suggested_next_value": custom.get("suggested_next_value"),
                 "suggested_unclipped_value": custom.get("suggested_unclipped_value", custom.get("value")),
                 "agent_step_fraction": custom.get("agent_step_fraction"),
+                "tuning_mode": custom.get("tuning_mode"),
                 "range_update": custom.get("range_update"),
+                "evidence_gate": custom.get("evidence_gate"),
                 "rationale": custom.get("reason", custom.get("rationale", "LLM requested direct schema tuning.")),
                 "llm_decision": custom.get("decision", "apply"),
                 "llm_reason": custom.get("reason", ""),
@@ -421,6 +428,33 @@ def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _apply_validated_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
+    trial = state.clone()
+    trial_result = _apply_action(trial, action)
+    if not trial_result["applied"]:
+        return trial_result
+    validation_error = _hard_physical_gate_error(trial)
+    if validation_error:
+        return {
+            **_action_summary(action),
+            "applied": False,
+            "reason": validation_error,
+            "hard_physical_gate": {"passed": False},
+        }
+    result = _apply_action(state, action)
+    result["hard_physical_gate"] = {"passed": True}
+    return result
+
+
+def _hard_physical_gate_error(state: DesignState) -> str:
+    report = Validator().validate(state)
+    if report.schema_valid:
+        return ""
+    first = report.errors()[0] if report.errors() else None
+    message = first.message if first else "schema validation failed"
+    return f"hard physical gate rejected action: {message}"
+
+
 def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
     target_knobs = action.get("apply_to") or [action.get("knob")]
     if not target_knobs:
@@ -473,10 +507,17 @@ def _action_summary(action: dict[str, Any]) -> dict[str, Any]:
         "knob": action.get("knob"),
         "apply_to": action.get("apply_to", []),
         "agent_step_fraction": action.get("agent_step_fraction"),
+        "tuning_mode": action.get("tuning_mode"),
+        "evidence_gate": action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate"),
         "llm_decision": action.get("llm_decision"),
         "llm_reason": action.get("llm_reason", ""),
         "rationale": action.get("rationale", ""),
     }
+
+
+def _evidence_gate_passed(action: dict[str, Any]) -> bool:
+    gate = action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate") or {}
+    return bool(gate.get("passed"))
 
 
 def _parse_knob(knob: str) -> tuple[str, str]:

@@ -137,6 +137,12 @@ class TransistorParameters:
     cgs: float = 0.0
     cgd: float = 0.0
     ic: float = 0.0          # Internal implementation note.
+    layout_fingers: int = 1
+    layout_parallel: int = 1
+    layout_series: int = 1
+    layout_finger_W: float = 0.0
+    layout_instance_W: float = 0.0
+    layout_segment_L: float = 0.0
 
 
 @dataclass

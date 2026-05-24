@@ -82,6 +82,36 @@ def _parse_args(argv=None):
         help="Skip ngspice-driven Cc/Rz compensation sweep before final verification",
     )
     parser.add_argument(
+        "--postprocess-policy",
+        choices=("fallback", "always", "off"),
+        default="fallback",
+        help="Postprocess scheduling policy. fallback runs only near feasibility or stagnation.",
+    )
+    parser.add_argument(
+        "--postprocess-near-feasible-ratio",
+        type=float,
+        default=0.20,
+        help="Maximum normalized estimated violation for near-feasible postprocess fallback",
+    )
+    parser.add_argument(
+        "--reopt-generations",
+        type=int,
+        default=0,
+        help="Short re-optimization generations after an agent schema edit; 0 uses adaptive default",
+    )
+    parser.add_argument(
+        "--reopt-pop-size",
+        type=int,
+        default=0,
+        help="Short re-optimization population after an agent schema edit; 0 uses adaptive default",
+    )
+    parser.add_argument(
+        "--action-strategy",
+        choices=("combo_coarse_fine",),
+        default="combo_coarse_fine",
+        help="Schema action planning strategy",
+    )
+    parser.add_argument(
         "--enable-intervention-model",
         action="store_true",
         help="Build a local action-to-spec model with small SPICE perturbations before agent action selection",
@@ -135,12 +165,17 @@ def main(argv=None) -> int:
             seed=args.seed,
             skip_dc_repair=bool(args.skip_dc_repair),
             skip_comp_tune=bool(args.skip_comp_tune),
+            postprocess_policy=args.postprocess_policy,
+            postprocess_near_feasible_ratio=float(args.postprocess_near_feasible_ratio),
             ngspice_bin=args.ngspice_bin or None,
             tail_current_mirror=bool(args.tail_current_mirror),
             run_asir=not bool(args.no_asir),
             enable_intervention_model=bool(args.enable_intervention_model or args.agent_rounds > 1),
             intervention_max_actions=max(0, int(args.intervention_max_actions)),
             intervention_perturbation_fraction=float(args.intervention_perturbation),
+            reopt_generations=int(args.reopt_generations) if int(args.reopt_generations) > 0 else None,
+            reopt_pop_size=int(args.reopt_pop_size) if int(args.reopt_pop_size) > 0 else None,
+            action_strategy=args.action_strategy,
         )
         if args.agent_rounds > 1:
             DiagnosticAgentLoop(

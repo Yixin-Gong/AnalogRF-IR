@@ -1119,6 +1119,7 @@ def _attribution_guided_tuning(
 ) -> dict[str, Any]:
     by_failure = []
     failed_metrics = {symptom["metric"] for symptom in symptoms if symptom["status"] == "fail"}
+    planning_mode = _coarse_fine_mode(symptoms)
     for symptom in symptoms:
         if symptom["status"] != "fail":
             continue
@@ -1128,7 +1129,7 @@ def _attribution_guided_tuning(
             actions.extend(_tuning_actions_for_cause(state, metric, cause))
         actions = [_apply_multi_objective_guardrail(action, failed_metrics) for action in actions]
         actions = _dedupe_actions(actions)
-        actions = [_apply_agent_step(action, symptom) for action in actions]
+        actions = [_apply_agent_step(action, symptom, planning_mode) for action in actions]
         actions = _rank_tuning_actions(actions)
         by_failure.append(
             {
@@ -1147,7 +1148,12 @@ def _attribution_guided_tuning(
         )
     return {
         "author": "analog_circuit_causal_diagnostic_agent",
-        "principle": "Translate ranked root causes into direct schema-variable tuning actions.",
+        "principle": "Translate ranked root causes into schema-safe combo actions for a constrained coarse-to-fine optimizer.",
+        "planning_mode": planning_mode,
+        "hard_physical_gate": {
+            "principle": "Schema actions must pass write-policy, symmetry, range, OP, and layout-realization validation before SPICE.",
+            "executor": "diagnostics.tuning.apply_attribution_guided_tuning",
+        },
         "by_failure": by_failure,
     }
 
@@ -1547,10 +1553,22 @@ def _action_id(action: dict[str, Any], rank: int) -> str:
     return f"{metric}_{rank:02d}_{knob}_{direction}"
 
 
-def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[str, Any]:
+def _coarse_fine_mode(symptoms: list[dict[str, Any]]) -> str:
+    gaps = [
+        _symptom_gap_fraction(symptom)
+        for symptom in symptoms
+        if symptom.get("status") == "fail"
+    ]
+    if not gaps:
+        return "fine"
+    return "coarse" if max(gaps) >= 0.25 else "fine"
+
+
+def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any], planning_mode: str) -> dict[str, Any]:
     direction = action.get("direction")
     if direction == "set":
         action["agent_step_basis"] = "explicit target formula"
+        action["tuning_mode"] = planning_mode
         return action
     current = action.get("current_value")
     bounds = action.get("range")
@@ -1564,6 +1582,7 @@ def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[s
         priority=action.get("priority", ""),
         score=float(action.get("score", 0.0) or 0.0),
         symptom=symptom,
+        planning_mode=planning_mode,
     )
     if action.get("max_step_fraction") is not None:
         step = min(step, float(action["max_step_fraction"]))
@@ -1572,7 +1591,8 @@ def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[s
     raw_next = current_f * (1.0 + sign * step)
     suggested = _clip_to_bounds(raw_next, bounds)
     action["agent_step_fraction"] = step
-    action["agent_step_basis"] = "spec gap, attribution score, action priority, and schema bounds"
+    action["agent_step_basis"] = "coarse-fine mode, spec gap, attribution score, action priority, and schema bounds"
+    action["tuning_mode"] = planning_mode
     action["suggested_unclipped_value"] = raw_next
     action["suggested_next_value"] = suggested
     action["limit_status"] = _limit_status_from_suggestion(current_f, raw_next, suggested, bounds, direction)
@@ -1587,7 +1607,14 @@ def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any]) -> dict[s
     return action
 
 
-def _agent_step_fraction(metric: str, variable: str, priority: str, score: float, symptom: dict[str, Any]) -> float:
+def _agent_step_fraction(
+    metric: str,
+    variable: str,
+    priority: str,
+    score: float,
+    symptom: dict[str, Any],
+    planning_mode: str = "fine",
+) -> float:
     gap = _symptom_gap_fraction(symptom)
     raw = gap * (0.55 + 0.85 * max(score, 0.0))
     if priority == "secondary":
@@ -1606,6 +1633,13 @@ def _agent_step_fraction(metric: str, variable: str, priority: str, score: float
     }.get(variable, (0.05, 0.20))
     if metric in {"phase_margin"} and variable == "Cc":
         max_step = 0.40
+    if planning_mode == "fine":
+        min_step *= 0.55
+        max_step = min(max_step, 0.10)
+        raw *= 0.50
+    elif planning_mode == "coarse":
+        min_step *= 1.05
+        max_step *= 1.10
     return round(max(min_step, min(raw, max_step)), 4)
 
 

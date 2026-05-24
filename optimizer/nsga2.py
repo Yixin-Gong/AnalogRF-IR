@@ -65,11 +65,37 @@ class CircuitEvaluator:
         self.capabilities = self.problem.capabilities
         # Internal implementation note.
         self._var_map = {}
+        self._encoded_design_variables: list[DesignVariable] = []
+        self._encoded_variable_groups: list[dict[str, Any]] = []
         self._build_var_map()
 
     def _build_var_map(self) -> None:
-        """AnalogRF-IR internal documentation."""
-        for i, dv in enumerate(self.schema.design_variables):
+        """Build a reduced optimization encoding.
+
+        Symmetric schema variables share one optimizer coordinate. The decoded
+        design state still contains every device variable, but all members of a
+        symmetry group read from the same coordinate.
+        """
+        group_to_index: dict[tuple[str, ...], int] = {}
+        for dv in self.schema.design_variables:
+            if dv.device and dv.symmetry_label:
+                group_key = (dv.symmetry_label, dv.variable)
+            else:
+                group_key = (f"__single__:{len(self._encoded_design_variables)}", _format_dv_key(dv), dv.variable)
+
+            if group_key not in group_to_index:
+                group_to_index[group_key] = len(self._encoded_design_variables)
+                self._encoded_design_variables.append(dv)
+                self._encoded_variable_groups.append(
+                    {
+                        "index": group_to_index[group_key],
+                        "symmetry_label": dv.symmetry_label or "",
+                        "variable": dv.variable,
+                        "members": [],
+                    }
+                )
+            i = group_to_index[group_key]
+            self._encoded_variable_groups[i]["members"].append(_format_knob(dv))
             key = dv.device if dv.device else "__global__"
             if key not in self._var_map:
                 self._var_map[key] = {}
@@ -121,18 +147,6 @@ class CircuitEvaluator:
         proc = self.schema.process
 
         # Internal implementation note.
-        sym_groups: Dict[str, List[str]] = {}
-        for dev in self.schema.topology.devices:
-            sym_groups.setdefault(dev.role, []).append(dev.id)
-        # Internal implementation note.
-        dominant_of: Dict[str, str] = {}
-        for role, dev_ids in sym_groups.items():
-            if len(dev_ids) >= 1:
-                dom = dev_ids[0]
-                for did in dev_ids:
-                    dominant_of[did] = dom
-
-        # Internal implementation note.
         # Bias currents come from global design variables when present.
         vdd = self.schema.simulation.supply.get("vdd", 1.8)
         vss = self.schema.simulation.supply.get("vss", 0.0)
@@ -179,14 +193,8 @@ class CircuitEvaluator:
             ratio = max(vds, 1e-6) / vref
             return max(0.05, min(1.0, ratio ** 0.35))
 
-        # Internal implementation note.
-        translated: Dict[str, dict] = {}
-
         for device_id in decoded:
             if device_id.startswith("__"):
-                continue  # Internal implementation note.
-            dom = dominant_of.get(device_id, device_id)
-            if dom != device_id:
                 continue  # Internal implementation note.
 
             gm_id = decoded[device_id].get("gm_id", 10)
@@ -199,7 +207,7 @@ class CircuitEvaluator:
             phys = None
             if role == "second_stage_gain" and dev_type == "pmos":
                 load_refs = [
-                    p for p in translated.values()
+                    p for p in result.values()
                     if p.get("role") == "current_mirror_load" and p.get("type") == "pmos"
                 ]
                 if load_refs:
@@ -230,7 +238,7 @@ class CircuitEvaluator:
                 vds = max(phys.get("vgs", 0.45), 0.02)
             elif role == "tail_current_source":
                 input_refs = [
-                    p for p in translated.values()
+                    p for p in result.values()
                     if p.get("role") == "input_pair"
                 ]
                 if input_refs:
@@ -253,7 +261,7 @@ class CircuitEvaluator:
 
             # Internal implementation note.
             # Internal implementation note.
-            translated[device_id] = {
+            result[device_id] = {
                 **phys, "L": L, "vds": vds,
                 "id": id_val,
                 "id_effective": id_val * mirror_factor,
@@ -263,27 +271,6 @@ class CircuitEvaluator:
                 "inversion_region": inversion_region,
                 "role": role, "type": dev_type,
             }
-
-        # Internal implementation note.
-        for device_id in decoded:
-            if device_id.startswith("__"):
-                continue  # Internal implementation note.
-            if device_id in translated:
-                continue
-            dom = dominant_of.get(device_id, device_id)
-            if dom in translated:
-                result[device_id] = dict(translated[dom])
-                # Internal implementation note.
-                dev_def = self.schema.get_device_def(device_id)
-                if dev_def:
-                    result[device_id]["role"] = dev_def.role
-                    result[device_id]["type"] = dev_def.type
-            else:
-                result[device_id] = {}
-
-        # Internal implementation note.
-        for did, phys in translated.items():
-            result[did] = phys
 
         return result
 
@@ -1137,13 +1124,28 @@ class CircuitEvaluator:
 
     @property
     def n_vars(self) -> int:
-        return len(self.schema.design_variables)
+        return len(self._encoded_design_variables)
 
     @property
     def bounds(self) -> List[Tuple[float, float]]:
-        if not self.schema.design_variables:
+        if not self._encoded_design_variables:
             return []
-        return [(dv.range.min, dv.range.max) for dv in self.schema.design_variables]
+        return [(dv.range.min, dv.range.max) for dv in self._encoded_design_variables]
+
+    @property
+    def encoded_design_variables(self) -> list[DesignVariable]:
+        return list(self._encoded_design_variables)
+
+    @property
+    def encoded_variable_groups(self) -> list[dict[str, Any]]:
+        return [dict(group) for group in self._encoded_variable_groups]
+
+    @property
+    def symmetry_reduced(self) -> bool:
+        return len(self._encoded_design_variables) < len(self.schema.design_variables)
+
+    def design_variable_at(self, index: int) -> DesignVariable:
+        return self._encoded_design_variables[index]
 
 
 # Internal implementation note.
@@ -1156,6 +1158,14 @@ def _snap_to_grid(value: float, precision: float) -> float:
     result = n * precision
     n_dec = max(0, int(-math.floor(math.log10(precision)))) if precision > 0 else 0
     return round(result, n_dec)
+
+
+def _format_dv_key(dv: DesignVariable) -> str:
+    return dv.device if dv.device else "__global__"
+
+
+def _format_knob(dv: DesignVariable) -> str:
+    return f"{dv.device}.{dv.variable}" if dv.device else f"global.{dv.variable}"
 
 
 def _safe_eval_loss_formula(formula: str, perf: Dict[str, float],
@@ -1304,7 +1314,7 @@ class NSGA2Optimizer:
 
         # Internal implementation note.
         x_seed = np.zeros(n_vars)
-        for j, dv in enumerate(self.schema.design_variables):
+        for j, dv in enumerate(self.evaluator.encoded_design_variables):
             if dv.initial is not None:
                 x_seed[j] = dv.initial
             elif dv.device and dv.device in self.schema.transistors:
@@ -1333,7 +1343,7 @@ class NSGA2Optimizer:
         """Sample wide positive physical variables in log space."""
         if low <= 0 or high <= low:
             return self.rng.uniform(low, high)
-        dv = self.schema.design_variables[index]
+        dv = self.evaluator.design_variable_at(index)
         wide = high / low >= 50.0
         log_vars = {"I_tail", "I_stage2", "I_out", "I_latch", "Cc", "Rz", "CL", "f_clk", "C_sample"}
         if wide or dv.variable in log_vars:
@@ -1342,6 +1352,8 @@ class NSGA2Optimizer:
 
     def _apply_symmetry_constraints(self, population: List[Individual]) -> None:
         """AnalogRF-IR internal documentation."""
+        if getattr(self.evaluator, "symmetry_reduced", False):
+            return
         # Internal implementation note.
         sym_groups: Dict[Tuple[str, str], List[int]] = {}
         for i, dv in enumerate(self.schema.design_variables):

@@ -47,6 +47,46 @@ def op_for_device(result, device_id: str) -> dict:
     return {}
 
 
+def symmetric_device_ids(state: DesignState, device_id: str) -> list[str]:
+    labels = {
+        dv.symmetry_label
+        for dv in state.design_variables
+        if dv.device == device_id and dv.symmetry_label
+    }
+    if not labels:
+        return [device_id]
+    peers: list[str] = []
+    for dv in state.design_variables:
+        if dv.device and dv.symmetry_label in labels and dv.device not in peers:
+            peers.append(dv.device)
+    return peers or [device_id]
+
+
+def set_symmetric_width(state: DesignState, device_id: str, width: float) -> None:
+    for peer_id in symmetric_device_ids(state, device_id):
+        if peer_id in state.transistors:
+            state.transistors[peer_id].parameters.W = width
+
+
+def hard_reliability_errors(state: DesignState, result) -> list[str]:
+    max_vgs = float(getattr(state.process, "max_VGS", 0.0) or 0.0)
+    if max_vgs <= 0.0:
+        return []
+    limit = 0.95 * max_vgs
+    errors = []
+    for raw_name, op in (result.operating_points or {}).items():
+        try:
+            vgs = abs(float(op.get("vgs", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+        if vgs > limit:
+            name = str(raw_name).upper()
+            if not name.startswith("M"):
+                name = f"M{name}"
+            errors.append(f"{name}: |VGS|={vgs:.3f}V >= {limit:.3f}V")
+    return errors
+
+
 def confirm_initial_operating_point(
     state: DesignState,
     sim: NgspiceSimulator,
@@ -102,8 +142,10 @@ def balance_two_stage_output(
     def evaluate(scale: float, sink_scale: float = 1.0) -> float | None:
         gain_ts.parameters.W = _clip_width(base_w * scale)
         if sink_ts and base_sink_w:
-            sink_ts.parameters.W = _clip_width(base_sink_w * sink_scale)
+            set_symmetric_width(state, sink_id, _clip_width(base_sink_w * sink_scale))
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
+        if hard_reliability_errors(state, trial):
+            return None
         vout = stage2_vout_from_result(state, trial)
         if vout is None:
             return None
@@ -116,12 +158,12 @@ def balance_two_stage_output(
     if base_vout is None:
         gain_ts.parameters.W = base_w
         if sink_ts and base_sink_w:
-            sink_ts.parameters.W = base_sink_w
+            set_symmetric_width(state, sink_id, base_sink_w)
         return {}
     if 0.25 * vdd <= base_vout <= 0.75 * vdd:
         gain_ts.parameters.W = base_w
         if sink_ts and base_sink_w:
-            sink_ts.parameters.W = base_sink_w
+            set_symmetric_width(state, sink_id, base_sink_w)
         best.update({"scale": 1.0, "sink_scale": 1.0, "vout": base_vout, "error": abs(base_vout - target)})
         return best
 
@@ -135,7 +177,7 @@ def balance_two_stage_output(
     if vlo is None or vhi is None:
         gain_ts.parameters.W = base_w
         if sink_ts and base_sink_w:
-            sink_ts.parameters.W = base_sink_w
+            set_symmetric_width(state, sink_id, base_sink_w)
         return {}
 
     if min(vlo, vhi) <= target <= max(vlo, vhi):
@@ -169,7 +211,7 @@ def balance_two_stage_output(
 
     gain_ts.parameters.W = _clip_width(base_w * best["scale"])
     if sink_ts and base_sink_w:
-        sink_ts.parameters.W = _clip_width(base_sink_w * best["sink_scale"])
+        set_symmetric_width(state, sink_id, _clip_width(base_sink_w * best["sink_scale"]))
     return best
 
 
@@ -390,6 +432,21 @@ def tune_two_stage_compensation(
         state.global_parameters["Cc"] = cc
         state.global_parameters["Rz"] = rz
         trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
+        hard_errors = hard_reliability_errors(state, trial)
+        if hard_errors:
+            stats["rejected_unsafe_candidates"] += 1
+            if len(stats["unsafe_examples"]) < 4:
+                stats["unsafe_examples"].append(
+                    {
+                        "Cc": cc,
+                        "Rz": rz,
+                        "load_scale": load_scale,
+                        "tail_current_scale": tail_scale,
+                        "stage2_current_scale": stage2_scale,
+                        "errors": hard_errors[:3],
+                    }
+                )
+            return best
         meas = dict(trial.measurements)
         zero_target = candidate_zero_target(trial)
         score = score_measurements(meas)
@@ -405,6 +462,7 @@ def tune_two_stage_compensation(
                 "I_tail": state.global_parameters.get("I_tail", base_currents["I_tail"]),
                 "I_stage2": state.global_parameters.get("I_stage2", base_currents["I_stage2"]),
                 "measurements": meas,
+                "_has_operating_points": bool(trial.operating_points),
             }
         return best
 
@@ -419,6 +477,7 @@ def tune_two_stage_compensation(
         "I_tail": base_currents["I_tail"],
         "I_stage2": base_currents["I_stage2"],
         "measurements": {},
+        "_has_operating_points": False,
     }
     stats = {
         "evaluated_candidates": 0,
@@ -431,6 +490,8 @@ def tune_two_stage_compensation(
         ),
         "early_stop": False,
         "early_stop_reason": "",
+        "rejected_unsafe_candidates": 0,
+        "unsafe_examples": [],
     }
     started = time.time()
     evaluated: set[tuple[str, str, str, str, str]] = set()
@@ -685,7 +746,16 @@ def tune_two_stage_compensation(
     apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
+    final_hard_errors = []
+    if best.get("_has_operating_points"):
+        final_trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
+        if final_trial.operating_points:
+            backfill_state_from_ngspice(state, final_trial)
+        final_hard_errors = hard_reliability_errors(state, final_trial)
+        if final_trial.measurements:
+            best["measurements"] = dict(final_trial.measurements)
     best.update(stats)
+    best["final_hard_errors"] = final_hard_errors
     best["Rz_target_1_over_gm2"] = best.get("Rz_target_1_over_gm2", rz0)
     best["elapsed_sec"] = time.time() - started
     best["spec_pass"] = spec_pass(best["measurements"])

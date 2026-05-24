@@ -384,9 +384,10 @@ class PhysicalValidator:
                 continue
             deviation = abs(v1 - v2) / denom
             if deviation > tolerance:
+                severity = "error" if param in {"W", "L"} else "warning"
                 results.append(DiagnosisResult(
                     check_name="physical:symmetry", passed=False,
-                    severity="warning",
+                    severity=severity,
                     message=f"{a}/{b} ({role}) {param} mismatch: {v1:.4e} vs {v2:.4e} "
                             f"(deviation={deviation*100:.1f}%)",
                     layer=4, device=f"{a}/{b}",

@@ -7,6 +7,7 @@ from typing import Optional
 
 from asir.profiles import COMPARATOR_PROFILE, select_circuit_profile
 from core.regions import SPICE_OPERATING_REGIONS
+from layout.realization import realize_transistor_layout
 from schemas.design_state import DesignState, ProcessInfo, TransistorParameters
 from core.rule_registry import register_rule, ValidationReport, DiagnosisResult
 
@@ -36,7 +37,7 @@ def check_min_width(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_max_width", layer=4,
-               description="W must not exceed the process maximum single-finger width.")
+               description="Wide devices must be realized with legal layout folding.")
 def check_max_width(state: DesignState) -> ValidationReport:
     """AnalogRF-IR internal documentation."""
     report = ValidationReport()
@@ -44,11 +45,19 @@ def check_max_width(state: DesignState) -> ValidationReport:
     for tid, ts in state.transistors.items():
         W = ts.parameters.W or 0
         if W > proc.max_W:
+            layout = realize_transistor_layout(state, tid)
             report.add(DiagnosisResult(
-                check_name="dr:max_width", passed=False, severity="warning",
-                message=f"{tid}: W={W*1e6:.1f}um > max_W={proc.max_W*1e6:.1f}um - "
-                        f"consider finger decomposition",
-                layer=4, device=tid
+                check_name="dr:max_width", passed=False, severity="info",
+                message=f"{tid}: effective W={W*1e6:.1f}um > max_W={proc.max_W*1e6:.1f}um "
+                        f"-> realized as {layout.parallel} parallel device groups",
+                layer=4, device=tid,
+                details={
+                    "effective_W": W,
+                    "max_W": proc.max_W,
+                    "parallel": layout.parallel,
+                    "fingers": layout.fingers,
+                    "finger_W": layout.finger_W,
+                },
             ))
     return report
 
@@ -72,17 +81,25 @@ def check_min_length(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_max_length", layer=4,
-               description="L must not exceed process.max_L for every transistor.")
+               description="Long devices must be realized with legal series segments.")
 def check_max_length(state: DesignState) -> ValidationReport:
     report = ValidationReport()
     proc = state.process
     for tid, ts in state.transistors.items():
         L_val = ts.L_strategy or ts.parameters.L or 0
         if L_val > proc.max_L:
+            layout = realize_transistor_layout(state, tid)
             report.add(DiagnosisResult(
-                check_name="dr:max_length", passed=False, severity="warning",
-                message=f"{tid}: L={L_val*1e6:.1f}um > max_L={proc.max_L*1e6:.1f}um",
-                layer=4, device=tid
+                check_name="dr:max_length", passed=False, severity="info",
+                message=f"{tid}: effective L={L_val*1e6:.1f}um > max_L={proc.max_L*1e6:.1f}um "
+                        f"-> realized as {layout.series} series segments",
+                layer=4, device=tid,
+                details={
+                    "effective_L": L_val,
+                    "max_L": proc.max_L,
+                    "series": layout.series,
+                    "segment_L": layout.segment_L,
+                },
             ))
     return report
 
@@ -178,7 +195,7 @@ def check_min_area(state: DesignState) -> ValidationReport:
 
 
 @register_rule("check_finger_width", layer=4,
-               description="Wide devices should be split into layout fingers.")
+               description="Wide devices must be split into legal layout fingers.")
 def check_finger_width(state: DesignState) -> ValidationReport:
     """AnalogRF-IR internal documentation."""
     report = ValidationReport()
@@ -186,13 +203,75 @@ def check_finger_width(state: DesignState) -> ValidationReport:
     for tid, ts in state.transistors.items():
         W = ts.parameters.W or 0
         if W > proc.max_finger_width:
-            nf = math.ceil(W / proc.max_finger_width)
+            layout = realize_transistor_layout(state, tid)
             report.add(DiagnosisResult(
                 check_name="dr:finger_width", passed=False, severity="info",
                 message=f"{tid}: W={W*1e6:.1f}um > {proc.max_finger_width*1e6:.0f}um/finger "
-                        f"-> suggest m={nf} fingers",
-                layer=4, device=tid, details={"nf": nf}
+                        f"-> realized with {layout.fingers} fingers"
+                        f"{' and ' + str(layout.parallel) + ' parallel groups' if layout.parallel > 1 else ''}",
+                layer=4,
+                device=tid,
+                details={
+                    "fingers": layout.fingers,
+                    "parallel": layout.parallel,
+                    "finger_W": layout.finger_W,
+                    "instance_W": layout.instance_W,
+                    "max_finger_width": proc.max_finger_width,
+                },
             ))
+    return report
+
+
+@register_rule("check_layout_realization_bounds", layer=4,
+               description="Folded/segmented layout unit devices must stay inside process geometry bounds.")
+def check_layout_realization_bounds(state: DesignState) -> ValidationReport:
+    report = ValidationReport()
+    proc = state.process
+    for tid, ts in state.transistors.items():
+        if (ts.parameters.W or 0.0) <= 0.0 or (ts.parameters.L or ts.L_strategy or 0.0) <= 0.0:
+            continue
+        layout = realize_transistor_layout(state, tid)
+        checks = [
+            (
+                layout.finger_W > proc.max_finger_width * 1.001,
+                "finger_W",
+                layout.finger_W,
+                proc.max_finger_width,
+                "folding failed to keep each finger inside max_finger_width",
+            ),
+            (
+                layout.instance_W > proc.max_W * 1.001,
+                "instance_W",
+                layout.instance_W,
+                proc.max_W,
+                "parallel decomposition failed to keep each instance inside max_W",
+            ),
+            (
+                layout.segment_L > proc.max_L * 1.001,
+                "segment_L",
+                layout.segment_L,
+                proc.max_L,
+                "series segmentation failed to keep each segment inside max_L",
+            ),
+        ]
+        for failed, field, value, limit, reason in checks:
+            if failed:
+                report.add(DiagnosisResult(
+                    check_name="dr:layout_realization_bounds",
+                    passed=False,
+                    severity="error",
+                    message=f"{tid}: {reason}: {field}={value:.3e} > limit={limit:.3e}",
+                    layer=4,
+                    device=tid,
+                    details={
+                        "field": field,
+                        "value": value,
+                        "limit": limit,
+                        "fingers": layout.fingers,
+                        "parallel": layout.parallel,
+                        "series": layout.series,
+                    },
+                ))
     return report
 
 
@@ -258,9 +337,10 @@ def _check_pair_param(state: DesignState, param_name: str, tolerance: float,
                     continue
                 dev = abs(va - vb) / max(va, vb)
                 if dev > tolerance:
+                    severity = "error" if param_name in {"W", "L"} else "warning"
                     report.add(DiagnosisResult(
                         check_name=f"dr:pair_{param_name}_mismatch",
-                        passed=False, severity="warning",
+                        passed=False, severity=severity,
                         message=f"{a}/{b} ({role}) {label}: {va:.4e} vs {vb:.4e} "
                                 f"(deviation={dev*100:.1f}%)",
                         layer=4, device=f"{a}/{b}",
@@ -900,6 +980,13 @@ def check_symmetry_in_design_vars(state: DesignState) -> ValidationReport:
                             f"{dv.device}.{dv.variable} range != {ref.device}.{ref.variable} range",
                     layer=4, device=dv.device
                 ))
+            if dv.initial is not None and ref.initial is not None and abs(float(dv.initial) - float(ref.initial)) > 1e-18:
+                report.add(DiagnosisResult(
+                    check_name="dr:design_var_symmetry", passed=False, severity="error",
+                    message=f"Symmetry group '{label}' {var_name}: "
+                            f"{dv.device}.{dv.variable} initial != {ref.device}.{ref.variable} initial",
+                    layer=4, device=dv.device
+                ))
     return report
 
 
@@ -1109,7 +1196,7 @@ ALL_RULES = [
     check_min_width, check_max_width, check_min_length, check_max_length,
     check_W_precision, check_L_precision, check_W_L_ratio,
     # Internal implementation note.
-    check_min_area, check_finger_width,
+    check_min_area, check_finger_width, check_layout_realization_bounds,
     # Internal implementation note.
     check_pair_W_mismatch, check_pair_L_mismatch, check_pair_gm_mismatch,
     check_current_mirror_ratio,

@@ -77,6 +77,38 @@ python main.py --llm-api-key <your-key> --agent-rounds 20
 because command-line arguments can be captured by shell history or process
 inspection.
 
+To enable SPICE-backed local intervention evidence for guarded agent actions,
+set an intervention budget:
+
+```bash
+python main.py \
+  --env environment_ihp_sg13g2.yaml \
+  --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
+  --topology two_stage \
+  --generations 4 \
+  --pop-size 20 \
+  --agent-rounds 4 \
+  --llm-provider deepseek \
+  --llm-model deepseek-v4-pro \
+  --llm-thinking enabled \
+  --llm-reasoning-effort max \
+  --postprocess-policy fallback \
+  --reopt-generations 3 \
+  --reopt-pop-size 12 \
+  --intervention-max-actions 3
+```
+
+The intervention budget controls how many candidate actions receive local
+SPICE perturbation evidence per round. Keep it small for expensive circuits.
+
+`--reopt-generations` and `--reopt-pop-size` control the short re-optimization
+budget after an agent schema edit. When omitted, the agent loop uses a small
+adaptive default for rounds after the initial global search.
+
+`--postprocess-policy fallback` keeps postprocess out of the main method unless
+the optimizer estimate is near-feasible or recent agent rounds have stagnated.
+Use `always` for legacy behavior and `off` for ablation.
+
 ## Import SPICE
 
 Convert a supported flat MOS netlist to YAML:
@@ -123,11 +155,11 @@ and best candidate.
 Each optimization run writes `runs/iter_###/` with:
 
 ```text
-design_state.yaml          Canonical state with compact result/tuning summary
+design_state.yaml          Compact state with result/tuning summary and actions
 netlist.cir                Generated SPICE netlist
 sim_log.json               Simulation-focused diagnostic view
 agent_diagnostics.json     Agent-facing pass/fail and tuning context
-causal_diagnostics.json    Root-cause graph and suggested schema moves
+causal_diagnostics.json    Full root-cause graph, intervention model, and evidence
 result.json                Compact final result view
 ```
 
@@ -135,7 +167,24 @@ If `ngspice` is unavailable, the flow still writes structured outputs, but the
 simulation result is marked unsuccessful.
 
 `design_state.yaml` intentionally omits environment-derived process/simulation
-settings, the full simulation log, agent diagnostics, dependency graph, and
-validation transcript so the schema remains human-readable. Use the active
-environment file for process context and the JSON artifacts in the same
-directory when you need the full diagnostic detail.
+settings, full simulation logs, full agent diagnostics, dependency graphs, the
+local intervention matrix, and validation transcripts so the schema remains
+human-readable. Use the active environment file for process context and the JSON
+artifacts in the same directory when you need full diagnostic detail.
+
+## Recommended Ablations
+
+For research runs, compare the same seed set across:
+
+```text
+optimizer only
+optimizer + postprocess
+optimizer + diagnosis
+LLM + optimizer + diagnosis
+LLM + optimizer + diagnosis + postprocess
+```
+
+Track success rate, total ngspice calls, wall time, final loss, final metrics,
+invalid-candidate rejections, intervention action count, and postprocess
+trigger count. This makes postprocess value and simulation cost visible instead
+of mixing them into the main method.

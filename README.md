@@ -1,38 +1,40 @@
 # AnalogRF-IR
 
-AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow. It converts circuit intent into a typed intermediate representation, runs gm/ID-aware sizing and multi-objective optimization, validates candidates with ngspice, and records structured diagnostics for engineer-in-the-loop and agent-assisted design iteration.
+AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records structure-aware diagnostics for engineer-in-the-loop and agent-assisted design iteration.
 
-The current development focus is **structure-aware diagnosis and optimization for OTA-class analog circuits**, including five-transistor OTAs and two-stage Miller OTAs. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
+The current development focus is OTA-class analog design, especially five-transistor OTAs and two-stage Miller OTAs. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
 
-> License notice: this repository is source-available only. All rights are reserved. See [LICENSE](LICENSE).
+> License notice: this repository is source-available only. All rights are reserved. See [LICENSE](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/LICENSE).
 
 ## Highlights
 
-- YAML-first design state for devices, variables, targets, evaluations, and diagnostics.
-- ASIR semantic extraction for circuit roles, symmetry groups, bias paths, gain stages, and compensation networks.
-- Profile-driven behavior for OTA, comparator, and future RF circuit families.
+- YAML-first design state for topology, variables, targets, constraints, evaluations, and compact diagnostics.
+- ASIR semantic extraction for roles, symmetry groups, gain stages, bias paths, and compensation networks.
 - gm/ID-based compact sizing with NSGA-II exploration.
-- ngspice-backed AC, DC, transient, operating-point, slew-rate, and headroom measurements.
-- Postprocess hooks for bias repair, OP validation, and compensation tuning.
+- Hard validation for schema write policy, symmetry consistency, operating-point safety, and layout-realizable W/L constraints.
+- Layout realization for oversized devices through finger folding, parallel devices, and series length segmentation.
+- ngspice-backed AC, DC, transient, operating-point, slew-rate, headroom, and power measurements.
+- Optional postprocess repair for OP validation, bias balancing, and compensation tuning.
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
-- Local SPICE intervention modeling for action-to-spec attribution.
-- Constrained action optimization over schema-safe tuning moves.
-- Structured run artifacts for reproducibility, debugging, and human review.
+- Structure-aware causal diagnosis with local intervention modeling and evidence-gated guarded actions.
+- Compact schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
 
 ## Repository Layout
 
 ```text
 asir/          Semantic IR, profile selection, and extraction helpers
 core/          Design rules, validation, regions, and process environment models
-diagnostics/   Causal diagnostics, ranking, and agent-readable reports
+diagnostics/   Causal diagnostics, intervention models, and agent-safe tuning
 feasibility/   Physics-informed feasibility estimation
-flow/          End-to-end orchestration and agent loop control
+flow/          End-to-end orchestration and LangGraph agent loop control
 frontends/     YAML and SPICE input frontends
 inputs/        Maintained circuit-family schema examples
+layout/        Physical realization helpers for folding and segmentation
 netlist/       Schema-to-SPICE generation
 optimizer/     Compact evaluators and NSGA-II optimization
-postprocess/   ngspice-guided repair and compensation tuning
+outputs/       Run artifact writers and compact schema views
+postprocess/   Optional ngspice-guided repair and compensation tuning
 schemas/       Typed design-state schema definitions
 simulator/     ngspice execution and measurement extraction
 specs/         Specification and metric utilities
@@ -103,7 +105,7 @@ python -m pytest -q
 
 ## LLM-Guided Diagnosis
 
-The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the source of truth and only applies edits through schema-level actions.
+The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the compact source of truth and only applies edits through schema-level tool commands.
 
 Set a DeepSeek API key before running LLM-guided rounds:
 
@@ -128,6 +130,9 @@ python main.py \
   --llm-reasoning-effort max \
   --llm-timeout 180 \
   --llm-max-tokens 12000 \
+  --postprocess-policy fallback \
+  --reopt-generations 3 \
+  --reopt-pop-size 12 \
   --intervention-max-actions 3
 ```
 
@@ -135,56 +140,101 @@ If the API key is not configured, the flow records an LLM fallback status and co
 
 ## Causal Action Planning
 
-The agent action layer is modeled as a local constrained optimization problem rather than a raw candidate-selection heuristic.
+The diagnosis layer is a structure-aware causal diagnosis system, not a raw sensitivity ranking tool.
 
-Each agent round follows three steps:
+The default research strategy is budget-aware:
 
-1. **Causal graph diagnosis** ranks structural root-cause nodes from the dependency graph, operating-point evidence, propagation paths, and weak sensitivity priors.
-2. **Local intervention modeling** perturbs a small number of schema-safe actions in SPICE and builds a local matrix `A`, where each column estimates how one action changes normalized spec violation.
-3. **Constrained action optimization** selects the next schema edits by minimizing residual weighted violation plus penalties for uncertainty, duplicate knob writes, guarded actions, and cross-metric regressions.
+```text
+global optimizer with small budget
+  -> causal diagnosis + local intervention evidence
+  -> constrained action optimizer / LLM planner
+  -> short re-optimization
+  -> postprocess only if stuck or near-feasible
+```
 
-When SPICE intervention data is available, automatic action selection is restricted to actions that were actually perturbed in the local `A` matrix. Surrogate estimates are retained as fallback evidence and debugging context, not as the preferred decision rule.
+Each agent round follows three decoupled decision steps:
 
-The resulting artifacts are written into `diagnostics.causal_diagnostics.local_intervention_model`, `diagnostics.causal_diagnostics.constrained_action_optimizer`, and `diagnostics.causal_diagnostics.attribution_guided_tuning`.
+1. **Causal graph diagnosis** ranks structural root-cause nodes using dependency paths, operating-point evidence, propagation effects, and weak sensitivity priors.
+2. **Local intervention modeling** perturbs a small number of schema-safe actions in SPICE and builds a local action-to-violation model.
+3. **Constrained action optimization** selects compatible action combinations by minimizing residual weighted violation plus penalties for uncertainty, duplicate writes, guarded actions, and cross-metric regressions.
+
+Guarded actions are evidence-gated. A guarded action can be applied automatically only when the local SPICE intervention evidence predicts a sufficient decrease in the weighted normalized violation objective, reduces at least one failed metric, keeps tradeoffs bounded, and has acceptable uncertainty.
+
+The mathematical objective used by the evidence gate is:
+
+```text
+J(v) = sum_i w_i * v_i^2
+v' = [v + A_j]_+
+```
+
+where `v` is the normalized specification violation vector and `A_j` is the local intervention column for one action.
+
+The action strategy is coarse-to-fine. Large violations permit larger schema-safe coarse moves. Near-feasible states switch to smaller fine moves, and every proposed edit is checked by the hard physical gate before it can seed the next SPICE run.
 
 ## Design State Contract
 
-AnalogRF-IR treats the generated design state as the canonical interface between optimization, simulation, diagnosis, and agent actions.
-
-- User-authored inputs define the initial circuit, process environment, targets, and editable variables.
-- Generated schemas capture the current design state, operating-point data, simulation measurements, diagnostics, and available schema actions.
-- Agent actions are restricted to explicit schema-edit commands. The planner should not modify topology, simulator output, or hidden internal state directly.
-- Derived JSON files are convenience views; `design_state.yaml` remains the authoritative run artifact.
-
-## Outputs
-
-Each execution writes a run directory under:
+AnalogRF-IR treats generated schemas as a compact, user-readable decision interface. Heavy evidence is written to JSON artifacts instead of being embedded into the YAML state.
 
 ```text
-runs/iter_###/
+design_state.yaml        Compact state, measurements, summary diagnostics, and schema actions
+causal_diagnostics.json  Full causal graph, local intervention model, and evidence details
+agent_diagnostics.json   Agent-facing diagnostic report
+sim_log.json             Simulator and optimizer log view
+result.json              Compact pass/fail and metric summary
 ```
 
-Typical artifacts:
+The agent write policy is intentionally narrow:
+
+- It may update existing design-variable initials and ranges.
+- It may update existing per-device or global constraint ranges.
+- It may update supported gm/ID and L strategies.
+- It may not rewrite topology, targets, simulator outputs, process data, device connections, or transistor operating-point measurements.
+
+This keeps user-authored inputs, generated diagnostics, optimization logic, and postprocess repair decoupled.
+
+## Physical Safety
+
+Before an action reaches SPICE, the flow applies hard checks for:
+
+- explicit symmetry labels and matched-pair consistency,
+- schema variable bounds and per-device constraints,
+- operating-region and headroom rules,
+- maximum W/L layout realizability,
+- folding, parallelization, or series segmentation for oversized devices,
+- write-policy compliance for all agent actions.
+
+Invalid physical states are rejected in validation instead of being silently simulated.
+
+## Postprocess Policy
+
+Postprocess is an optional repair layer, not the core diagnosis method. It can improve robustness for near-feasible designs or stuck operating points, but it is kept separate from:
+
+- global optimization,
+- causal graph diagnosis,
+- local intervention modeling,
+- LLM planning,
+- schema command execution.
+
+For research comparisons, postprocess can be ablated against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
+
+CLI policy:
 
 ```text
-design_state.yaml          Canonical design state and diagnostics
-netlist.cir                Generated SPICE netlist
-result.json                Compact metric and pass/fail summary
-agent_diagnostics.json     Agent-facing diagnosis and action context
-causal_diagnostics.json    Structural causal diagnosis view
-sim_log.json               Simulator log view derived from design_state.yaml
+--postprocess-policy fallback   run only when near-feasible or stagnated
+--postprocess-policy always     legacy always-on repair behavior
+--postprocess-policy off        disable postprocess for ablation
 ```
-
-The causal diagnostics layer records failure symptoms, dependency paths, ranked causal candidates, and tuning recommendations. This layer is under active development toward intervention-calibrated, structure-aware action planning.
 
 ## Documentation
 
-Additional project notes are maintained in [docs](docs/):
+Additional project notes are maintained in [docs](https://github.com/Yixin-Gong/AnalogRF-IR/tree/main/docs):
 
-- [Quick Start](docs/quickstart.md)
-- [Architecture](docs/architecture.md)
-- [Schema Guide](docs/schema_guide.md)
-- [Development Guide](docs/development.md)
+- [Quick Start](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/quickstart.md)
+- [Architecture](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/architecture.md)
+- [Schema Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/schema_guide.md)
+- [Development Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/development.md)
+
+The repository root `README.md` mirrors this document so GitHub displays the maintained project overview on the repository homepage.
 
 ## Development
 
@@ -193,7 +243,7 @@ Recommended workflow:
 ```bash
 . .venv/bin/activate
 python -m pytest -q
-python -m compileall asir core diagnostics flow frontends netlist optimizer postprocess schemas simulator specs tests
+python -m compileall asir core diagnostics flow frontends layout netlist optimizer outputs postprocess schemas simulator specs tests
 ```
 
 When adding a new circuit family:
@@ -203,7 +253,8 @@ When adding a new circuit family:
 3. Register profile-specific rules and validation behavior.
 4. Add compact estimators only where the analytical model is defensible.
 5. Add simulator measurements for final validation.
-6. Add regression tests for profile selection, constraints, diagnostics, and output artifacts.
+6. Add optional postprocess repair only when it is physically justified and ablatable.
+7. Add regression tests for profile selection, constraints, diagnostics, artifacts, and physical validation.
 
 ## Current Limitations
 
@@ -215,15 +266,14 @@ When adding a new circuit family:
 
 ## Roadmap
 
-- Structure-aware causal diagnosis with explicit graph dependencies.
-- Intervention-calibrated action ranking from small SPICE perturbations.
-- Constrained local optimization for agent action selection.
-- Cleaner OP-first and dynamic-performance-first decomposition.
+- Coarse-to-fine constrained combo-action optimization.
+- Budget-aware ablation of postprocess, local intervention, and LLM planning.
 - More complete comparator and RF signoff testbenches.
 - Tighter reproducibility metadata for process, simulator, model, and planner configuration.
+- Additional physical-layout constraints beyond first-order W/L realization.
 
 ## License
 
 This project is provided under a proprietary, all-rights-reserved license. No permission is granted to use, copy, modify, distribute, sublicense, publish, host, or create derivative works except by explicit written permission from the copyright holder.
 
-See [LICENSE](LICENSE) for the complete terms.
+See [LICENSE](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/LICENSE) for the complete terms.

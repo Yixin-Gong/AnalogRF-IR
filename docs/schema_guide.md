@@ -36,9 +36,50 @@ Common sections include:
 - `evaluations`: requested measurements for simulator or compact evaluation.
 - `transistors`: optional physical seed values from a prior run or imported netlist.
 
-The schema should remain the source of truth. Avoid hiding topology-specific
-assumptions in Python when they can be declared through roles, variables,
-constraints, targets, and evaluations.
+User-authored input schemas should stay concise. They should describe design
+intent, editable variables, and constraints. They should not contain generated
+diagnostics, simulation logs, dependency graphs, or local intervention matrices.
+
+Generated `runs/iter_###/design_state.yaml` files add compact result and tuning
+summaries under `diagnostics`, but full evidence is kept in sibling JSON
+artifacts. This keeps the schema readable while preserving traceability.
+
+Avoid hiding topology-specific assumptions in Python when they can be declared
+through roles, variables, constraints, targets, and evaluations.
+
+## Generated Diagnostics Contract
+
+Generated schemas use diagnostics as a compact decision interface:
+
+- `diagnostics.result`: pass/fail status and compact measurements.
+- `diagnostics.causal_diagnostics`: compact root causes, tuning actions,
+  selected action traces, and evidence-gate summaries.
+- `diagnostics.agent_tool_commands`: requested schema-level tuning commands.
+- `diagnostics.previous_agent_tuning`: compact record of the last applied
+  command when a new loop input is generated.
+
+Large evidence stays outside the schema:
+
+- Full dependency graph: `causal_diagnostics.json`.
+- Full local intervention model and `A` matrix: `causal_diagnostics.json`.
+- Simulation and optimizer logs: `sim_log.json`.
+- Agent-facing debug report: `agent_diagnostics.json`.
+
+Agents should read generated schemas, select existing actions or explicit
+per-knob custom actions, and let the executor enforce the write policy.
+
+## Physical Constraints
+
+Every schema action must remain physically realizable:
+
+- Matched or mirrored devices with the same `symmetry_label` must keep identical
+  encoded variables and physical W/L values.
+- Device W/L choices must stay within process limits after layout realization.
+- Wide devices may be folded or parallelized; long devices may be segmented in
+  series when the process style supports subckt emission.
+- Invalid symmetry, range, or layout realization is a validation error, not a
+  warning.
+- The agent may only edit existing design variables and supported constraints.
 
 ## OTA Notes
 
@@ -50,6 +91,8 @@ output-stage bias mirror. For this family:
 - Declare `Cc` and `Rz` as globals only when the topology has Miller compensation.
 - Keep target priorities realistic for compact optimization before ngspice signoff.
 - Use the feasibility checker before expensive searches.
+- Treat postprocess as an optional repair layer. Causal diagnosis and schema
+  action planning should remain usable with postprocess disabled for ablations.
 
 The source-follower-boosted OTA has no explicit `Rz-Cc` compensation network.
 Treat the source follower as local output-resistance boosting with output
@@ -78,4 +121,5 @@ Recommended order:
 5. Define bounded design variables for every knob the optimizer may touch.
 6. Declare targets and evaluations before adding custom loss terms.
 7. Run a small smoke optimization and inspect `runs/iter_###/design_state.yaml`.
-8. Add or update regression tests if the schema exercises new behavior.
+8. Inspect `causal_diagnostics.json` when debugging root causes or intervention evidence.
+9. Add or update regression tests if the schema exercises new behavior.

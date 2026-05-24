@@ -18,6 +18,7 @@ from diagnostics import (
 )
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object
 from flow.agent_loop import DiagnosticAgentLoop
+from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from main import DEFAULT_AGENT_MAX_ITERATIONS, _configure_llm_api_key, _parse_args
 from flow.state_update import apply_optimizer_meta_to_state
@@ -30,7 +31,7 @@ from outputs.artifacts import ArtifactWriter
 from postprocess.ota import _select_two_phase_candidate, tune_single_stage_ota_operating_point
 from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from postprocess.source_follower import _candidate_points
-from postprocess.two_stage import tune_two_stage_compensation
+from postprocess.two_stage import set_symmetric_width, tune_two_stage_compensation
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
@@ -420,10 +421,12 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert "process" not in state_payload
     assert "simulation" not in state_payload
     assert state_payload["diagnostics"]["result"]["status"]["spec_pass"] is True
+    assert state_payload["diagnostics"]["contract"]["schema_role"] == "compact decision view"
     assert "phase_at_unity_meas" not in state_payload["diagnostics"]["result"]["measurements"]
     assert "simulation_log" not in state_payload["diagnostics"]
     assert "agent_diagnostics" not in state_payload["diagnostics"]
     assert "dependency_graph" not in state_payload["diagnostics"]["causal_diagnostics"]
+    assert "local_intervention_model" not in state_payload["diagnostics"]["causal_diagnostics"]
     full_causal = json.loads(artifacts.causal_diagnostics.read_text(encoding="utf-8"))
     assert full_causal["dependency_graph"]["nodes"]
 
@@ -479,6 +482,7 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     assert "suggested_validation_experiments" not in compact_causal
     assert "dependency_graph" not in compact_causal
     assert "agent_failure_attribution" not in compact_causal
+    assert "A" not in compact_causal.get("local_intervention_summary", {})
     assert causal["root_cause_attribution"]
     assert causal["agent_failure_attribution"]["by_failure"]
     assert compact_causal["attribution_guided_tuning"]["by_failure"]
@@ -549,6 +553,8 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     tuning_actions = causal["attribution_guided_tuning"]["by_failure"][0]["actions"]
     primary_action = tuning_actions[0]
 
+    assert causal["attribution_guided_tuning"]["planning_mode"] in {"coarse", "fine"}
+    assert primary_action["tuning_mode"] in {"coarse", "fine"}
     assert top["node"] != "device.M5.ro"
     assert "block.load_stage" in gain_path
     assert "device.M5.ro" not in gain_path
@@ -801,6 +807,111 @@ def test_constrained_optimizer_selects_action_with_best_local_model_support():
     assert command["args"]["selected_actions"][0]["action_id"] == "good_Cc_decrease"
 
 
+def test_guarded_action_requires_passing_spice_evidence_gate():
+    target_status = {
+        "dc_gain": {
+            "status": "fail",
+            "value": 30.0,
+            "min": 60.0,
+            "max": None,
+            "priority": 1,
+        }
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "guarded_input_gm_id",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "guarded",
+                        "knob": "M1.gm_id",
+                        "apply_to": ["M1.gm_id", "M2.gm_id"],
+                        "direction": "increase",
+                        "expected_effect": {"dc_gain": "increase"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(tuning=tuning, target_status=target_status)
+    candidate = optimizer["candidate_actions"][0]
+
+    assert optimizer["selected_actions"] == []
+    assert candidate["evidence_gate"]["required"] is True
+    assert candidate["evidence_gate"]["passed"] is False
+    assert candidate["evidence_gate"]["conditions"]["spice_local_intervention"] is False
+
+
+def test_passing_spice_evidence_gate_allows_guarded_action_execution():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    target_status = {
+        "dc_gain": {
+            "status": "fail",
+            "value": 30.0,
+            "min": 60.0,
+            "max": None,
+            "priority": 1,
+        }
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "guarded_input_gm_id",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "guarded",
+                        "knob": "M1.gm_id",
+                        "apply_to": ["M1.gm_id", "M2.gm_id"],
+                        "direction": "increase",
+                        "suggested_unclipped_value": 18.0,
+                        "expected_effect": {"dc_gain": "increase"},
+                    }
+                ],
+            }
+        ],
+    }
+    intervention_model = {
+        "base_violation_vector": {"dc_gain": 0.5},
+        "action_effects": [
+            {
+                "action_id": "guarded_input_gm_id",
+                "status": "ok",
+                "source": "spice_small_perturbation",
+                "delta_violation_vector": {"dc_gain": -0.45},
+                "uncertainty": 0.1,
+            }
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(
+        tuning=tuning,
+        target_status=target_status,
+        intervention_model=intervention_model,
+    )
+    optimized_tuning = apply_optimized_action_plan(tuning, optimizer)
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": optimizer,
+        "attribution_guided_tuning": optimized_tuning,
+    }
+    command = write_tuning_tool_command(state, round_index=1)
+    application = execute_tuning_tool_commands(state, round_index=1)
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    m2_gm_id = next(dv for dv in state.design_variables if dv.device == "M2" and dv.variable == "gm_id")
+
+    assert optimizer["selected_actions"][0]["evidence_gate"]["passed"] is True
+    assert command["args"]["selected_actions"][0]["action_id"] == "guarded_input_gm_id"
+    assert application["applied_actions"][0]["action_id"] == "guarded_input_gm_id"
+    assert m1_gm_id.initial == 18.0
+    assert m2_gm_id.initial == 18.0
+
+
 def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(tmp_path):
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
     result = SimulationResult(
@@ -946,6 +1057,32 @@ def test_agent_write_policy_rejects_non_design_variable_edits():
     assert state.topology.devices[0].role == original_role
 
 
+def test_agent_hard_physical_gate_rejects_symmetry_breaking_action():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    m2_gm_id = next(dv for dv in state.design_variables if dv.device == "M2" and dv.variable == "gm_id")
+
+    application = apply_attribution_guided_tuning(
+        state,
+        round_index=1,
+        custom_actions=[
+            {
+                "action_id": "break_M1_M2_symmetry",
+                "decision": "apply",
+                "knob": "M1.gm_id",
+                "apply_to": ["M1.gm_id"],
+                "suggested_unclipped_value": 18.0,
+                "reason": "This should be rejected because M1/M2 are symmetric.",
+            }
+        ],
+    )
+
+    assert not application["applied_actions"]
+    assert "hard physical gate rejected action" in application["skipped_actions"][0]["reason"]
+    assert application["skipped_actions"][0]["hard_physical_gate"]["passed"] is False
+    assert m1_gm_id.initial == m2_gm_id.initial
+
+
 def test_deepseek_schema_planner_writes_fallback_command_without_api_key(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
@@ -1087,6 +1224,62 @@ def test_langgraph_llm_ai_options_are_configurable_from_cli():
     assert config.temperature == 0.1
     assert config.max_tokens == 4096
     assert config.timeout_seconds == 90
+
+
+def test_adaptive_strategy_cli_and_short_reoptimization_budget():
+    args = _parse_args(
+        [
+            "--postprocess-policy",
+            "fallback",
+            "--postprocess-near-feasible-ratio",
+            "0.15",
+            "--reopt-generations",
+            "3",
+            "--reopt-pop-size",
+            "12",
+            "--action-strategy",
+            "combo_coarse_fine",
+        ]
+    )
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(
+        generations=10,
+        pop_size=40,
+        reopt_generations=args.reopt_generations,
+        reopt_pop_size=args.reopt_pop_size,
+        postprocess_policy=args.postprocess_policy,
+        postprocess_near_feasible_ratio=args.postprocess_near_feasible_ratio,
+    )
+    loop.emit = lambda _msg: None
+
+    assert args.postprocess_policy == "fallback"
+    assert args.action_strategy == "combo_coarse_fine"
+    assert loop._short_reopt_generations() == 3
+    assert loop._short_reopt_pop_size() == 12
+    assert loop._stagnation_detected([{"best_loss": 1.0}, {"best_loss": 0.99}]) is True
+
+
+def test_postprocess_fallback_decision_uses_near_feasible_estimate():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    runner = AnalogRFIRFlowRunner(
+        config=FlowConfig(postprocess_policy="fallback", postprocess_near_feasible_ratio=0.20)
+    )
+    spec_model = SpecRegistry().select(state)
+
+    near = runner._postprocess_decision(
+        state,
+        {"performance": {"dc_gain": 39.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
+        spec_model,
+    )
+    far = runner._postprocess_decision(
+        state,
+        {"performance": {"dc_gain": 20.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
+        spec_model,
+    )
+
+    assert near["run"] is True
+    assert near["reason"] == "near-feasible optimizer estimate"
+    assert far["run"] is False
 
 
 def test_llm_json_loader_extracts_object_from_non_strict_response():
@@ -1237,9 +1430,78 @@ def test_validation_checks_explicit_cross_role_symmetry_labels():
     state.transistors["M8"].parameters.W = 2.0e-6
 
     report = Validator().validate(state, layers=[4], include_custom=False)
-    messages = [item.message for item in report.warnings()]
+    messages = [item.message for item in report.errors()]
 
     assert any("M5/M8" in message and "W mismatch" in message for message in messages)
+
+
+def test_symmetric_design_variable_initial_mismatch_is_error():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    m2_gm_id = next(dv for dv in state.design_variables if dv.device == "M2" and dv.variable == "gm_id")
+    m2_gm_id.initial = 19.0
+
+    report = Validator().validate(state, layers=[4])
+    messages = [item.message for item in report.errors()]
+
+    assert any("sym_M1_M2" in message and "initial" in message for message in messages)
+
+
+def test_optimizer_reduces_symmetric_design_variables_and_decodes_copies():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+
+    assert evaluator.symmetry_reduced is True
+    assert evaluator.n_vars < len(state.design_variables)
+    assert any(
+        set(group["members"]) >= {"M1.gm_id", "M2.gm_id"}
+        for group in evaluator.encoded_variable_groups
+    )
+
+    x = [dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max) for dv in evaluator.encoded_design_variables]
+    decoded = evaluator.decode_x(x)
+
+    assert decoded["M1"]["gm_id"] == decoded["M2"]["gm_id"]
+    assert decoded["M1"]["L"] == decoded["M2"]["L"]
+    assert decoded["M3"]["gm_id"] == decoded["M4"]["gm_id"]
+    assert decoded["M7"]["L"] == decoded["M9"]["L"]
+
+
+def test_postprocess_width_updates_copy_to_symmetric_peers():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    state.transistors["M7"].parameters.W = 2.0e-6
+    state.transistors["M9"].parameters.W = 5.0e-6
+
+    set_symmetric_width(state, "M7", 3.0e-6)
+
+    assert state.transistors["M7"].parameters.W == 3.0e-6
+    assert state.transistors["M9"].parameters.W == 3.0e-6
+
+
+def test_netlist_realizes_wide_and_long_devices_with_layout_units():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    state.process.device_style = "subckt"
+    state.process.max_finger_width = 10e-6
+    state.process.max_W = 200e-6
+    state.process.max_L = 10e-6
+    state.transistors["M6"].parameters.W = 25e-6
+    state.transistors["M6"].parameters.L = 12e-6
+    state.transistors["M6"].L_strategy = 12e-6
+
+    netlist = generate_netlist(state)
+    m6 = state.transistors["M6"].parameters
+
+    assert "layout M6" in netlist
+    assert "XM6 vout n1 M6_ser1 vdd" in netlist
+    assert "XM6_S2 M6_ser1 n1 vdd vdd" in netlist
+    assert "ng=3" in netlist
+    assert m6.layout_fingers == 3
+    assert m6.layout_series == 2
+    assert m6.layout_finger_W <= state.process.max_finger_width
+    assert m6.layout_segment_L <= state.process.max_L
+
+    report = Validator().validate(state, layers=[4])
+    messages = [item.message for item in report.errors()]
+    assert not any("layout realization" in message for message in messages)
 
 
 def test_optimizer_and_netlist_include_slew_rate():

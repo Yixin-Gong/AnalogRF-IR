@@ -12,6 +12,14 @@ from specs.models import CircuitSpecModel
 
 INTERVENTION_SCHEMA_VERSION = "analogrf_ir.local_intervention_model.v0_1"
 OPTIMIZER_SCHEMA_VERSION = "analogrf_ir.constrained_action_optimizer.v0_1"
+EVIDENCE_GATE_SCHEMA_VERSION = "analogrf_ir.evidence_gate.v0_1"
+EVIDENCE_GATE_THRESHOLDS = {
+    "min_absolute_objective_improvement": 0.002,
+    "min_relative_objective_improvement": 0.015,
+    "max_tradeoff_to_improvement_ratio": 0.60,
+    "max_component_worsening": 0.12,
+    "max_uncertainty": 0.25,
+}
 
 
 def build_spice_intervention_model(
@@ -34,7 +42,7 @@ def build_spice_intervention_model(
 
     metrics = _ordered_metrics(target_status)
     base_violation = _violation_vector(target_status, metrics)
-    actions = _candidate_actions(tuning, limit=max(max_actions * 2, max_actions))
+    actions = _candidate_actions(tuning, limit=max(0, int(max_actions)))
     work_path = Path(work_dir)
     work_path.mkdir(parents=True, exist_ok=True)
     effects: list[dict[str, Any]] = []
@@ -44,7 +52,7 @@ def build_spice_intervention_model(
     if not any(base_violation.values()):
         return _empty_intervention_model("no_failed_targets", target_status, metrics, base_violation)
 
-    for index, action in enumerate(actions[: max(0, int(max_actions))], start=1):
+    for index, action in enumerate(actions, start=1):
         action_id = str(action.get("action_id") or f"action_{index:03d}")
         trial_state = state.clone()
         applied = _apply_netlist_proxy_action(trial_state, action, perturbation_fraction)
@@ -187,6 +195,7 @@ def optimize_tuning_actions(
     }
     action_records = [_action_record(action, effect_by_id.get(str(action.get("action_id"))), target_status, base_violation) for action in actions]
     action_records = [record for record in action_records if record["action_id"]]
+    planning_mode = str(tuning.get("planning_mode") or _optimizer_planning_mode(base_violation))
     has_spice_evidence = any(
         item.get("local_model_source") == "spice_small_perturbation"
         for item in action_records
@@ -204,6 +213,7 @@ def optimize_tuning_actions(
             target_status=target_status,
             candidates=action_records,
             selected=[],
+            planning_mode=planning_mode,
         )
 
     baseline = _weighted_objective(base_violation, target_status)
@@ -229,6 +239,7 @@ def optimize_tuning_actions(
         selected=selected,
         objective_before=baseline,
         objective_after=best_objective,
+        planning_mode=planning_mode,
     )
 
 
@@ -248,6 +259,7 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
         "objective_before": optimizer_result.get("objective_before"),
         "objective_after": optimizer_result.get("objective_after"),
         "model_source": optimizer_result.get("model_source"),
+        "strategy": optimizer_result.get("strategy", {}),
     }
     by_failure = []
     for failure in tuning.get("by_failure", []):
@@ -258,6 +270,8 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
             action_id = action_copy.get("action_id")
             action_copy["optimizer_selected"] = action_id in selected_index
             if action_id in candidate_by_id:
+                if candidate_by_id[action_id].get("evidence_gate"):
+                    action_copy["evidence_gate"] = candidate_by_id[action_id]["evidence_gate"]
                 action_copy["optimizer"] = {
                     key: candidate_by_id[action_id][key]
                     for key in (
@@ -266,6 +280,7 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
                         "predicted_violation_delta",
                         "uncertainty",
                         "constraint_penalty",
+                        "evidence_gate",
                         "selection_reason",
                     )
                     if key in candidate_by_id[action_id]
@@ -301,7 +316,8 @@ def default_selected_actions_from_optimizer(
     for item in selected:
         action_id = item.get("action_id")
         priority = item.get("priority", "primary")
-        if not action_id or priority not in allowed:
+        evidence_passed_guarded = priority == "guarded" and _passes_evidence_gate(item)
+        if not action_id or (priority not in allowed and not evidence_passed_guarded):
             continue
         out.append(
             {
@@ -379,6 +395,7 @@ def _optimizer_result(
     selected: list[dict[str, Any]],
     objective_before: float | None = None,
     objective_after: float | None = None,
+    planning_mode: str = "fine",
 ) -> dict[str, Any]:
     if objective_before is None:
         objective_before = _weighted_objective(base_violation, target_status)
@@ -404,13 +421,19 @@ def _optimizer_result(
         "status": status,
         "problem": {
             "objective": "minimize weighted residual normalized spec violation plus action size, guard, and uncertainty penalties",
-            "variables": "discrete schema actions produced by causal attribution",
+            "variables": "bounded combinations of discrete schema actions produced by causal attribution",
             "constraints": [
                 "schema writable knobs only",
                 "no duplicate knob writes in one combination",
-                "guarded actions require strong local-model support",
+                "guarded actions require passing evidence_gate from the local SPICE intervention model",
                 "prefer lower uncertainty when objective improvement is similar",
             ],
+        },
+        "strategy": {
+            "name": "combo_coarse_fine",
+            "planning_mode": planning_mode,
+            "combo_search": "exhaustive bounded combinations over ranked causal actions",
+            "hard_physical_gate": "executor validates write policy and full schema before SPICE",
         },
         "model_source": source,
         "metrics": metrics,
@@ -424,19 +447,14 @@ def _optimizer_result(
 
 
 def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
     actions = [
         action
         for failure in tuning.get("by_failure", [])
         for action in failure.get("actions", [])
-        if action.get("action_id") and action.get("priority") != "guarded"
+        if action.get("action_id")
     ]
-    if not actions:
-        actions = [
-            action
-            for failure in tuning.get("by_failure", [])
-            for action in failure.get("actions", [])
-            if action.get("action_id")
-        ]
     priority_order = {"primary": 0, "secondary": 1, "guarded": 2}
     actions = sorted(actions, key=lambda item: (priority_order.get(item.get("priority", ""), 9), int(item.get("rank", 999))))
     out = []
@@ -444,8 +462,7 @@ def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, 
     seen_effect_keys: set[tuple[tuple[str, ...], str]] = set()
     for action in actions:
         action_id = str(action.get("action_id"))
-        knobs = tuple(str(item) for item in (action.get("apply_to") or [action.get("knob", "")]) if item)
-        effect_key = (knobs, str(action.get("direction", "")))
+        effect_key = _candidate_effect_key(action)
         if action_id in seen_ids or effect_key in seen_effect_keys:
             continue
         seen_ids.add(action_id)
@@ -453,7 +470,32 @@ def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, 
         out.append(action)
         if len(out) >= limit:
             break
+    if limit > 1 and not any(item.get("priority") == "guarded" for item in out):
+        guarded = next(
+            (
+                item
+                for item in actions
+                if item.get("priority") == "guarded"
+                and str(item.get("action_id")) not in seen_ids
+                and _candidate_effect_key(item) not in seen_effect_keys
+            ),
+            None,
+        )
+        if guarded is not None and len(out) >= limit:
+            out[-1] = guarded
+        elif guarded is not None:
+            out.append(guarded)
     return out
+
+
+def _optimizer_planning_mode(base_violation: dict[str, float]) -> str:
+    max_violation = max((float(value) for value in base_violation.values()), default=0.0)
+    return "coarse" if max_violation >= 0.25 else "fine"
+
+
+def _candidate_effect_key(action: dict[str, Any]) -> tuple[tuple[str, ...], str]:
+    knobs = tuple(str(item) for item in (action.get("apply_to") or [action.get("knob", "")]) if item)
+    return (knobs, str(action.get("direction", "")))
 
 
 def _action_record(
@@ -471,7 +513,7 @@ def _action_record(
             metric: float(value)
             for metric, value in (effect.get("delta_violation_vector") or {}).items()
         }
-        source = effect.get("source", "local_intervention_model")
+        source = str(effect.get("source") or "local_intervention_model")
         uncertainty = float(effect.get("uncertainty", 0.35) or 0.35)
     residual = {
         metric: max(0.0, base_violation.get(metric, 0.0) + delta.get(metric, 0.0))
@@ -479,7 +521,15 @@ def _action_record(
     }
     before = _weighted_objective(base_violation, target_status)
     after = _weighted_objective(residual, target_status)
-    penalty = _constraint_penalty(action, delta, target_status, uncertainty)
+    evidence_gate = _evidence_gate(
+        action=action,
+        delta=delta,
+        target_status=target_status,
+        base_violation=base_violation,
+        local_model_source=str(source),
+        uncertainty=uncertainty,
+    )
+    penalty = _constraint_penalty(action, delta, target_status, uncertainty, evidence_gate=evidence_gate)
     return {
         "action_id": action.get("action_id"),
         "metric": action.get("metric"),
@@ -492,6 +542,7 @@ def _action_record(
         "local_model_source": source,
         "uncertainty": round(float(uncertainty), 4),
         "constraint_penalty": round(float(penalty), 6),
+        "evidence_gate": evidence_gate,
     }
 
 
@@ -521,7 +572,7 @@ def _combo_is_allowed(combo: tuple[dict[str, Any], ...]) -> bool:
             if knob in touched:
                 return False
             touched.add(str(knob))
-        if action.get("priority") == "guarded" and action.get("local_model_source") != "spice_small_perturbation":
+        if action.get("priority") == "guarded" and not _passes_evidence_gate(action):
             return False
     return True
 
@@ -531,10 +582,12 @@ def _constraint_penalty(
     delta: dict[str, float],
     target_status: dict[str, dict[str, Any]],
     uncertainty: float,
+    *,
+    evidence_gate: dict[str, Any] | None = None,
 ) -> float:
     penalty = 0.0
     if action.get("priority") == "guarded":
-        penalty += 0.10
+        penalty += 0.025 if (evidence_gate or {}).get("passed") else 0.20
     if uncertainty > 0.5:
         penalty += 0.02
     primary_metric = action.get("metric")
@@ -545,6 +598,86 @@ def _constraint_penalty(
         if worsening > 0 and metric != primary_metric:
             penalty += min(0.25, 0.25 * worsening)
     return penalty
+
+
+def _evidence_gate(
+    *,
+    action: dict[str, Any],
+    delta: dict[str, float],
+    target_status: dict[str, dict[str, Any]],
+    base_violation: dict[str, float],
+    local_model_source: str,
+    uncertainty: float,
+) -> dict[str, Any]:
+    required = action.get("priority") == "guarded"
+    residual = {
+        metric: max(0.0, float(base_violation.get(metric, 0.0)) + float(delta.get(metric, 0.0) or 0.0))
+        for metric in base_violation
+    }
+    before = _weighted_objective(base_violation, target_status)
+    after = _weighted_objective(residual, target_status)
+    improvement = before - after
+    relative_improvement = improvement / max(before, 1e-12)
+    thresholds = dict(EVIDENCE_GATE_THRESHOLDS)
+    improvement_floor = max(
+        thresholds["min_absolute_objective_improvement"],
+        thresholds["min_relative_objective_improvement"] * before,
+    )
+    tradeoff_worsening = 0.0
+    max_component_worsening = 0.0
+    improved_failed_metrics = []
+    for metric, base in base_violation.items():
+        value_delta = float(delta.get(metric, 0.0) or 0.0)
+        if value_delta < -1e-9 and target_status.get(metric, {}).get("status") in {"fail", "unverified"}:
+            improved_failed_metrics.append(metric)
+        if value_delta <= 0:
+            continue
+        max_component_worsening = max(max_component_worsening, value_delta)
+        residual_if_worse = max(0.0, float(base) + value_delta)
+        tradeoff_worsening += _target_weight(target_status, metric) * max(0.0, residual_if_worse**2 - float(base) ** 2)
+    tradeoff_ratio = tradeoff_worsening / max(improvement, 1e-12) if improvement > 0 else float("inf")
+    conditions = {
+        "spice_local_intervention": local_model_source == "spice_small_perturbation",
+        "objective_improvement": improvement >= improvement_floor,
+        "failed_metric_reduced": bool(improved_failed_metrics),
+        "bounded_tradeoff": tradeoff_ratio <= thresholds["max_tradeoff_to_improvement_ratio"],
+        "bounded_component_worsening": max_component_worsening <= thresholds["max_component_worsening"],
+        "bounded_uncertainty": uncertainty <= thresholds["max_uncertainty"],
+    }
+    reasons = []
+    if not required:
+        reasons.append("not required for non-guarded action")
+    else:
+        for name, passed in conditions.items():
+            if not passed:
+                reasons.append(f"failed condition: {name}")
+    passed = (not required) or all(conditions.values())
+    return {
+        "schema_version": EVIDENCE_GATE_SCHEMA_VERSION,
+        "required": required,
+        "passed": passed,
+        "source": local_model_source,
+        "objective": "J(v)=sum_i w_i*v_i^2 with v_i as normalized spec violation; residual is [v + A_j]_+.",
+        "decision_rule": "Guarded actions pass iff SPICE local intervention evidence predicts sufficient J decrease, at least one failed metric is reduced, tradeoff worsening is bounded, and uncertainty is bounded.",
+        "objective_before": round(float(before), 6),
+        "objective_after": round(float(after), 6),
+        "objective_improvement": round(float(improvement), 6),
+        "relative_improvement": round(float(relative_improvement), 6),
+        "improvement_floor": round(float(improvement_floor), 6),
+        "weighted_tradeoff_worsening": round(float(tradeoff_worsening), 6),
+        "tradeoff_to_improvement_ratio": round(float(tradeoff_ratio), 6) if tradeoff_ratio != float("inf") else "inf",
+        "max_component_worsening": round(float(max_component_worsening), 6),
+        "uncertainty": round(float(uncertainty), 4),
+        "improved_failed_metrics": improved_failed_metrics,
+        "conditions": conditions,
+        "thresholds": thresholds,
+        "reasons": reasons,
+    }
+
+
+def _passes_evidence_gate(action: dict[str, Any]) -> bool:
+    gate = action.get("evidence_gate") or {}
+    return bool(gate.get("passed"))
 
 
 def _surrogate_delta(

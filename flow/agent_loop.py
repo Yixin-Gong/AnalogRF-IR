@@ -108,7 +108,7 @@ class DiagnosticAgentLoop:
         self.emit(f"  LangGraph node: execute_main_flow ({round_index}/{state['max_rounds']})")
         self.emit("=" * 70)
         round_seed = None if self.config.seed is None else int(self.config.seed) + round_index - 1
-        round_config = replace(self.config, schema=state["current_schema"], seed=round_seed)
+        round_config = self._round_flow_config(state, round_index, round_seed)
         result = AnalogRFIRFlowRunner(
             config=round_config,
             legacy_state_builder=self.legacy_state_builder,
@@ -134,7 +134,7 @@ class DiagnosticAgentLoop:
         causal = schema_state.diagnostics.get("causal_diagnostics", {})
         tuning = causal.get("attribution_guided_tuning", {})
         ranking_comparison = causal.get("sensitivity_ranking_comparison", {})
-        intervention_model = causal.get("local_intervention_model", {})
+        intervention_model = causal.get("local_intervention_summary", {}) or causal.get("local_intervention_model", {})
         action_optimizer = causal.get("constrained_action_optimizer", {})
         agent_model = {
             "state_source": str(design_state_path),
@@ -144,8 +144,11 @@ class DiagnosticAgentLoop:
             "local_intervention_model": {
                 "method": intervention_model.get("method", ""),
                 "status": intervention_model.get("status", ""),
-                "A": intervention_model.get("A", {}),
-                "action_effects": intervention_model.get("action_effects", [])[:5],
+                "metrics": intervention_model.get("metrics", []),
+                "base_violation_vector": intervention_model.get("base_violation_vector", {}),
+                "action_count": intervention_model.get("action_count"),
+                "ok_action_count": intervention_model.get("ok_action_count"),
+                "evidence_location": intervention_model.get("evidence_location", ""),
             },
             "constrained_action_optimizer": {
                 "status": action_optimizer.get("status", ""),
@@ -231,6 +234,55 @@ class DiagnosticAgentLoop:
             "llm_planner": command.get("llm_planner", {}),
         }
 
+    def _round_flow_config(
+        self,
+        state: AgentGraphState,
+        round_index: int,
+        round_seed: int | None,
+    ) -> FlowConfig:
+        generations = int(self.config.generations)
+        pop_size = int(self.config.pop_size)
+        if round_index > 1:
+            generations = self._short_reopt_generations()
+            pop_size = self._short_reopt_pop_size()
+        force_postprocess = self._stagnation_detected(state.get("rounds", []))
+        if force_postprocess:
+            self.emit("       Adaptive policy: enabling postprocess fallback because recent rounds stagnated")
+        return replace(
+            self.config,
+            schema=state["current_schema"],
+            seed=round_seed,
+            generations=generations,
+            pop_size=pop_size,
+            force_postprocess_fallback=force_postprocess,
+        )
+
+    def _short_reopt_generations(self) -> int:
+        if self.config.reopt_generations is not None:
+            return max(1, int(self.config.reopt_generations))
+        return max(2, min(int(self.config.generations), 4))
+
+    def _short_reopt_pop_size(self) -> int:
+        if self.config.reopt_pop_size is not None:
+            return max(4, int(self.config.reopt_pop_size))
+        return max(8, min(int(self.config.pop_size), max(8, int(self.config.pop_size) // 2)))
+
+    @staticmethod
+    def _stagnation_detected(rounds: list[dict[str, Any]]) -> bool:
+        if len(rounds) < 2:
+            return False
+        recent = rounds[-2:]
+        losses = []
+        for item in recent:
+            try:
+                losses.append(float(item.get("best_loss")))
+            except (TypeError, ValueError):
+                return False
+        if losses[0] <= 0:
+            return False
+        improvement = losses[0] - losses[1]
+        return improvement <= max(1e-9, 0.03 * abs(losses[0]))
+
     def _load_design_state(self, path: Path) -> DesignState:
         schema_state = DesignState.from_yaml(path)
         env = getattr(self, "_environment", None)
@@ -268,6 +320,8 @@ class DiagnosticAgentLoop:
                 for failure in failures
                 for action in failure.get("actions", [])[:3]
             ],
+            "postprocess_decision": result.flow_meta.get("postprocess_decision", {}),
+            "postprocess_event_count": len(result.flow_meta.get("postprocess", []) or []),
         }
 
     def _print_round_summary(self, summary: dict[str, Any]) -> None:
@@ -282,6 +336,12 @@ class DiagnosticAgentLoop:
                 f"step={action.get('agent_step_fraction')} "
                 f"next={action.get('suggested_next_value')}"
             )
+        pp = summary.get("postprocess_decision", {}) or {}
+        self.emit(
+            "         postprocess: "
+            f"run={pp.get('run')} reason={pp.get('reason', '')} "
+            f"events={summary.get('postprocess_event_count', 0)}"
+        )
 
     def _print_application(self, application: dict[str, Any]) -> None:
         self.emit("       Applied agent tuning:")
@@ -309,7 +369,7 @@ class DiagnosticAgentLoop:
 
 def _next_round_diagnostics(application: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": "analogrf_ir.state_diagnostics.v0_2",
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
         "previous_agent_tuning": {
             "round_index": application.get("round_index"),
             "command_id": application.get("command_id", ""),

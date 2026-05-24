@@ -5,6 +5,7 @@ import math
 from typing import Dict, List, Optional
 from pathlib import Path
 from asir.profiles import select_circuit_profile
+from layout.realization import LayoutRealization, realize_transistor_layout
 from schemas.design_state import DesignState
 
 
@@ -100,15 +101,89 @@ class NetlistGenerator:
             g = conn.get("gate", "0")
             s = conn.get("source", "0")
             b = conn.get("body", "0")
-            W = ts.parameters.W if ts.parameters.W > 0 else 1e-6
-            L = ts.parameters.L if ts.parameters.L > 0 else 1.3e-7
             model = dev.model or "nmos"
-            if getattr(self._proc, "device_style", "mos") == "subckt":
-                lines.append(f"X{dev.id} {d} {g} {s} {b} {model} W={self._eng(W, W_grid)} L={self._eng(L, L_grid)}")
-            else:
-                lines.append(f"M{dev.id} {d} {g} {s} {b} {model} W={self._eng(W, W_grid)} L={self._eng(L, L_grid)}")
+            layout = realize_transistor_layout(self.state, dev.id)
+            self._record_layout_realization(dev.id, layout)
+            if layout.folded or layout.segmented:
+                lines.append(
+                    f"* layout {dev.id}: W_eff={self._eng(layout.effective_W, W_grid)} "
+                    f"L_eff={self._eng(layout.effective_L, L_grid)} -> "
+                    f"fingers={layout.fingers} parallel={layout.parallel} series={layout.series} "
+                    f"W_finger={self._eng(layout.finger_W, W_grid)} "
+                    f"L_segment={self._eng(layout.segment_L, L_grid)}"
+                )
+            lines.extend(self._gen_realized_mos(dev.id, d, g, s, b, model, layout))
         lines.append("")
         return lines
+
+    def _record_layout_realization(self, device_id: str, layout: LayoutRealization) -> None:
+        params = self.state.transistors[device_id].parameters
+        params.layout_fingers = layout.fingers
+        params.layout_parallel = layout.parallel
+        params.layout_series = layout.series
+        params.layout_finger_W = layout.finger_W
+        params.layout_instance_W = layout.instance_W
+        params.layout_segment_L = layout.segment_L
+
+    def _gen_realized_mos(
+        self,
+        device_id: str,
+        drain: str,
+        gate: str,
+        source: str,
+        body: str,
+        model: str,
+        layout: LayoutRealization,
+    ) -> List[str]:
+        lines: List[str] = []
+        for idx in range(layout.series):
+            seg_drain = drain if idx == 0 else f"{device_id}_ser{idx}"
+            seg_source = source if idx == layout.series - 1 else f"{device_id}_ser{idx + 1}"
+            suffix = "" if idx == 0 else f"_S{idx + 1}"
+            lines.append(
+                self._mos_instance_line(
+                    f"{device_id}{suffix}",
+                    seg_drain,
+                    gate,
+                    seg_source,
+                    body,
+                    model,
+                    layout,
+                )
+            )
+        return lines
+
+    def _mos_instance_line(
+        self,
+        instance_id: str,
+        drain: str,
+        gate: str,
+        source: str,
+        body: str,
+        model: str,
+        layout: LayoutRealization,
+    ) -> str:
+        W_grid = getattr(self._proc, "W_precision", 10e-9)
+        L_grid = getattr(self._proc, "L_precision", 1e-9)
+        if getattr(self._proc, "device_style", "mos") == "subckt":
+            extras = []
+            if layout.fingers > 1:
+                extras.append(f"ng={layout.fingers}")
+            if layout.parallel > 1:
+                extras.append(f"m={layout.parallel}")
+            extra_text = (" " + " ".join(extras)) if extras else ""
+            return (
+                f"X{instance_id} {drain} {gate} {source} {body} {model} "
+                f"W={self._eng(layout.instance_W, W_grid)} "
+                f"L={self._eng(layout.segment_L, L_grid)}{extra_text}"
+            )
+        multiplier = layout.fingers * layout.parallel
+        extra_text = f" m={multiplier}" if multiplier > 1 else ""
+        return (
+            f"M{instance_id} {drain} {gate} {source} {body} {model} "
+            f"W={self._eng(layout.finger_W, W_grid)} "
+            f"L={self._eng(layout.segment_L, L_grid)}{extra_text}"
+        )
 
     def _get_global_param(self, name: str, default: Optional[float] = None) -> Optional[float]:
         params = getattr(self.state, "global_parameters", {}) or {}
@@ -230,8 +305,6 @@ class NetlistGenerator:
                 if not gate:
                     continue
                 ts = self.state.transistors.get(dev.id)
-                W = ts.parameters.W if ts and ts.parameters.W > 0 else self._proc.min_W
-                L = ts.parameters.L if ts and ts.parameters.L > 0 else self._proc.min_L
                 iref = self._get_global_param(
                     "I_tail",
                     ts.parameters.id if ts and ts.parameters.id > 0 else 10e-6,
@@ -239,18 +312,8 @@ class NetlistGenerator:
                 model = dev.model or self._proc.nmos_model or "nmos"
                 lines.append("* Diode-connected NMOS mirror for tail bias")
                 lines.append(f"Iref_tail vdd {gate} DC {self._fmt_si(float(iref), 'A')}")
-                if getattr(self._proc, "device_style", "mos") == "subckt":
-                    lines.append(
-                        f"XBIAS{dev.id} {gate} {gate} {source} {body} {model} "
-                        f"W={self._eng(W, self._proc.W_precision)} "
-                        f"L={self._eng(L, self._proc.L_precision)}"
-                    )
-                else:
-                    lines.append(
-                        f"MBIAS{dev.id} {gate} {gate} {source} {body} {model} "
-                        f"W={self._eng(W, self._proc.W_precision)} "
-                        f"L={self._eng(L, self._proc.L_precision)}"
-                    )
+                layout = realize_transistor_layout(self.state, dev.id)
+                lines.append(self._mos_instance_line(f"BIAS{dev.id}", gate, gate, source, body, model, layout))
                 handled_ports.add(gate)
                 break
 

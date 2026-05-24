@@ -155,8 +155,14 @@ def _build_state_diagnostics_view(
     causal_diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "analogrf_ir.state_diagnostics.v0_2",
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
         "iteration": iteration,
+        "contract": {
+            "schema_role": "compact decision view",
+            "full_diagnostics": "causal_diagnostics.json",
+            "agent_write_path": "diagnostics.agent_tool_commands only",
+            "principle": "Keep heavy evidence in artifacts; keep schema readable and executable.",
+        },
         "artifacts": {
             "design_state": "design_state.yaml",
             "netlist": "netlist.cir",
@@ -210,11 +216,13 @@ def _compact_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
         "failure_symptom_analysis": causal.get("failure_symptom_analysis", []),
         "root_cause_attribution": _compact_root_causes(causal.get("root_cause_attribution", []) or []),
         "sensitivity_ranking_comparison": _compact_sensitivity_comparison(causal.get("sensitivity_ranking_comparison", {}) or {}),
-        "local_intervention_model": _compact_intervention_model(causal.get("local_intervention_model", {}) or {}),
+        "local_intervention_summary": _compact_intervention_summary(causal.get("local_intervention_model", {}) or {}),
         "constrained_action_optimizer": _compact_action_optimizer(causal.get("constrained_action_optimizer", {}) or {}),
         "attribution_guided_tuning": {
             "author": tuning.get("author", ""),
             "decision_model": tuning.get("decision_model", {}),
+            "planning_mode": tuning.get("planning_mode", ""),
+            "hard_physical_gate": tuning.get("hard_physical_gate", {}),
             "by_failure": _compact_tuning_failures(tuning.get("by_failure", []) or []),
         },
     }
@@ -275,40 +283,39 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "target_value",
         "target_formula",
         "agent_step_fraction",
+        "tuning_mode",
         "max_step_fraction",
         "range",
         "range_update",
         "multi_objective_guardrail",
+        "hard_physical_gate",
         "optimizer_selected",
-        "optimizer",
         "expected_effect",
         "tradeoffs",
         "rationale",
     )
-    return {key: action[key] for key in keep if key in action}
+    out = {key: action[key] for key in keep if key in action}
+    gate = action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate")
+    if gate:
+        out["evidence_gate"] = _compact_evidence_gate(gate)
+    optimizer = action.get("optimizer") or {}
+    if optimizer:
+        out["optimizer"] = _compact_action_trace(optimizer)
+    return out
 
 
-def _compact_intervention_model(model: dict[str, Any]) -> dict[str, Any]:
+def _compact_intervention_summary(model: dict[str, Any]) -> dict[str, Any]:
+    effects = model.get("action_effects", []) or []
+    ok_effects = [item for item in effects if item.get("status") == "ok"]
     return {
         "schema_version": model.get("schema_version", "analogrf_ir.local_intervention_model.v0_1"),
         "method": model.get("method", ""),
         "status": model.get("status", ""),
         "metrics": model.get("metrics", []),
         "base_violation_vector": model.get("base_violation_vector", {}),
-        "A": model.get("A", {}),
-        "action_effects": [
-            {
-                "action_id": item.get("action_id"),
-                "knob": item.get("knob"),
-                "source": item.get("source"),
-                "status": item.get("status"),
-                "delta_violation_vector": item.get("delta_violation_vector", {}),
-                "violation_reduction": item.get("violation_reduction"),
-                "uncertainty": item.get("uncertainty"),
-                "interpretation": item.get("interpretation", ""),
-            }
-            for item in (model.get("action_effects", []) or [])[:8]
-        ],
+        "action_count": len(effects),
+        "ok_action_count": len(ok_effects),
+        "evidence_location": "causal_diagnostics.json:local_intervention_model",
     }
 
 
@@ -320,6 +327,7 @@ def _compact_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
         "objective_before": optimizer.get("objective_before"),
         "objective_after": optimizer.get("objective_after"),
         "objective_improvement": optimizer.get("objective_improvement"),
+        "strategy": optimizer.get("strategy", {}),
         "selected_actions": [
             {
                 "action_id": item.get("action_id"),
@@ -330,11 +338,44 @@ def _compact_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
                 "direction": item.get("direction"),
                 "objective_delta": item.get("objective_delta"),
                 "local_model_source": item.get("local_model_source"),
+                "evidence_gate": _compact_evidence_gate(item.get("evidence_gate", {}) or {}),
                 "selection_reason": item.get("selection_reason", ""),
             }
             for item in (optimizer.get("selected_actions", []) or [])[:5]
         ],
     }
+
+
+def _compact_action_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "objective_delta",
+        "local_model_source",
+        "predicted_violation_delta",
+        "uncertainty",
+        "constraint_penalty",
+        "selection_reason",
+    )
+    return {key: trace[key] for key in keep if key in trace}
+
+
+def _compact_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:
+    if not gate:
+        return {}
+    keep = (
+        "schema_version",
+        "required",
+        "passed",
+        "source",
+        "objective_improvement",
+        "relative_improvement",
+        "weighted_tradeoff_worsening",
+        "tradeoff_to_improvement_ratio",
+        "max_component_worsening",
+        "uncertainty",
+        "improved_failed_metrics",
+        "reasons",
+    )
+    return {key: gate[key] for key in keep if key in gate}
 
 
 def build_simulation_log(
