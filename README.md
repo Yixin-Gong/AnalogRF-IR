@@ -170,6 +170,18 @@ python scripts/plot_ablation_results.py \
   --out-dir runs/ablations_ihp130_ota/figures
 ```
 
+Progressive target tightening can be used after a baseline passes to map a
+measured ngspice Pareto frontier. The script materializes one schema per ladder
+level, reruns the normal flow, and keeps the non-dominated passing points:
+
+```bash
+python scripts/run_progressive_pareto.py \
+  --schema inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml \
+  --seed 1 --seed 2 \
+  --levels 6 \
+  --run
+```
+
 If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
 
 ## Causal Action Planning

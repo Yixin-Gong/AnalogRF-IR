@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import re
@@ -39,6 +40,7 @@ from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
 from scripts.run_ablation import build_jobs
+from scripts.run_progressive_pareto import pareto_frontier, tighten_schema_targets
 
 
 def test_design_input_accepts_spice_and_writes_schema(tmp_path):
@@ -69,6 +71,78 @@ def test_design_input_accepts_spice_and_writes_schema(tmp_path):
     assert out.exists()
     assert bundle.state.topology.architecture == "two-stage-miller"
     assert bundle.state.global_parameters["Cc"] == 500e-15
+
+
+def test_progressive_pareto_tightens_targets_without_mutating_base():
+    schema = {
+        "targets": {
+            "dc_gain": {"min": 24},
+            "unity_gain_bandwidth": {"min": 5.0e6},
+            "phase_margin": {"min": 45},
+            "slew_rate": {"min": 4.0e6},
+            "output_swing": {"min": 0.4},
+            "power": {"max": 4.0e-4},
+        }
+    }
+    args = argparse.Namespace(
+        gain_step_db=2.0,
+        ugbw_step=1.25,
+        pm_step_deg=1.0,
+        slew_step=1.2,
+        swing_step_v=0.025,
+        power_step=0.9,
+        icmr_step_v=0.0,
+    )
+
+    tightened = tighten_schema_targets(schema, 2, args)
+
+    assert tightened["targets"]["dc_gain"]["min"] == 28
+    assert tightened["targets"]["unity_gain_bandwidth"]["min"] == 5.0e6 * 1.25**2
+    assert tightened["targets"]["slew_rate"]["min"] == 4.0e6 * 1.2**2
+    assert tightened["targets"]["output_swing"]["min"] == 0.45
+    assert tightened["targets"]["power"]["max"] == 4.0e-4 * 0.9**2
+    assert schema["targets"]["dc_gain"]["min"] == 24
+
+
+def test_progressive_pareto_filters_dominated_and_failed_rows():
+    rows = [
+        {
+            "name": "dominated",
+            "spec_pass": True,
+            "total_power": 2.0e-6,
+            "dc_gain_db": 25.0,
+            "unity_gain_bandwidth": 6.0e6,
+            "phase_margin": 55.0,
+            "slew_rate": 5.0e6,
+            "output_swing": 0.45,
+        },
+        {
+            "name": "dominates",
+            "spec_pass": True,
+            "total_power": 1.8e-6,
+            "dc_gain_db": 26.0,
+            "unity_gain_bandwidth": 7.0e6,
+            "phase_margin": 56.0,
+            "slew_rate": 5.5e6,
+            "output_swing": 0.46,
+        },
+        {
+            "name": "tradeoff",
+            "spec_pass": True,
+            "total_power": 1.6e-6,
+            "dc_gain_db": 24.0,
+            "unity_gain_bandwidth": 6.0e6,
+            "phase_margin": 54.0,
+            "slew_rate": 4.8e6,
+            "output_swing": 0.44,
+        },
+        {"name": "failed", "spec_pass": False, "total_power": 0.5e-6, "dc_gain_db": 40.0},
+    ]
+
+    front = pareto_frontier(rows)
+    names = {row["name"] for row in front}
+
+    assert names == {"dominates", "tradeoff"}
 
 
 def test_spec_registry_selects_ota_and_comparator():

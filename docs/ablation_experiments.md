@@ -73,6 +73,19 @@ python scripts/plot_ablation_results.py \
   --out-dir runs/ablations_ihp130_ota/figures
 ```
 
+After a design passes its baseline targets, run a progressive target ladder to
+find the measured frontier. Each level tightens gain, bandwidth, slew rate,
+output swing, and power; the script stops a ladder after repeated failures and
+writes the non-dominated passing points:
+
+```bash
+python scripts/run_progressive_pareto.py \
+  --schema inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml \
+  --seed 1 --seed 2 \
+  --levels 6 \
+  --run
+```
+
 Outputs:
 
 - `manifest.json`: commands, case metadata, return codes, and latest result summary.
