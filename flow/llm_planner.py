@@ -178,12 +178,14 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
         "rules": [
             "Return JSON only.",
             "Use selected_actions for action_id values that already exist in available_actions.",
-            "Use custom_actions only for explicit per-knob edits not covered by available_actions.",
+            "Use custom_actions only as notes or when no constrained optimizer evidence is active; never use them to bypass the formal apply gate.",
             "Every action must include decision='apply' or decision='skip'.",
             "Prefer a small number of high-confidence actions per round.",
             "Prefer actions backed by causal_root_causes structural paths and intervention impact.",
             "Use the combo_coarse_fine strategy: coarse actions can take larger schema-safe steps when violations are large; fine actions should be small near feasibility.",
             "Favor compatible action combinations selected by the constrained_action_optimizer instead of hand-picking isolated knobs when optimizer evidence is available.",
+            "An action may use decision='apply' only when action_admissibility.passed is true, or when optimizer_selected is true, or when optimizer.objective_delta < 0.",
+            "If constrained_action_optimizer.status is no_improving_combination, return skip decisions or notes; do not invent a custom apply action to bypass the mathematical gate.",
             "A priority='guarded' action may be selected with decision='apply' only when evidence_gate.passed is true.",
             "If a guarded action lacks a passing evidence_gate, skip it or mention it in notes; the executor rejects it without local SPICE intervention evidence.",
             "Do not use legacy_sensitivity_top as the final decision rule when it diverges from causal_top.",
@@ -218,6 +220,7 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
         "write_policy": command.get("write_policy", {}),
         "available_actions": args.get("available_actions", []),
         "default_selected_actions": args.get("selected_actions", []),
+        "formal_apply_gate": (command.get("write_policy", {}) or {}).get("action_admissibility", {}),
         "editable_fields": command.get("llm_editable_fields", {}),
     }
 

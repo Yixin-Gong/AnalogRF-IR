@@ -4,7 +4,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.validator import Validator
-from diagnostics.action_optimizer import default_selected_actions_from_optimizer
+from diagnostics.action_optimizer import (
+    ACTION_ADMISSIBILITY_RULE,
+    ACTION_ADMISSIBILITY_SCHEMA_VERSION,
+    action_admissibility_trace,
+    default_selected_actions_from_optimizer,
+)
 from schemas.design_state import DesignState, Range
 
 
@@ -47,6 +52,12 @@ def agent_write_policy() -> dict[str, Any]:
         "forbidden_fields": list(AGENT_FORBIDDEN_DESIGN_STATE_FIELDS),
         "knob_format": "Use '<device>.<variable>' for device variables or 'global.<variable>' for global variables. Each knob must already exist in design_variables.",
         "range_update_types": list(AGENT_RANGE_UPDATE_TYPES),
+        "action_admissibility": {
+            "schema_version": ACTION_ADMISSIBILITY_SCHEMA_VERSION,
+            "formal_rule": ACTION_ADMISSIBILITY_RULE,
+            "enforced_by": "diagnostics.tuning.apply_attribution_guided_tuning",
+            "llm_role": "LLM may explain or skip actions, but apply is accepted only when the formal predicate passes.",
+        },
     }
 
 
@@ -136,7 +147,7 @@ def write_tuning_tool_command(
             ],
             "decision_values": ["apply", "skip"],
             "range_update_types": list(AGENT_RANGE_UPDATE_TYPES),
-            "notes": "Select existing actions by action_id or add custom per-knob actions. The executor only applies actions with decision=apply and rejects edits outside write_policy.",
+            "notes": "Select existing admissible actions by action_id. Custom per-knob actions are notes unless no constrained optimizer evidence exists; the executor rejects apply requests that fail the formal action_admissibility rule.",
         },
         "rationale": "Call the tuning executor through schema command state instead of direct in-memory invocation.",
     }
@@ -202,6 +213,16 @@ def apply_attribution_guided_tuning(
         if action.get("llm_decision", "apply") != "apply":
             application.skipped_actions.append({**_action_summary(action), "reason": action.get("llm_reason", "LLM skipped action")})
             continue
+        admissibility_error = _formal_action_admissibility_error(state, action)
+        if admissibility_error:
+            application.skipped_actions.append(
+                {
+                    **_action_summary(action),
+                    "reason": admissibility_error,
+                    "action_admissibility": action_admissibility_trace(action),
+                }
+            )
+            continue
         if action.get("priority") == "guarded" and not _evidence_gate_passed(action):
             application.skipped_actions.append({**_action_summary(action), "reason": "guarded action lacks passing local intervention evidence_gate"})
             continue
@@ -247,6 +268,9 @@ def _action_for_llm(action: dict[str, Any]) -> dict[str, Any]:
         "range": action.get("range"),
         "range_update": action.get("range_update"),
         "hard_physical_gate": action.get("hard_physical_gate", {}),
+        "optimizer_selected": action.get("optimizer_selected"),
+        "action_class": action.get("action_class", "schema_parameter_tuning"),
+        "action_admissibility": action.get("action_admissibility") or (action.get("optimizer", {}) or {}).get("action_admissibility"),
         "optimizer": action.get("optimizer", {}),
         "evidence_gate": action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate"),
         "expected_effect": action.get("expected_effect", {}),
@@ -343,9 +367,11 @@ def _actions_from_custom_actions(custom_actions: list[dict[str, Any]]) -> list[d
                 "tuning_mode": custom.get("tuning_mode"),
                 "range_update": custom.get("range_update"),
                 "evidence_gate": custom.get("evidence_gate"),
+                "action_class": custom.get("action_class", "llm_custom_schema_edit"),
                 "rationale": custom.get("reason", custom.get("rationale", "LLM requested direct schema tuning.")),
                 "llm_decision": custom.get("decision", "apply"),
                 "llm_reason": custom.get("reason", ""),
+                "_custom_action": True,
             }
         )
     return out
@@ -474,6 +500,25 @@ def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
     return ""
 
 
+def _formal_action_admissibility_error(state: DesignState, action: dict[str, Any]) -> str:
+    if not _optimizer_gate_is_active(state):
+        return ""
+    trace = action_admissibility_trace(action)
+    if trace.get("passed"):
+        return ""
+    return "formal action admissibility gate rejected apply request: " + "; ".join(trace.get("reasons") or [])
+
+
+def _optimizer_gate_is_active(state: DesignState) -> bool:
+    causal = state.diagnostics.get("causal_diagnostics", {}) if state.diagnostics else {}
+    optimizer = causal.get("constrained_action_optimizer", {}) or {}
+    if optimizer.get("candidate_actions"):
+        return True
+    plan = causal.get("attribution_guided_tuning", {}) or {}
+    decision_model = plan.get("decision_model", {}) or {}
+    return decision_model.get("type") == "constrained_local_action_optimizer"
+
+
 def _range_update_policy_error(update: dict[str, Any]) -> str:
     update_type = update.get("type")
     if not update_type:
@@ -508,6 +553,8 @@ def _action_summary(action: dict[str, Any]) -> dict[str, Any]:
         "apply_to": action.get("apply_to", []),
         "agent_step_fraction": action.get("agent_step_fraction"),
         "tuning_mode": action.get("tuning_mode"),
+        "action_class": action.get("action_class", "schema_parameter_tuning"),
+        "action_admissibility": action.get("action_admissibility") or (action.get("optimizer", {}) or {}).get("action_admissibility"),
         "evidence_gate": action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate"),
         "llm_decision": action.get("llm_decision"),
         "llm_reason": action.get("llm_reason", ""),

@@ -17,6 +17,7 @@ from diagnostics import (
     write_tuning_tool_command,
 )
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object
+from flow.config import load_cli_config
 from flow.agent_loop import DiagnosticAgentLoop
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
@@ -35,6 +36,7 @@ from postprocess.two_stage import set_symmetric_width, tune_two_stage_compensati
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
+from scripts.run_ablation import build_jobs
 
 
 def test_design_input_accepts_spice_and_writes_schema(tmp_path):
@@ -428,7 +430,13 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert "dependency_graph" not in state_payload["diagnostics"]["causal_diagnostics"]
     assert "local_intervention_model" not in state_payload["diagnostics"]["causal_diagnostics"]
     full_causal = json.loads(artifacts.causal_diagnostics.read_text(encoding="utf-8"))
+    assert full_causal["dependency_graph"]["schema_version"] == "analogrf_ir.typed_causal_graph.v0_1"
     assert full_causal["dependency_graph"]["nodes"]
+    typed_edge = full_causal["dependency_graph"]["edges"][0]
+    assert typed_edge["schema_version"] == "analogrf_ir.typed_causal_edge.v0_1"
+    assert typed_edge["source_type"]
+    assert typed_edge["target_type"]
+    assert typed_edge["typing"]["relation_type"] == typed_edge["edge_type"]
 
 
 def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
@@ -488,6 +496,11 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     assert compact_causal["attribution_guided_tuning"]["by_failure"]
     assert any(
         action["knob"] == "global.Rz" and action["target_formula"] == "1/gm(second_stage_gain)"
+        for item in compact_causal["attribution_guided_tuning"]["by_failure"]
+        for action in item["actions"]
+    )
+    assert any(
+        action["knob"] == "global.Rz" and action["action_class"] == "compensation"
         for item in compact_causal["attribution_guided_tuning"]["by_failure"]
         for action in item["actions"]
     )
@@ -846,6 +859,68 @@ def test_guarded_action_requires_passing_spice_evidence_gate():
     assert candidate["evidence_gate"]["conditions"]["spice_local_intervention"] is False
 
 
+def test_llm_apply_is_rejected_when_optimizer_math_gate_fails():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    original = m1_gm_id.initial
+    target_status = {
+        "dc_gain": {
+            "status": "fail",
+            "value": 30.0,
+            "min": 60.0,
+            "max": None,
+            "priority": 1,
+        }
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "bad_input_gm_id_decrease",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "primary",
+                        "action_class": "transconductance_bias",
+                        "knob": "M1.gm_id",
+                        "apply_to": ["M1.gm_id", "M2.gm_id"],
+                        "direction": "decrease",
+                        "suggested_unclipped_value": 12.0,
+                        "expected_effect": {"dc_gain": "decrease"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(tuning=tuning, target_status=target_status)
+    optimized_tuning = apply_optimized_action_plan(tuning, optimizer)
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": optimizer,
+        "attribution_guided_tuning": optimized_tuning,
+    }
+    write_tuning_tool_command(
+        state,
+        round_index=1,
+        selected_actions=[
+            {
+                "action_id": "bad_input_gm_id_decrease",
+                "decision": "apply",
+                "reason": "LLM asks for it despite optimizer math.",
+                "overrides": {},
+            }
+        ],
+    )
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert optimizer["status"] == "no_improving_combination"
+    assert not application["applied_actions"]
+    assert "formal action admissibility gate rejected" in application["skipped_actions"][0]["reason"]
+    assert application["skipped_actions"][0]["action_admissibility"]["passed"] is False
+    assert m1_gm_id.initial == original
+
+
 def test_passing_spice_evidence_gate_allows_guarded_action_execution():
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
     target_status = {
@@ -1010,16 +1085,19 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     assert "topology" in command["write_policy"]["forbidden_fields"]
     assert command["llm_editable_fields"]["decision_values"] == ["apply", "skip"]
     assert "custom_actions" in command["llm_editable_fields"]
+    assert command["write_policy"]["action_admissibility"]["schema_version"] == "analogrf_ir.formal_action_admissibility.v0_1"
     assert application["command_id"] == command["id"]
-    assert len(application["applied_actions"]) == 2
+    assert len(application["applied_actions"]) == 1
     assert m3_l.initial == 6.0e-7
     assert m4_l.initial == 6.0e-7
     assert m3_l.range.max == 6.5e-7
     assert m1_gm_id.initial == 15.0
-    assert m5_gm_id.initial == 12.0
-    assert m5_gm_id.range.min == 8.0
-    assert m5_gm_id.range.max == 18.0
+    assert m5_gm_id.initial == 8.0
+    assert m5_gm_id.range.min == 5.0
+    assert m5_gm_id.range.max == 9.0
     assert application["skipped_actions"][0]["llm_reason"] == "Hold input gm/ID for this round."
+    assert "formal action admissibility gate rejected" in application["skipped_actions"][1]["reason"]
+    assert application["skipped_actions"][1]["action_admissibility"]["passed"] is False
 
 
 def test_agent_write_policy_rejects_non_design_variable_edits():
@@ -1224,6 +1302,69 @@ def test_langgraph_llm_ai_options_are_configurable_from_cli():
     assert config.temperature == 0.1
     assert config.max_tokens == 4096
     assert config.timeout_seconds == 90
+
+
+def test_cli_config_file_loads_defaults_and_cli_overrides(tmp_path):
+    cfg = tmp_path / "run.yaml"
+    cfg.write_text(
+        """
+        schema_version: analogrf_ir.cli_config.v0_1
+        input:
+          schema: inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
+        optimizer:
+          generations: 7
+          pop_size: 11
+          seed: 123
+        agent:
+          rounds: 2
+        features:
+          run_asir: false
+        postprocess:
+          policy: off
+        output:
+          runs_dir: runs/from_config
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_cli_config(cfg)
+    args = _parse_args(["--config", str(cfg), "--generations", "9", "--asir"])
+
+    assert loaded["schema"] == "inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"
+    assert loaded["no_asir"] is True
+    assert args.schema == "inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"
+    assert args.generations == 9
+    assert args.pop_size == 11
+    assert args.agent_rounds == 2
+    assert args.no_asir is False
+    assert args.postprocess_policy == "off"
+    assert args.runs_dir == "runs/from_config"
+
+
+def test_ablation_plan_builds_case_seed_schema_jobs(tmp_path):
+    plan = {
+        "base_config": "configs/default.yaml",
+        "schemas": ["inputs/ota/five_transistor/five_transistor_ota.yaml"],
+        "seeds": [3],
+        "base_overrides": {"optimizer": {"generations": 5}},
+        "cases": [
+            {
+                "name": "optimizer_only",
+                "family": "baseline",
+                "description": "unit",
+                "overrides": {"agent": {"rounds": 1}, "postprocess": {"policy": "off"}},
+            }
+        ],
+    }
+
+    jobs = build_jobs(plan, output_dir=tmp_path, selected_cases=[], selected_schemas=[], selected_seeds=[])
+
+    assert len(jobs) == 1
+    assert jobs[0]["case"] == "optimizer_only"
+    assert jobs[0]["config"]["optimizer"]["generations"] == 5
+    assert jobs[0]["config"]["optimizer"]["seed"] == 3
+    assert jobs[0]["config"]["postprocess"]["policy"] == "off"
+    assert jobs[0]["config"]["output"]["runs_dir"].startswith(str(tmp_path))
 
 
 def test_adaptive_strategy_cli_and_short_reoptimization_budget():

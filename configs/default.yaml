@@ -1,0 +1,58 @@
+schema_version: analogrf_ir.cli_config.v0_1
+
+input:
+  env: environment.yaml
+  schema: inputs/ota/five_transistor/five_transistor_ota.yaml
+  spice: ''
+  spice_yaml_out: ''
+  topology: auto
+
+optimizer:
+  generations: 50
+  pop_size: 100
+  seed:
+
+agent:
+  rounds: 20
+
+llm:
+  provider: deepseek
+  model: ''
+  base_url: ''
+  api_key_env: DEEPSEEK_API_KEY
+  timeout:
+  temperature:
+  max_tokens:
+  thinking: ''
+  reasoning_effort: ''
+  api_key: ''
+  api_key_file: ''
+  api_key_stdin: false
+
+tools:
+  ngspice_bin: ''
+
+features:
+  tail_current_mirror: false
+  run_asir: true
+
+postprocess:
+  skip_dc_repair: false
+  skip_comp_tune: false
+  policy: 'fallback'
+  near_feasible_ratio: 0.20
+
+reoptimization:
+  generations: 0
+  pop_size: 0
+
+actions:
+  strategy: combo_coarse_fine
+
+intervention:
+  enable: false
+  max_actions: 4
+  perturbation: 0.10
+
+output:
+  runs_dir: runs

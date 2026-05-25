@@ -274,6 +274,7 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "metric",
         "cause_node",
         "priority",
+        "action_class",
         "knob",
         "apply_to",
         "direction",
@@ -290,6 +291,7 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "multi_objective_guardrail",
         "hard_physical_gate",
         "optimizer_selected",
+        "action_admissibility",
         "expected_effect",
         "tradeoffs",
         "rationale",
@@ -333,12 +335,14 @@ def _compact_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
                 "action_id": item.get("action_id"),
                 "metric": item.get("metric"),
                 "priority": item.get("priority"),
+                "action_class": item.get("action_class"),
                 "knob": item.get("knob"),
                 "apply_to": item.get("apply_to", []),
                 "direction": item.get("direction"),
                 "objective_delta": item.get("objective_delta"),
                 "local_model_source": item.get("local_model_source"),
                 "evidence_gate": _compact_evidence_gate(item.get("evidence_gate", {}) or {}),
+                "action_admissibility": _compact_action_admissibility(item.get("action_admissibility", {}) or {}),
                 "selection_reason": item.get("selection_reason", ""),
             }
             for item in (optimizer.get("selected_actions", []) or [])[:5]
@@ -353,9 +357,25 @@ def _compact_action_trace(trace: dict[str, Any]) -> dict[str, Any]:
         "predicted_violation_delta",
         "uncertainty",
         "constraint_penalty",
+        "optimizer_selected",
+        "action_admissibility",
         "selection_reason",
     )
     return {key: trace[key] for key in keep if key in trace}
+
+
+def _compact_action_admissibility(gate: dict[str, Any]) -> dict[str, Any]:
+    if not gate:
+        return {}
+    keep = (
+        "schema_version",
+        "formal_rule",
+        "passed",
+        "conditions",
+        "objective_delta",
+        "reasons",
+    )
+    return {key: gate[key] for key in keep if key in gate}
 
 
 def _compact_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:

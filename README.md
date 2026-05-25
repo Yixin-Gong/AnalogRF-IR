@@ -136,6 +136,21 @@ python main.py \
   --intervention-max-actions 3
 ```
 
+CLI options can also be edited in YAML and then overridden from the command
+line:
+
+```bash
+python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
+```
+
+The paper ablation matrix is defined in `configs/ablation.yaml` and can be
+expanded into reproducible per-job configs:
+
+```bash
+python scripts/run_ablation.py --config configs/ablation.yaml
+python scripts/run_ablation.py --config configs/ablation.yaml --case optimizer_only --seed 1 --limit 1 --run
+```
+
 If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
 
 ## Causal Action Planning
@@ -160,6 +175,14 @@ Each agent round follows three decoupled decision steps:
 
 Guarded actions are evidence-gated. A guarded action can be applied automatically only when the local SPICE intervention evidence predicts a sufficient decrease in the weighted normalized violation objective, reduces at least one failed metric, keeps tradeoffs bounded, and has acceptable uncertainty.
 
+All LLM apply requests are executor-gated by the same optimizer math:
+
+```text
+apply_allowed := optimizer_selected OR objective_delta < 0
+```
+
+Custom LLM edits cannot bypass `no_improving_combination`; they are recorded as skipped notes unless they correspond to an admissible optimizer candidate. Candidate actions also carry typed classes such as `compensation`, `operating_point_balance`, and `operating_point_headroom`, keeping OP/balance moves inside the constrained action optimizer instead of relying on postprocess repair.
+
 The mathematical objective used by the evidence gate is:
 
 ```text
@@ -170,6 +193,8 @@ v' = [v + A_j]_+
 where `v` is the normalized specification violation vector and `A_j` is the local intervention column for one action.
 
 The action strategy is coarse-to-fine. Large violations permit larger schema-safe coarse moves. Near-feasible states switch to smaller fine moves, and every proposed edit is checked by the hard physical gate before it can seed the next SPICE run.
+
+Full causal artifacts use typed causal edges with node types, relation type, polarity, and mechanism. ASIR symbolic dependency graphs also type dependency rules and edges by relation type and input/output quantity type.
 
 ## Design State Contract
 

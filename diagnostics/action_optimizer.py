@@ -13,6 +13,10 @@ from specs.models import CircuitSpecModel
 INTERVENTION_SCHEMA_VERSION = "analogrf_ir.local_intervention_model.v0_1"
 OPTIMIZER_SCHEMA_VERSION = "analogrf_ir.constrained_action_optimizer.v0_1"
 EVIDENCE_GATE_SCHEMA_VERSION = "analogrf_ir.evidence_gate.v0_1"
+ACTION_ADMISSIBILITY_SCHEMA_VERSION = "analogrf_ir.formal_action_admissibility.v0_1"
+ACTION_ADMISSIBILITY_RULE = (
+    "apply_allowed := optimizer_selected OR objective_delta < 0; guarded actions also require evidence_gate.passed"
+)
 EVIDENCE_GATE_THRESHOLDS = {
     "min_absolute_objective_improvement": 0.002,
     "min_relative_objective_improvement": 0.015,
@@ -255,6 +259,7 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
     out["decision_model"] = {
         "type": "constrained_local_action_optimizer",
         "optimizer_status": optimizer_result.get("status"),
+        "admissibility_rule": ACTION_ADMISSIBILITY_RULE,
         "selected_action_ids": selected_ids,
         "objective_before": optimizer_result.get("objective_before"),
         "objective_after": optimizer_result.get("objective_after"),
@@ -275,16 +280,20 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
                 action_copy["optimizer"] = {
                     key: candidate_by_id[action_id][key]
                     for key in (
+                        "optimizer_selected",
                         "objective_delta",
                         "local_model_source",
                         "predicted_violation_delta",
                         "uncertainty",
                         "constraint_penalty",
                         "evidence_gate",
+                        "action_admissibility",
                         "selection_reason",
                     )
                     if key in candidate_by_id[action_id]
                 }
+                if candidate_by_id[action_id].get("action_admissibility"):
+                    action_copy["action_admissibility"] = candidate_by_id[action_id]["action_admissibility"]
             ranked_actions.append(action_copy)
         ranked_actions.sort(
             key=lambda action: (
@@ -385,6 +394,49 @@ def _intervention_model_from_effects(
     }
 
 
+def action_admissibility_trace(action: dict[str, Any]) -> dict[str, Any]:
+    """Return the formal executor gate for one schema action.
+
+    The trace is intentionally recomputable by the executor. LLM text may
+    explain an action, but this predicate is the authority for apply/skip.
+    """
+
+    optimizer = action.get("optimizer", {}) or {}
+    selected = bool(action.get("optimizer_selected") or optimizer.get("optimizer_selected"))
+    objective_delta = _optional_float(
+        action.get("objective_delta")
+        if action.get("objective_delta") is not None
+        else optimizer.get("objective_delta")
+    )
+    objective_delta_negative = objective_delta is not None and objective_delta < 0.0
+    guarded = action.get("priority") == "guarded"
+    evidence_passed = _passes_evidence_gate(action) or _passes_evidence_gate(optimizer)
+    has_optimizer_math = selected or objective_delta is not None
+    passed = has_optimizer_math and (selected or objective_delta_negative) and (not guarded or evidence_passed)
+    reasons: list[str] = []
+    if not has_optimizer_math:
+        reasons.append("no optimizer candidate math was attached to this action")
+    if has_optimizer_math and not (selected or objective_delta_negative):
+        reasons.append("neither optimizer_selected nor objective_delta < 0")
+    if guarded and not evidence_passed:
+        reasons.append("guarded action lacks passing evidence_gate")
+    if passed:
+        reasons.append("formal admissibility predicate passed")
+    return {
+        "schema_version": ACTION_ADMISSIBILITY_SCHEMA_VERSION,
+        "formal_rule": ACTION_ADMISSIBILITY_RULE,
+        "passed": passed,
+        "conditions": {
+            "has_optimizer_math": has_optimizer_math,
+            "optimizer_selected": selected,
+            "objective_delta_negative": objective_delta_negative,
+            "guarded_evidence_passed": (not guarded) or evidence_passed,
+        },
+        "objective_delta": round(float(objective_delta), 6) if objective_delta is not None else None,
+        "reasons": reasons,
+    }
+
+
 def _optimizer_result(
     *,
     status: str,
@@ -415,6 +467,7 @@ def _optimizer_result(
             rec["selection_reason"] = (
                 "Selected because the constrained combination reduced the weighted normalized violation objective."
             )
+        rec["action_admissibility"] = action_admissibility_trace(rec)
         annotated.append(rec)
     return {
         "schema_version": OPTIMIZER_SCHEMA_VERSION,
@@ -427,7 +480,13 @@ def _optimizer_result(
                 "no duplicate knob writes in one combination",
                 "guarded actions require passing evidence_gate from the local SPICE intervention model",
                 "prefer lower uncertainty when objective improvement is similar",
+                ACTION_ADMISSIBILITY_RULE,
             ],
+            "formal_apply_gate": {
+                "schema_version": ACTION_ADMISSIBILITY_SCHEMA_VERSION,
+                "rule": ACTION_ADMISSIBILITY_RULE,
+                "executor": "diagnostics.tuning.apply_attribution_guided_tuning",
+            },
         },
         "strategy": {
             "name": "combo_coarse_fine",
@@ -534,6 +593,7 @@ def _action_record(
         "action_id": action.get("action_id"),
         "metric": action.get("metric"),
         "priority": action.get("priority"),
+        "action_class": action.get("action_class", "schema_parameter_tuning"),
         "knob": action.get("knob"),
         "apply_to": action.get("apply_to", []),
         "direction": action.get("direction"),
@@ -678,6 +738,15 @@ def _evidence_gate(
 def _passes_evidence_gate(action: dict[str, Any]) -> bool:
     gate = action.get("evidence_gate") or {}
     return bool(gate.get("passed"))
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _surrogate_delta(

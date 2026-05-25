@@ -19,6 +19,10 @@ SAFE_FUNCTIONS = {
     "exp": math.exp,
 }
 
+DEPENDENCY_GRAPH_SCHEMA_VERSION = "analogrf_ir.typed_symbolic_dependency_graph.v0_1"
+DEPENDENCY_RULE_SCHEMA_VERSION = "analogrf_ir.typed_symbolic_dependency_rule.v0_1"
+DEPENDENCY_EDGE_SCHEMA_VERSION = "analogrf_ir.typed_symbolic_dependency_edge.v0_1"
+
 
 @dataclass
 class DependencyRule:
@@ -27,6 +31,10 @@ class DependencyRule:
     inputs: list[str]
     expression: str
     description: str
+    dependency_type: str = "symbolic_relation"
+    output_quantity_type: str = "unknown"
+    input_quantity_types: dict[str, str] = field(default_factory=dict)
+    schema_version: str = DEPENDENCY_RULE_SCHEMA_VERSION
     primitive_refs: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
 
@@ -41,14 +49,17 @@ class DependencyGraph:
         self.graph = nx.DiGraph(name=name, layer=self.layer_name)
         self.rules: dict[str, DependencyRule] = {}
 
-    def add_symbol(self, symbol: str, symbol_type: str = "unknown", **attrs: Any) -> None:
+    def add_symbol(self, symbol: str, symbol_type: str = "unknown", quantity_type: str | None = None, **attrs: Any) -> None:
+        quantity = quantity_type or _infer_quantity_type(symbol)
         if symbol not in self.graph:
-            self.graph.add_node(symbol, kind="symbol", symbol_type=symbol_type, **attrs)
+            self.graph.add_node(symbol, kind="symbol", symbol_type=symbol_type, quantity_type=quantity, **attrs)
         else:
             self.graph.nodes[symbol].update({k: v for k, v in attrs.items() if v is not None})
             current_type = self.graph.nodes[symbol].get("symbol_type", "unknown")
             if symbol_type == "derived" or (symbol_type != "unknown" and current_type == "unknown"):
                 self.graph.nodes[symbol]["symbol_type"] = symbol_type
+            if quantity_type and self.graph.nodes[symbol].get("quantity_type", "unknown") == "unknown":
+                self.graph.nodes[symbol]["quantity_type"] = quantity_type
 
     def add_dependency(
         self,
@@ -58,23 +69,41 @@ class DependencyGraph:
         description: str,
         primitive_refs: list[str] | None = None,
         constraints: list[str] | None = None,
+        dependency_type: str | None = None,
     ) -> None:
         rule_id = f"rule_{len(self.rules) + 1:03d}_{output}"
-        self.add_symbol(output, symbol_type="derived")
+        output_quantity = _infer_quantity_type(output)
+        relation_type = dependency_type or _infer_dependency_type(output, inputs)
+        self.add_symbol(output, symbol_type="derived", quantity_type=output_quantity)
         for source in inputs:
-            self.add_symbol(source, symbol_type="source")
-            self.graph.add_edge(source, output, rule_id=rule_id, relation="causes")
+            input_quantity = _infer_quantity_type(source)
+            self.add_symbol(source, symbol_type="source", quantity_type=input_quantity)
+            self.graph.add_edge(
+                source,
+                output,
+                schema_version=DEPENDENCY_EDGE_SCHEMA_VERSION,
+                rule_id=rule_id,
+                relation="causes",
+                dependency_type=relation_type,
+                source_quantity_type=input_quantity,
+                target_quantity_type=output_quantity,
+                polarity=_infer_dependency_polarity(expression, source),
+            )
         self.rules[rule_id] = DependencyRule(
             id=rule_id,
             output=output,
             inputs=list(inputs),
             expression=expression,
             description=description,
+            dependency_type=relation_type,
+            output_quantity_type=output_quantity,
+            input_quantity_types={source: _infer_quantity_type(source) for source in inputs},
             primitive_refs=primitive_refs or [],
             constraints=constraints or [],
         )
         self.graph.nodes[output]["rule_id"] = rule_id
         self.graph.nodes[output]["expression"] = expression
+        self.graph.nodes[output]["dependency_type"] = relation_type
 
     def forward_propagate(self, known_values: dict[str, float]) -> dict[str, float]:
         values = dict(known_values)
@@ -137,13 +166,92 @@ class DependencyGraph:
         ]
         edges.sort(key=lambda item: (item["source"], item["target"], item.get("rule_id", "")))
         return {
+            "schema_version": DEPENDENCY_GRAPH_SCHEMA_VERSION,
             "layer": self.layer_name,
             "name": self.name,
             "graph_type": "networkx.DiGraph",
+            "type_system": {
+                "rule_schema_version": DEPENDENCY_RULE_SCHEMA_VERSION,
+                "edge_schema_version": DEPENDENCY_EDGE_SCHEMA_VERSION,
+                "quantity_types": [
+                    "capacitance",
+                    "current",
+                    "energy",
+                    "frequency",
+                    "gain",
+                    "impedance",
+                    "noise",
+                    "power",
+                    "time",
+                    "voltage",
+                    "unknown",
+                ],
+                "dependency_types": [
+                    "bias_dependency",
+                    "energy_dependency",
+                    "gain_bandwidth_dependency",
+                    "noise_dependency",
+                    "symbolic_relation",
+                    "timing_dependency",
+                    "voltage_headroom_dependency",
+                ],
+            },
             "nodes": nodes,
             "edges": edges,
             "rules": [asdict(rule) for rule in self.rules.values()],
         }
+
+
+def _infer_quantity_type(symbol: str) -> str:
+    name = symbol.lower()
+    if any(token in name for token in ("cap", "cl", "cc", "cint", "csample", "cgs", "cgd")):
+        return "capacitance"
+    if any(token in name for token in ("gm", "gain")):
+        return "gain"
+    if any(token in name for token in ("ro", "rout", "rz", "resistance", "r_")):
+        return "impedance"
+    if any(token in name for token in ("time", "delay", "period")):
+        return "time"
+    if any(token in name for token in ("freq", "rad_s", "bandwidth", "pole", "zero", "sample_rate")):
+        return "frequency"
+    if any(token in name for token in ("current", "itail", "i_stage", "i_latch")):
+        return "current"
+    if "noise" in name or "kickback" in name:
+        return "noise"
+    if any(token in name for token in ("vdd", "vss", "vds", "vov", "swing", "offset", "icmr", "step", "noise", "margin")):
+        return "voltage"
+    if "power" in name:
+        return "power"
+    if any(token in name for token in ("energy", "pdp", "edp")):
+        return "energy"
+    return "unknown"
+
+
+def _infer_dependency_type(output: str, inputs: list[str]) -> str:
+    text = " ".join([output, *inputs]).lower()
+    if any(token in text for token in ("delay", "time", "sample_rate", "regeneration")):
+        return "timing_dependency"
+    if any(token in text for token in ("noise", "kickback", "offset", "metastability")):
+        return "noise_dependency"
+    if any(token in text for token in ("energy", "power", "pdp", "edp")):
+        return "energy_dependency"
+    if any(token in text for token in ("icmr", "swing", "headroom", "vdd", "vss")):
+        return "voltage_headroom_dependency"
+    if any(token in text for token in ("gain", "pole", "zero", "bandwidth", "gm", "ro", "rout")):
+        return "gain_bandwidth_dependency"
+    if any(token in text for token in ("current", "itail", "i_stage")):
+        return "bias_dependency"
+    return "symbolic_relation"
+
+
+def _infer_dependency_polarity(expression: str, source: str) -> str:
+    expr = expression.replace(" ", "")
+    token = source.replace(" ", "")
+    if f"/{token}" in expr or f"max({token}," in expr and "/" in expr.split(f"max({token},", 1)[0]:
+        return "negative"
+    if token in expr:
+        return "positive"
+    return "unknown"
 
 
 def build_comparator_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyGraph:

@@ -87,9 +87,32 @@ steps to limit cross-metric regressions. The optimizer searches bounded
 combinations of compatible actions instead of requiring the LLM to tune one
 knob per round.
 
+Schema actions carry an explicit `action_class` such as `compensation`,
+`operating_point_balance`, `operating_point_headroom`, or
+`gain_pole_tradeoff`, so OP/balance and compensation moves remain part of the
+constrained action vocabulary instead of being hidden in postprocess repair.
+
+Action application is formalized by an executor-side predicate:
+
+```text
+apply_allowed := optimizer_selected OR objective_delta < 0
+guarded actions additionally require evidence_gate.passed
+```
+
+The LLM may explain, skip, or choose among available actions, but it cannot
+override this predicate with a custom direct edit. When the constrained
+optimizer reports `no_improving_combination`, LLM apply requests become skipped
+notes unless a candidate action still has negative optimizer objective delta.
+
 Guarded actions are not applied just because they look plausible. They require
 passing local SPICE evidence that predicts a sufficient decrease in the weighted
 violation objective without excessive cross-metric damage.
+
+The causal graph is typed. Full diagnostic artifacts store each causal edge with
+`edge_type`, source/target node types, polarity, mechanism, and a typed edge
+schema version. ASIR symbolic dependencies likewise store typed dependency
+rules and edges with quantity types such as time, frequency, voltage, current,
+capacitance, gain, impedance, energy, and noise.
 
 ## Validation Strategy
 

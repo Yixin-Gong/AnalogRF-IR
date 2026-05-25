@@ -1,0 +1,126 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: Paper ablation matrix for AnalogRF-IR diagnosis, optimizer, LLM, and postprocess controls.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations
+schemas:
+  - inputs/ota/five_transistor/five_transistor_ota.yaml
+  - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
+seeds: [1, 2, 3, 4, 5]
+
+base_overrides:
+  optimizer:
+    generations: 50
+    pop_size: 100
+  reoptimization:
+    generations: 3
+    pop_size: 24
+  llm:
+    model: deepseek-v4-flash
+    thinking: disabled
+    temperature: 0.0
+  actions:
+    strategy: combo_coarse_fine
+
+cases:
+  - name: optimizer_only
+    family: baseline
+    description: Global optimizer only; no diagnosis rounds, intervention model, LLM planning, or postprocess repair.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'off'
+
+  - name: optimizer_postprocess_fallback
+    family: postprocess_control
+    description: Global optimizer plus fallback postprocess only when near-feasible or stagnated.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'fallback'
+
+  - name: optimizer_postprocess_always
+    family: postprocess_control
+    description: Global optimizer plus legacy always-on repair to estimate upper-bound repair benefit and cost.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'always'
+
+  - name: diagnosis_surrogate_no_postprocess
+    family: diagnosis_control
+    description: Deterministic diagnosis-guided rounds using surrogate structural intervention priors, without LLM or postprocess.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deterministic
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'off'
+
+  - name: diagnosis_spice_intervention_no_postprocess
+    family: diagnosis_control
+    description: Deterministic diagnosis-guided rounds using local SPICE intervention evidence, without LLM or postprocess.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deterministic
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'off'
+
+  - name: llm_diagnosis_no_postprocess
+    family: llm_control
+    description: LLM planner over causal diagnostics and constrained optimizer evidence, with postprocess disabled for main-method cleanliness.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'off'
+
+  - name: llm_diagnosis_postprocess_fallback
+    family: combined_method
+    description: Main LLM diagnosis flow plus fallback repair for near-feasible or stagnated cases.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'fallback'
+
+  - name: llm_diagnosis_postprocess_always
+    family: repair_upper_bound
+    description: LLM diagnosis flow with always-on repair to quantify postprocess dependence and simulation cost.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'always'

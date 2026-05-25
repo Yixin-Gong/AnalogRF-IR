@@ -42,6 +42,10 @@ EDGE_TYPE_WEIGHTS = {
     "structural_decomposition": 0.45,
 }
 
+CAUSAL_GRAPH_SCHEMA_VERSION = "analogrf_ir.typed_causal_graph.v0_1"
+CAUSAL_EDGE_SCHEMA_VERSION = "analogrf_ir.typed_causal_edge.v0_1"
+CAUSAL_EDGE_TYPES = tuple(EDGE_TYPE_WEIGHTS)
+
 
 @dataclass(frozen=True)
 class CandidateCause:
@@ -334,10 +338,20 @@ def _build_dependency_graph(
         )
 
     edges.extend(_metric_edges(capabilities))
-    return {"nodes": nodes, "edges": edges}
+    return {
+        "schema_version": CAUSAL_GRAPH_SCHEMA_VERSION,
+        "type_system": {
+            "edge_schema_version": CAUSAL_EDGE_SCHEMA_VERSION,
+            "edge_types": list(CAUSAL_EDGE_TYPES),
+            "node_type_inference": "node id namespace with explicit node.type when present",
+            "polarity_values": ["positive", "negative", "mixed", "conditional", "unknown"],
+        },
+        "nodes": nodes,
+        "edges": edges,
+    }
 
 
-def _metric_edges(capabilities) -> list[dict[str, str]]:
+def _metric_edges(capabilities) -> list[dict[str, Any]]:
     edges = [
         _edge("block.differential_pair", "behavior.input_transconductance", "high", "Input-pair gm is the forward transconductance source."),
         _edge("block.differential_pair", "behavior.dominant_pole", "medium", "First-stage resistance and capacitance can create the dominant pole."),
@@ -1511,6 +1525,7 @@ def _knob_action(
     action = {
         "metric": metric,
         "cause_node": cause_node,
+        "action_class": _action_class(metric, cause_node, variable),
         "score": round(float(score), 4),
         "priority": priority,
         "knob": _format_knob(device, variable),
@@ -1535,6 +1550,20 @@ def _knob_action(
     if range_update:
         action["range_update"] = range_update
     return action
+
+
+def _action_class(metric: str, cause_node: str, variable: str) -> str:
+    if variable in {"Cc", "Rz"} or cause_node in {"block.compensation_network", "global.Cc", "global.Rz"}:
+        return "compensation"
+    if variable in {"I_tail", "I_stage2", "I_latch"}:
+        return "operating_point_balance"
+    if "headroom" in cause_node or "Vov" in cause_node or metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
+        return "operating_point_headroom"
+    if variable == "gm_id":
+        return "transconductance_bias"
+    if variable == "L":
+        return "gain_pole_tradeoff"
+    return "schema_parameter_tuning"
 
 
 def _rank_tuning_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1768,16 +1797,79 @@ def _shared_internal_nets(state: DesignState) -> set[str]:
     return {name for name, count in counts.items() if count > 1}
 
 
-def _edge(source: str, target: str, strength: str, condition: str = "", edge_type: str | None = None) -> dict[str, str]:
+def _edge(source: str, target: str, strength: str, condition: str = "", edge_type: str | None = None) -> dict[str, Any]:
     typed_edge = edge_type or _infer_edge_type(source, target)
+    source_type = _infer_causal_node_type(source)
+    target_type = _infer_causal_node_type(target)
     return {
+        "schema_version": CAUSAL_EDGE_SCHEMA_VERSION,
+        "edge_id": _typed_edge_id(source, target, typed_edge),
         "source": source,
         "target": target,
+        "source_type": source_type,
+        "target_type": target_type,
         "direction": f"{source} -> {target}",
         "strength": strength,
+        "weight": EDGE_STRENGTH_WEIGHTS.get(strength, 0.5) * EDGE_TYPE_WEIGHTS.get(typed_edge, 0.65),
         "edge_type": typed_edge,
+        "causal_direction": "source_to_target",
+        "polarity": _infer_edge_polarity(source, target, typed_edge, condition),
+        "mechanism": condition or _mechanism_for_edge_type(typed_edge),
+        "typing": {
+            "source_node_type": source_type,
+            "target_node_type": target_type,
+            "relation_type": typed_edge,
+        },
         "condition": condition,
     }
+
+
+def _typed_edge_id(source: str, target: str, edge_type: str) -> str:
+    raw = f"{source}__{edge_type}__{target}"
+    return raw.replace(".", "_").replace(" ", "_").replace(">", "to")
+
+
+def _infer_causal_node_type(node: str) -> str:
+    if node.startswith("device.") and len(node.split(".")) >= 3:
+        return "device_parameter"
+    if node.startswith("device."):
+        return "transistor"
+    if node.startswith("net."):
+        return "circuit_net"
+    if node.startswith("block."):
+        return "functional_block"
+    if node.startswith("behavior."):
+        return "circuit_behavior"
+    if node.startswith("metric."):
+        return "performance_metric"
+    if node.startswith("constraint."):
+        return "constraint"
+    if node.startswith("global."):
+        return "global_parameter"
+    return "unknown"
+
+
+def _infer_edge_polarity(source: str, target: str, edge_type: str, condition: str) -> str:
+    text = f"{source} {target} {condition}".lower()
+    if any(token in text for token in ("trade-off", "opposite", "lowers", "reduces", "decrease", "fall")):
+        if any(token in text for token in ("increase", "raises", "higher", "boost")):
+            return "mixed"
+        return "negative"
+    if any(token in text for token in ("increase", "raises", "higher", "boost", "contributes", "scales")):
+        return "positive"
+    if edge_type in {"pole_zero_dependency", "bias_dependency"}:
+        return "conditional"
+    return "unknown"
+
+
+def _mechanism_for_edge_type(edge_type: str) -> str:
+    return {
+        "gain_propagation_dependency": "small-signal gain or transconductance dependency",
+        "pole_zero_dependency": "frequency-domain pole/zero dependency",
+        "signal_dependency": "signal-path connectivity dependency",
+        "bias_dependency": "bias or operating-point dependency",
+        "structural_decomposition": "hierarchical structural decomposition",
+    }.get(edge_type, "typed causal dependency")
 
 
 def _infer_edge_type(source: str, target: str) -> str:

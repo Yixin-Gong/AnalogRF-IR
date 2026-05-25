@@ -80,6 +80,15 @@ def test_dependency_forward_and_backward_reasoning():
     trace = design.dependency_graph.backward_trace("delay")
     assert "gm_latch" in trace["source_symbols"]
     assert "CL" in trace["source_symbols"]
+    graph = design.dependency_graph.to_dict()
+    assert graph["schema_version"] == "analogrf_ir.typed_symbolic_dependency_graph.v0_1"
+    delay_rule = next(rule for rule in graph["rules"] if rule["output"] == "delay")
+    assert delay_rule["schema_version"] == "analogrf_ir.typed_symbolic_dependency_rule.v0_1"
+    assert delay_rule["dependency_type"] == "timing_dependency"
+    assert delay_rule["output_quantity_type"] == "time"
+    delay_edge = next(edge for edge in graph["edges"] if edge["target"] == "delay")
+    assert delay_edge["schema_version"] == "analogrf_ir.typed_symbolic_dependency_edge.v0_1"
+    assert delay_edge["target_quantity_type"] == "time"
 
 
 def test_rewrite_reasoning_between_architectures():
