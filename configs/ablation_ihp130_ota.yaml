@@ -23,6 +23,8 @@ base_overrides:
     model: deepseek-v4-flash
     thinking: disabled
     temperature: 0.0
+  intervention:
+    max_actions: 8
   actions:
     strategy: combo_coarse_fine
 
@@ -72,7 +74,7 @@ cases:
         provider: deepseek
       intervention:
         enable: true
-        max_actions: 4
+        max_actions: 8
       postprocess:
         policy: 'off'
 
@@ -86,6 +88,6 @@ cases:
         provider: deepseek
       intervention:
         enable: true
-        max_actions: 4
+        max_actions: 8
       postprocess:
         policy: 'fallback'

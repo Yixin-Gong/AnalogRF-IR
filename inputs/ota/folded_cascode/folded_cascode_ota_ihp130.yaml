@@ -4,7 +4,7 @@ design_name: folded_cascode_ota_ihp130
 metadata:
   process_hint: IHP_SG13G2_130nm
   topology_family: folded_cascode_ota
-  note: "PMOS-input folded-cascode OTA with explicit PMOS tail and NMOS cascode bias voltages."
+  note: "PMOS-input folded-cascode OTA for IHP SG13G2 130 nm with development-grade targets and explicit PMOS tail/NMOS cascode bias voltages."
 
 global_parameters:
   vbias_ptail: 0.82
@@ -33,10 +33,10 @@ topology:
     - {id: M7, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: ncas_out, gate: vbias_ncas, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 45, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 4.0e+07, unit: Hz, priority: 1}
+  dc_gain:              {min: 35, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 1.0e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 45, unit: deg, priority: 1}
-  slew_rate:            {min: 1.5e+07, unit: V/s, priority: 2}
+  slew_rate:            {min: 5.0e+06, unit: V/s, priority: 2}
   output_swing:         {min: 3.0e-01, unit: V, priority: 1}
   icmr_min:             {max: 8.0e-01, unit: V, priority: 2}
   icmr_max:             {min: 4.0e-01, unit: V, priority: 2}

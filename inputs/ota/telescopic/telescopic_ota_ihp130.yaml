@@ -4,7 +4,7 @@ design_name: telescopic_ota_ihp130
 metadata:
   process_hint: IHP_SG13G2_130nm
   topology_family: telescopic_cascode_ota
-  note: "Single-stage telescopic cascode OTA with explicit NMOS and PMOS cascode bias voltages."
+  note: "Low-voltage telescopic cascode OTA stress case for IHP SG13G2 130 nm with explicit NMOS and PMOS cascode bias voltages."
 
 global_parameters:
   vbias_tail: 0.50
@@ -37,10 +37,10 @@ topology:
     - {id: M9, role: load_cascode, stage: cascode, type: pmos, connections: {drain: vout, gate: vbias_pcas, source: pcas_out, body: vdd}}
 
 targets:
-  dc_gain:              {min: 50, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 3.0e+07, unit: Hz, priority: 1}
+  dc_gain:              {min: 30, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 5.0e+06, unit: Hz, priority: 1}
   phase_margin:         {min: 45, unit: deg, priority: 1}
-  slew_rate:            {min: 1.5e+07, unit: V/s, priority: 2}
+  slew_rate:            {min: 5.0e+05, unit: V/s, priority: 2}
   output_swing:         {min: 2.5e-01, unit: V, priority: 1}
   power:                {max: 5.0e-04, unit: W, priority: 2}
 

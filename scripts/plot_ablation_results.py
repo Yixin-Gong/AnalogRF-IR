@@ -262,12 +262,25 @@ def plot_spec_achievement(specs: pd.DataFrame, out_dir: Path, formats: list[str]
 def plot_metric_distributions(specs: pd.DataFrame, out_dir: Path, formats: list[str], dpi: int) -> None:
     if specs.empty:
         return
-    selected = specs[specs["spec"].isin(["dc_gain", "unity_gain_bandwidth", "phase_margin", "output_swing", "power"])].copy()
+    ordered_specs = [
+        "dc_gain",
+        "unity_gain_bandwidth",
+        "phase_margin",
+        "slew_rate",
+        "output_swing",
+        "icmr_min",
+        "icmr_max",
+        "power",
+    ]
+    selected = specs[specs["spec"].isin(ordered_specs)].copy()
     if selected.empty:
         return
+    selected["spec"] = pd.Categorical(selected["spec"], categories=ordered_specs, ordered=True)
+    selected = selected.sort_values("spec")
     selected["margin_pct"] = selected["normalized_margin"] * 100.0
     spec_labels = list(selected["spec_label"].drop_duplicates())
-    fig, axes = plt.subplots(1, len(spec_labels), figsize=(17.0, 4.2), sharey=False)
+    fig_width = max(17.0, 3.1 * len(spec_labels))
+    fig, axes = plt.subplots(1, len(spec_labels), figsize=(fig_width, 4.2), sharey=False)
     axes = list(axes) if hasattr(axes, "__iter__") else [axes]
     for ax, spec_label in zip(axes, spec_labels):
         chunk = selected[selected["spec_label"] == spec_label]

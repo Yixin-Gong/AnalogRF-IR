@@ -59,6 +59,7 @@ class NgspiceSimulator:
 
         result_ac = self._run_ac_pass(netlist, work_dir)
         result_dc = self._run_dc_pass(netlist, work_dir)
+        result_icmr = self._run_icmr_pass(netlist, work_dir)
         if include_transient is None:
             include_transient = self._has_tran_request(netlist)
         result_tran = self._run_tran_pass(netlist, work_dir) if include_transient else SimulationResult()
@@ -69,17 +70,39 @@ class NgspiceSimulator:
         # Internal implementation note.
         merged.measurements = {}
         merged.measurements.update(result_dc.measurements)  # DC: total_power
+        merged.measurements.update(result_icmr.measurements)  # ICMR: common-mode OP sweep
         merged.measurements.update(result_ac.measurements)  # AC: dc_gain_db, ugbw, pm
         merged.measurements.update(result_tran.measurements)  # TRAN: slew_rate
 
         # Internal implementation note.
         merged.operating_points = result_dc.operating_points
 
-        merged.raw_stdout = result_ac.raw_stdout + "\n" + result_dc.raw_stdout + "\n" + result_tran.raw_stdout
-        merged.raw_stderr = result_ac.raw_stderr + "\n" + result_dc.raw_stderr + "\n" + result_tran.raw_stderr
+        merged.raw_stdout = (
+            result_ac.raw_stdout
+            + "\n"
+            + result_dc.raw_stdout
+            + "\n"
+            + result_icmr.raw_stdout
+            + "\n"
+            + result_tran.raw_stdout
+        )
+        merged.raw_stderr = (
+            result_ac.raw_stderr
+            + "\n"
+            + result_dc.raw_stderr
+            + "\n"
+            + result_icmr.raw_stderr
+            + "\n"
+            + result_tran.raw_stderr
+        )
 
         pass_codes = [
-            code for code in (result_ac.return_code, result_dc.return_code, result_tran.return_code)
+            code for code in (
+                result_ac.return_code,
+                result_dc.return_code,
+                result_icmr.return_code,
+                result_tran.return_code,
+            )
             if code is not None and code >= 0
         ]
         if pass_codes:
@@ -189,6 +212,221 @@ class NgspiceSimulator:
 
         dc_netlist = "\n".join(out)
         return self._exec_ngspice(dc_netlist, work_dir, suffix="dc")
+
+    # Pass 2b: ICMR common-mode operating-point sweep
+
+    def _run_icmr_pass(self, netlist: str, work_dir: Optional[str]) -> SimulationResult:
+        """Measure ICMR by sweeping the input common-mode voltage with ngspice OP."""
+        result = SimulationResult()
+        if not self._requires_icmr_sweep(netlist):
+            return result
+
+        source_names = self._icmr_input_source_names(netlist)
+        devices = self._parse_mos_devices(netlist)
+        if not source_names or not devices:
+            return result
+
+        vdd = self._infer_vdd(netlist)
+        vss = self._infer_vss(netlist)
+        factor = self._infer_vdsat_factor(netlist)
+        grid = self._icmr_sweep_grid(vdd, vss)
+        sample_dir = os.path.join(work_dir, "icmr_sweep") if work_dir else None
+
+        samples: List[Tuple[float, bool, float]] = []
+        raw_stdout: List[str] = []
+        raw_stderr: List[str] = []
+        return_codes: List[int] = []
+        executed = 0
+        for idx, vcm in enumerate(grid):
+            sample_netlist = self._set_common_mode_sources(netlist, source_names, vcm)
+            sample_netlist = self._strip_for_op(sample_netlist)
+            sample_netlist = self._add_op_control(sample_netlist)
+            sample = self._exec_ngspice(sample_netlist, sample_dir, suffix=f"icmr_{idx:02d}")
+            if sample.return_code >= 0:
+                return_codes.append(sample.return_code)
+            raw_stdout.append(sample.raw_stdout)
+            raw_stderr.append(sample.raw_stderr)
+            if not sample.operating_points:
+                continue
+            margin = self._icmr_headroom_margin(devices, sample.operating_points, factor)
+            if margin is None or not math.isfinite(margin):
+                continue
+            executed += 1
+            samples.append((vcm, margin >= -1e-4, margin))
+
+        if return_codes:
+            result.return_code = 0 if any(code == 0 for code in return_codes) else max(return_codes)
+        result.success = executed > 0
+        result.raw_stdout = "\n".join(raw_stdout)
+        result.raw_stderr = "\n".join(raw_stderr)
+
+        if not samples:
+            result.measurements = {
+                "icmr_sweep_points": float(len(grid)),
+                "icmr_valid_points": 0.0,
+            }
+            return result
+
+        segments = self._valid_icmr_segments(samples)
+        if not segments:
+            lo = min(vdd, vss)
+            hi = max(vdd, vss)
+            result.measurements = {
+                "icmr": 0.0,
+                "icmr_min": hi,
+                "icmr_max": lo,
+                "icmr_sweep_points": float(len(samples)),
+                "icmr_valid_points": 0.0,
+                "icmr_headroom_margin_min": min(item[2] for item in samples),
+            }
+            return result
+
+        start, end = max(
+            segments,
+            key=lambda item: (samples[item[1]][0] - samples[item[0]][0], item[1] - item[0]),
+        )
+        low = samples[start][0]
+        high = samples[end][0]
+        valid_margins = [margin for _vcm, valid, margin in samples[start : end + 1] if valid]
+        result.measurements = {
+            "icmr": max(0.0, high - low),
+            "icmr_min": low,
+            "icmr_max": high,
+            "icmr_sweep_points": float(len(samples)),
+            "icmr_valid_points": float(sum(1 for _vcm, valid, _margin in samples if valid)),
+            "icmr_headroom_margin_min": min(valid_margins) if valid_margins else 0.0,
+            "icmr_sweep_step": abs(grid[1] - grid[0]) if len(grid) > 1 else 0.0,
+        }
+        return result
+
+    def _requires_icmr_sweep(self, netlist: str) -> bool:
+        return bool(re.search(r"\bicmr(?:_min|_max)?\b|input_common_mode", netlist, flags=re.IGNORECASE))
+
+    def _icmr_input_source_names(self, netlist: str) -> List[str]:
+        candidates: List[Tuple[str, str]] = []
+        preferred_nodes = {"vinp", "vinn", "vin", "inp", "inn", "in_p", "in_n"}
+        for line in netlist.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("*"):
+                continue
+            m = re.match(r"^(V\S+)\s+(\S+)\s+(\S+)\s+", stripped, flags=re.IGNORECASE)
+            if not m:
+                continue
+            name = m.group(1)
+            node = m.group(2)
+            name_low = name.lower()
+            node_low = node.lower()
+            if name_low in {"vinp", "vinn", "vin"} or node_low in preferred_nodes:
+                candidates.append((name, node_low))
+
+        differential = [name for name, node in candidates if name.lower() in {"vinp", "vinn"} or node in {"vinp", "vinn"}]
+        if len(differential) >= 2:
+            return list(dict.fromkeys(differential))
+        return list(dict.fromkeys(name for name, _node in candidates))
+
+    def _icmr_sweep_grid(self, vdd: float, vss: float) -> List[float]:
+        span = max(abs(vdd - vss), 1e-9)
+        low = min(vss, vdd) + 0.02 * span
+        high = max(vss, vdd) - 0.02 * span
+        if high <= low:
+            return [0.5 * (vdd + vss)]
+        points = 25
+        step = (high - low) / float(points - 1)
+        return [low + step * idx for idx in range(points)]
+
+    def _set_common_mode_sources(self, netlist: str, source_names: List[str], vcm: float) -> str:
+        source_set = {name.lower() for name in source_names}
+        out: List[str] = []
+        value = f"{vcm:.8g}"
+        for line in netlist.splitlines():
+            m = re.match(r"^(\s*)(V\S+)(\s+\S+\s+\S+\s+)(.*)$", line, flags=re.IGNORECASE)
+            if not m or m.group(2).lower() not in source_set:
+                out.append(line)
+                continue
+            prefix = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+            tail = m.group(4).strip()
+            if re.search(r"\bDC\s+\S+", tail, flags=re.IGNORECASE):
+                tail = re.sub(r"\bDC\s+\S+", f"DC {value}", tail, count=1, flags=re.IGNORECASE)
+            elif tail:
+                parts = tail.split(None, 1)
+                suffix = f" {parts[1]}" if len(parts) > 1 else ""
+                tail = f"DC {value}{suffix}"
+            else:
+                tail = f"DC {value}"
+            out.append(prefix + tail)
+        return "\n".join(out)
+
+    def _strip_for_op(self, netlist: str) -> str:
+        lines = netlist.split("\n")
+        out: List[str] = []
+        skip_control = False
+        for line in lines:
+            stripped = line.strip()
+            low = stripped.lower()
+            if low.startswith(".control"):
+                skip_control = True
+                continue
+            if skip_control:
+                if low.startswith(".endc"):
+                    skip_control = False
+                continue
+            if low.startswith((".ac ", ".ac\t", ".dc ", ".dc\t", ".tran ", ".tran\t")):
+                continue
+            if low.startswith(".meas "):
+                continue
+            out.append(line)
+        return "\n".join(out)
+
+    def _add_op_control(self, netlist: str) -> str:
+        lines = netlist.splitlines()
+        control = [
+            "",
+            ".control",
+            "  set ngbehavior = hsa",
+            "  op",
+            "  print all",
+        ]
+        for print_line in self._device_operating_point_prints(netlist):
+            control.append(f"  {print_line}")
+        control.append(".endc")
+        for idx in range(len(lines) - 1, -1, -1):
+            if lines[idx].strip().lower() == ".end":
+                return "\n".join(lines[: idx + 1] + control + lines[idx + 1 :])
+        return "\n".join(lines + [".end"] + control)
+
+    def _icmr_headroom_margin(
+        self,
+        devices: List[Dict[str, str]],
+        op: Dict[str, Dict[str, float]],
+        factor: float,
+    ) -> Optional[float]:
+        margins: List[float] = []
+        for dev in devices:
+            gm = self._op_abs_optional(op, dev["id"], "gm")
+            vds = self._op_abs_optional(op, dev["id"], "vds")
+            vdsat = self._op_abs_optional(op, dev["id"], "vdsat")
+            if gm is None or vds is None or vdsat is None:
+                return None
+            if not all(math.isfinite(value) for value in (gm, vds, vdsat)):
+                return None
+            if gm <= 1e-12 or vdsat <= 1e-6:
+                margins.append(float("-inf"))
+                continue
+            margins.append(vds - factor * vdsat)
+        return min(margins) if margins else None
+
+    def _valid_icmr_segments(self, samples: List[Tuple[float, bool, float]]) -> List[Tuple[int, int]]:
+        segments: List[Tuple[int, int]] = []
+        start: Optional[int] = None
+        for idx, (_vcm, valid, _margin) in enumerate(samples):
+            if valid and start is None:
+                start = idx
+            elif not valid and start is not None:
+                segments.append((start, idx - 1))
+                start = None
+        if start is not None:
+            segments.append((start, len(samples) - 1))
+        return segments
 
     def _device_operating_point_prints(self, netlist: str) -> List[str]:
         devices = []
@@ -1022,10 +1260,19 @@ class NgspiceSimulator:
         return nodes | {dev["gate"] for dev in devices if dev["gate"].startswith("vin")}
 
     def _op_abs(self, op: Dict[str, Dict[str, float]], device_id: str, param: str) -> float:
+        value = self._op_abs_optional(op, device_id, param)
+        return value if value is not None else 0.0
+
+    def _op_abs_optional(
+        self,
+        op: Dict[str, Dict[str, float]],
+        device_id: str,
+        param: str,
+    ) -> Optional[float]:
         for name in (device_id.upper(), f"M{device_id}".upper()):
             if name in op and param in op[name]:
                 return abs(float(op[name][param]))
-        return 0.0
+        return None
 
     def _canonical_op_device_name(self, raw: str) -> str:
         name = raw.upper()

@@ -13,7 +13,7 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 - gm/ID-based compact sizing with NSGA-II exploration.
 - Hard validation for schema write policy, symmetry consistency, operating-point safety, and layout-realizable W/L constraints.
 - Layout realization for oversized devices through finger folding, parallel devices, and series length segmentation.
-- ngspice-backed AC, DC, transient, operating-point, slew-rate, headroom, and power measurements.
+- ngspice-backed AC, DC, transient, operating-point, slew-rate, output-swing, ICMR common-mode sweep, headroom, and power measurements.
 - Optional postprocess repair for OP validation, bias balancing, and compensation tuning.
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
@@ -304,7 +304,7 @@ When adding a new circuit family:
 ## Current Limitations
 
 - Compact models are optimization guidance, not signoff results.
-- Output swing and ICMR are primarily OP/headroom estimates unless explicit sweeps are added.
+- Output swing is extracted from OP/headroom limits; ICMR targets are checked by an explicit ngspice common-mode OP sweep that records the valid range and headroom margin.
 - Comparator delay, offset, kickback, noise, energy, and metastability require dedicated transient, noise, and Monte Carlo testbenches.
 - RF-specific flows still need S-parameter, noise figure, compression, matching, linearity, and stability extensions.
 - LLM-guided diagnosis is experimental and should be treated as a planner/explainer layer over simulator-backed evidence.

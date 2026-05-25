@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from asir.capabilities import detect_circuit_capabilities
 from core.compensation import has_miller_rc_compensation
@@ -738,6 +739,66 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
     assert all(action["max_step_fraction"] <= 0.10 for action in gain_length_actions)
     assert all(action["multi_objective_guardrail"]["policy"].startswith("small secondary L increase") for action in gain_length_actions)
     assert any(action["knob"] == "M1.gm_id" and action["priority"] == "primary" for action in gain_failure["actions"])
+
+
+def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 30.0,
+            "unity_gain_bandwidth": 3.0e7,
+            "phase_margin": 70.0,
+            "slew_rate": 2.0e7,
+            "output_swing": 0.65,
+            "total_power": 8.0e-6,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 30.0,
+            "unity_gain_bandwidth": 3.0e7,
+            "phase_margin": 70.0,
+            "slew_rate": 2.0e7,
+            "output_swing": 0.65,
+            "power": 8.0e-6,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"gain_deficit": 1.0},
+    }
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"__global__": {}},
+            "transistor_params": {
+                "M1": {"gm": 1.5e-4, "gds": 8.0e-6, "id": 8.0e-6, "vds": 0.20, "vdsat": 0.10, "region": "saturation"},
+                "M2": {"gm": 1.5e-4, "gds": 8.0e-6, "id": 8.0e-6, "vds": 0.20, "vdsat": 0.10, "region": "saturation"},
+                "M3": {"gm": 1.3e-4, "gds": 5.0e-5, "id": 8.0e-6, "vds": 0.18, "vdsat": 0.16, "region": "saturation"},
+                "M4": {"gm": 1.3e-4, "gds": 5.0e-5, "id": 8.0e-6, "vds": 0.18, "vdsat": 0.16, "region": "saturation"},
+                "M5": {"gm": 1.2e-4, "gds": 2.0e-5, "id": 1.6e-5, "vds": 0.12, "vdsat": 0.15, "region": "linear"},
+                "M6": {"gm": 1.1e-4, "gds": 6.0e-5, "id": 8.0e-6, "vds": 0.08, "vdsat": 0.18, "region": "linear"},
+                "M7": {"gm": 1.1e-4, "gds": 6.0e-5, "id": 8.0e-6, "vds": 0.08, "vdsat": 0.18, "region": "linear"},
+            },
+        },
+    )
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=1,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+    causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
+    gain_failure = next(item for item in causal["attribution_guided_tuning"]["by_failure"] if item["metric"] == "dc_gain")
+    bias_actions = [action for action in gain_failure["actions"] if action["knob"].startswith("global.vbias")]
+
+    assert bias_actions
+    assert all(action["direction"] == "set" for action in bias_actions)
+    assert all(action["action_class"] == "operating_point_headroom" for action in bias_actions)
+    assert all(action["target_formula"] == "folded_cascode_bias_preset" for action in bias_actions)
 
 
 def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
@@ -1844,6 +1905,53 @@ Cload vout 0 200f
     assert perf["output_swing_low"] < perf["output_swing_high"]
     assert perf["icmr_min"] > 0
     assert perf["icmr_max"] >= perf["icmr_min"]
+
+
+def test_ngspice_icmr_sweep_extracts_common_mode_range():
+    netlist = """
+* VDSAT_headroom_factor: 1.3
+M1 vout vinp tail 0 nmos W=1u L=500n
+M2 n1 vinn tail 0 nmos W=1u L=500n
+M3 vout vout vdd vdd pmos W=1u L=500n
+M4 tail vbias 0 0 nmos W=1u L=500n
+Vdd vdd 0 DC 1.2
+Vinp vinp 0 DC 0.6 AC 0.5
+Vinn vinn 0 DC 0.6 AC -0.5
+* .meas dc icmr_min: computed from operating-point headroom in simulator
+* .meas dc icmr_max: computed from operating-point headroom in simulator
+.end
+"""
+
+    class FakeIcmrSimulator(NgspiceSimulator):
+        def __init__(self):
+            super().__init__()
+            self.common_modes = []
+
+        def _exec_ngspice(self, sample_netlist, work_dir, suffix):
+            vinp = re.search(r"^\s*Vinp\s+\S+\s+\S+\s+DC\s+(\S+)", sample_netlist, flags=re.IGNORECASE | re.MULTILINE)
+            vinn = re.search(r"^\s*Vinn\s+\S+\s+\S+\s+DC\s+(\S+)", sample_netlist, flags=re.IGNORECASE | re.MULTILINE)
+            assert vinp is not None
+            assert vinn is not None
+            vcm_p = float(vinp.group(1))
+            vcm_n = float(vinn.group(1))
+            assert abs(vcm_p - vcm_n) < 1e-12
+            self.common_modes.append(vcm_p)
+            valid = 0.35 <= vcm_p <= 0.85
+            vds = 0.30 if valid else 0.08
+            op = {
+                name: {"gm": 1e-4, "vds": vds, "vdsat": 0.10}
+                for name in ("M1", "M2", "M3", "M4")
+            }
+            return SimulationResult(success=True, return_code=0, operating_points=op)
+
+    sim = FakeIcmrSimulator()
+    result = sim._run_icmr_pass(netlist, None)
+
+    assert len(sim.common_modes) == 25
+    assert 0.34 <= result.measurements["icmr_min"] <= 0.38
+    assert 0.82 <= result.measurements["icmr_max"] <= 0.86
+    assert result.measurements["icmr"] > 0.45
+    assert result.measurements["icmr_valid_points"] > 0
 
 
 def test_compensation_tune_stops_after_passing_candidate(tmp_path):

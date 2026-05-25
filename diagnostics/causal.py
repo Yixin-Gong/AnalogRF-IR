@@ -1204,7 +1204,13 @@ def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateC
                     tradeoffs=["Higher L can add capacitance and lower bandwidth.", "Keep mirrored load devices symmetric."],
                     priority="primary",
                 )
-            ]
+            ] + _bias_voltage_tuning_actions(
+                state,
+                metric=metric,
+                cause_node=node,
+                score=cause.score * 0.55,
+                priority="secondary",
+            )
         return _headroom_tuning_actions(state, metric, dev_id, node, cause.score)
 
     if param == "gm":
@@ -1343,6 +1349,15 @@ def _headroom_tuning_actions(state: DesignState, metric: str, dev_id: str, cause
                 priority="guarded",
             )
         )
+    actions.extend(
+        _bias_voltage_tuning_actions(
+            state,
+            metric=metric,
+            cause_node=cause_node,
+            score=score * 0.95,
+            priority="primary",
+        )
+    )
     return actions
 
 
@@ -1490,7 +1505,128 @@ def _global_tuning_action(state: DesignState, metric: str, node: str, score: flo
                 target_value=_rz_target_from_second_stage(state),
             )
         ]
+    if _is_bias_voltage_variable(name):
+        target = _bias_voltage_target_value(state, name)
+        if target is None:
+            return []
+        return [
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=node,
+                score=score,
+                device="",
+                variable=name,
+                direction="set",
+                step_hint="set to the topology-aware bias preset, then validate with the local SPICE intervention model",
+                rationale="Bias voltage directly controls stack voltage allocation and can restore saturation headroom before gain tuning.",
+                expected_effect={
+                    "dc_gain": "increase if saturation headroom improves",
+                    "output_swing": "increase if stack headroom improves",
+                    "headroom": "improve",
+                },
+                tradeoffs=["Can trade gain against bandwidth, slew rate, and current density; require SPICE evidence before applying."],
+                priority="primary",
+                target_formula=_bias_voltage_target_formula(state, name),
+                target_value=target,
+            )
+        ]
     return []
+
+
+def _bias_voltage_tuning_actions(
+    state: DesignState,
+    *,
+    metric: str,
+    cause_node: str,
+    score: float,
+    priority: str,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    for variable in _global_bias_voltage_variables(state):
+        target = _bias_voltage_target_value(state, variable)
+        current = _current_variable_value(state, "", variable)
+        if target is None or current is None:
+            continue
+        if abs(float(target) - float(current)) < 0.005:
+            continue
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=cause_node,
+                score=score,
+                device="",
+                variable=variable,
+                direction="set",
+                step_hint="set to the topology-aware bias preset, then let the constrained optimizer verify the local SPICE delta",
+                rationale="Explicit bias-voltage tuning brings OP/headroom repair into the constrained action optimizer instead of leaving it only to postprocess.",
+                expected_effect={
+                    "dc_gain": "increase if saturation headroom improves",
+                    "unity_gain_bandwidth": "increase if transconductance bias improves",
+                    "slew_rate": "increase if bias current remains adequate",
+                    "output_swing": "increase if stack headroom improves",
+                    "headroom": "improve",
+                },
+                tradeoffs=["Bias presets are topology dependent and may hurt another metric; local SPICE evidence is required for selection."],
+                priority=priority,
+                target_formula=_bias_voltage_target_formula(state, variable),
+                target_value=target,
+            )
+        )
+    return actions
+
+
+def _global_bias_voltage_variables(state: DesignState) -> list[str]:
+    bias_ports = {port.id for port in state.topology.ports if (port.direction or "").lower() == "bias"}
+    variables = [
+        dv.variable
+        for dv in state.design_variables
+        if not dv.device and _is_bias_voltage_variable(dv.variable) and (not bias_ports or dv.variable in bias_ports)
+    ]
+    return list(dict.fromkeys(variables))
+
+
+def _is_bias_voltage_variable(variable: str) -> bool:
+    name = (variable or "").lower()
+    return name == "vbias" or name.startswith("vbias_")
+
+
+def _bias_voltage_target_formula(state: DesignState, variable: str) -> str:
+    architecture = (state.topology.architecture or "").lower()
+    if "telescopic" in architecture:
+        return "telescopic_stack_bias_preset"
+    if "folded" in architecture:
+        return "folded_cascode_bias_preset"
+    return "single_stage_tail_bias_preset"
+
+
+def _bias_voltage_target_value(state: DesignState, variable: str) -> float | None:
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    architecture = (state.topology.architecture or "").lower()
+    name = variable.lower()
+    if "telescopic" in architecture:
+        ratios = {
+            "vbias_tail": 0.46,
+            "vbias_ncas": 0.62,
+            "vbias_pcas": 0.48,
+        }
+    elif "folded" in architecture:
+        ratios = {
+            "vbias_ptail": 0.74,
+            "vbias_ncas": 0.50,
+        }
+    else:
+        ratios = {
+            "vbias": 0.47,
+            "vbias_tail": 0.46,
+            "vbias_ncas": 0.55,
+            "vbias_pcas": 0.48,
+            "vbias_ptail": 0.74,
+        }
+    if name not in ratios:
+        return None
+    return round(_clip_to_bounds(ratios[name] * vdd, _variable_range(state, "", variable)), 4)
 
 
 def _knob_action(
@@ -1555,6 +1691,8 @@ def _knob_action(
 def _action_class(metric: str, cause_node: str, variable: str) -> str:
     if variable in {"Cc", "Rz"} or cause_node in {"block.compensation_network", "global.Cc", "global.Rz"}:
         return "compensation"
+    if _is_bias_voltage_variable(variable):
+        return "operating_point_headroom"
     if variable in {"I_tail", "I_stage2", "I_latch"}:
         return "operating_point_balance"
     if "headroom" in cause_node or "Vov" in cause_node or metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
@@ -1659,6 +1797,11 @@ def _agent_step_fraction(
         "I_latch": (0.04, 0.20),
         "Cc": (0.04, 0.30),
         "Rz": (0.04, 0.25),
+        "vbias": (0.02, 0.12),
+        "vbias_tail": (0.02, 0.12),
+        "vbias_ncas": (0.02, 0.12),
+        "vbias_pcas": (0.02, 0.12),
+        "vbias_ptail": (0.02, 0.12),
     }.get(variable, (0.05, 0.20))
     if metric in {"phase_margin"} and variable == "Cc":
         max_step = 0.40
