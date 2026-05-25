@@ -54,6 +54,18 @@ def detect_circuit_capabilities(
         names.add("miller_rc_compensation")
     if "source_follower" in role_text or "follower" in role_text:
         names.add("source_follower_regulation")
+    if any(token in architecture for token in ("current-mirror", "current_mirror")):
+        names.add("current_mirror_ota")
+    if any("current_mirror" in role for role in roles):
+        names.add("active_load_current_mirror")
+    if any(token in architecture for token in ("telescopic", "folded", "cascode")):
+        names.add("cascode_ota")
+    if "telescopic" in architecture:
+        names.add("telescopic_cascode")
+    if "folded" in architecture:
+        names.add("folded_cascode")
+    if any("cascode" in role or "folded" in role for role in roles):
+        names.add("cascode_ota")
     if "regulated_source_current_source" in roles:
         names.add("regulated_source_current_source")
     if "tail_bias_mirror" in roles:

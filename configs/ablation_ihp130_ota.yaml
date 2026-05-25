@@ -1,0 +1,91 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: IHP SG13G2 130 nm OTA topology-family ablation matrix.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations_ihp130_ota
+schemas:
+  - inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml
+  - inputs/ota/telescopic/telescopic_ota_ihp130.yaml
+  - inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml
+seeds: [1, 2, 3]
+
+base_overrides:
+  input:
+    env: environment_ihp_sg13g2.yaml
+    topology: yaml
+  optimizer:
+    generations: 50
+    pop_size: 100
+  reoptimization:
+    generations: 3
+    pop_size: 24
+  llm:
+    model: deepseek-v4-flash
+    thinking: disabled
+    temperature: 0.0
+  actions:
+    strategy: combo_coarse_fine
+
+cases:
+  - name: optimizer_only
+    family: baseline
+    description: IHP130 topology optimizer only; no diagnosis, intervention model, LLM planning, or postprocess repair.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'off'
+
+  - name: optimizer_postprocess_fallback
+    family: postprocess_control
+    description: IHP130 optimizer plus topology-specific fallback postprocess when near-feasible or stagnated.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'fallback'
+
+  - name: diagnosis_surrogate_no_postprocess
+    family: diagnosis_control
+    description: Deterministic diagnosis-guided rounds over IHP130 topologies without LLM or postprocess.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deterministic
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'off'
+
+  - name: llm_diagnosis_no_postprocess
+    family: llm_control
+    description: LLM planner with constrained optimizer evidence on IHP130 topologies; postprocess disabled for main-method cleanliness.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'off'
+
+  - name: llm_diagnosis_postprocess_fallback
+    family: combined_method
+    description: Main LLM diagnosis flow plus topology-specific fallback repair for IHP130 OTA families.
+    overrides:
+      agent:
+        rounds: 3
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 4
+      postprocess:
+        policy: 'fallback'

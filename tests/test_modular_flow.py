@@ -29,6 +29,7 @@ from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter
+from postprocess.cascode import tune_cascode_ota_operating_point
 from postprocess.ota import _select_two_phase_candidate, tune_single_stage_ota_operating_point
 from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from postprocess.source_follower import _candidate_points
@@ -166,6 +167,87 @@ def test_optimization_problem_and_postprocess_registry_are_capability_driven(tmp
     assert [item.name for item in registry.resolve(five_transistor_context)] == ["single_stage_ota_operating_point"]
     assert [item.name for item in registry.resolve(two_stage_context)] == ["two_stage"]
     assert [item.name for item in registry.resolve(source_follower_context)] == ["source_follower_operating_point"]
+
+
+def test_ihp130_ota_topology_suite_loads_and_routes_to_postprocess(tmp_path):
+    ihp_env = load_yaml_mapping("environment_ihp_sg13g2.yaml")
+    cases = {
+        "inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml": {
+            "capability": "current_mirror_ota",
+            "postprocess": ["current_mirror_ota_operating_point"],
+        },
+        "inputs/ota/telescopic/telescopic_ota_ihp130.yaml": {
+            "capability": "telescopic_cascode",
+            "postprocess": ["cascode_ota_operating_point"],
+        },
+        "inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml": {
+            "capability": "folded_cascode",
+            "postprocess": ["cascode_ota_operating_point"],
+        },
+    }
+    registry = PostprocessRegistry()
+
+    for schema_path, expected in cases.items():
+        state = build_design_state_from_yaml(load_yaml_mapping(schema_path), ihp_env)
+        problem = OptimizationProblem.from_state(state)
+        context = PostprocessContext(
+            state=state,
+            sim=NgspiceSimulator(),
+            work_dir=tmp_path,
+            config=PostprocessConfig(),
+            profile=problem.profile,
+            capabilities=problem.capabilities,
+        )
+        netlist = generate_netlist(state)
+
+        assert state.process.process_name == "IHP_SG13G2_130nm"
+        assert "sg13_lv_nmos" in netlist
+        assert "sg13_lv_pmos" in netlist
+        assert problem.capabilities.has(expected["capability"])
+        assert [item.name for item in registry.resolve(context)] == expected["postprocess"]
+
+
+def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    state.global_parameters["vbias_tail"] = 0.42
+    state.global_parameters["vbias_ncas"] = 0.48
+    state.global_parameters["vbias_pcas"] = 0.78
+
+    class FakeCascodeSimulator:
+        timeout_sec = 30.0
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            self.calls += 1
+            ncas = state.global_parameters.get("vbias_ncas", 0.0)
+            pcas = state.global_parameters.get("vbias_pcas", 0.0)
+            passing = 0.62 <= ncas <= 0.76 and 0.46 <= pcas <= 0.64
+            measurements = {
+                "dc_gain_db": 55.0 if passing else 24.0,
+                "unity_gain_bandwidth": 4.0e7 if passing else 8.0e6,
+                "phase_margin": 62.0 if passing else 35.0,
+                "output_swing": 0.35 if passing else 0.12,
+                "total_power": 1.2e-4,
+            }
+            margin = 0.16 if passing else 0.02
+            operating_points = {
+                dev.id: {"vds": margin + 0.12, "vdsat": 0.12, "gm": 1.0e-4, "gds": 1.0e-6, "id": 1.0e-5}
+                for dev in state.topology.devices
+            }
+            return SimulationResult(success=True, return_code=0, measurements=measurements, operating_points=operating_points)
+
+    result = tune_cascode_ota_operating_point(state, FakeCascodeSimulator(), tmp_path)
+
+    assert result["spec_pass"] is True
+    assert result["topology_family"] == "telescopic_cascode_ota"
+    assert result["new_bias_values"]["vbias_ncas"] >= 0.62
+    assert result["new_bias_values"]["vbias_pcas"] <= 0.64
+    assert state.global_parameters["vbias_ncas"] == result["new_bias_values"]["vbias_ncas"]
 
 
 def test_uncompensated_two_stage_does_not_trigger_rc_logic(tmp_path):

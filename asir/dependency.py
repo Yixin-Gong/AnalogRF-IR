@@ -440,6 +440,7 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
     stage2_refs = [p.id for p in semantics.by_type("second_stage_inverter")]
     comp_refs = [p.id for p in semantics.by_type("miller_compensation")]
     sf_refs = [p.id for p in semantics.by_type("source_follower_regulation")]
+    cascode_refs = [p.id for p in semantics.by_type("cascode_stack")]
     load_refs = [p.id for p in semantics.by_type("current_mirror_load")]
     tail_refs = [p.id for p in semantics.by_type("tail_current_source")]
 
@@ -461,6 +462,35 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
             "regulated_rout",
             "Use the regulated output resistance for pole placement when the source-follower loop is declared.",
             primitive_refs=sf_refs,
+        )
+
+    if cascode_refs:
+        graph.add_dependency(
+            "cascode_rout",
+            ["ro_core", "gm_cascode", "ro_cascode"],
+            "ro_core * max(1.0 + gm_cascode * ro_cascode, 1.0)",
+            "Cascode devices multiply the core output resistance when their bias voltages keep the stack saturated.",
+            primitive_refs=cascode_refs,
+            constraints=[
+                "cascode bias voltages must satisfy the stacked VDSAT headroom budget",
+                "larger cascode gain improves dc gain but reduces output swing",
+            ],
+        )
+        if not sf_refs:
+            graph.add_dependency(
+                "rout",
+                ["cascode_rout"],
+                "cascode_rout",
+                "Use the cascode-boosted output resistance for single-stage cascode pole and gain estimates.",
+                primitive_refs=cascode_refs,
+            )
+        graph.add_dependency(
+            "headroom_margin",
+            ["VDD", "VSS", "Vstack_required"],
+            "VDD - VSS - Vstack_required",
+            "Available voltage headroom after reserving saturation voltage for the stacked cascode devices.",
+            primitive_refs=cascode_refs,
+            constraints=["positive headroom margin is required before trusting the cascode gain boost"],
         )
 
     if comp_refs:
@@ -486,7 +516,7 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
             ["rout", "CL_eff"],
             "1 / max(rout * CL_eff, 1e-30)",
             "Uncompensated OTA dominant pole is set by the highest-impedance node and its explicit capacitance.",
-            primitive_refs=input_refs + load_refs + stage2_refs,
+            primitive_refs=input_refs + load_refs + stage2_refs + cascode_refs,
             constraints=["do not assume Cc exists unless the topology declares a compensation network"],
         )
         graph.add_dependency(
@@ -522,14 +552,24 @@ def build_ota_dependency_graph(semantics: SemanticPrimitiveGraph) -> DependencyG
             primitive_refs=comp_refs,
             constraints=["Rz below 1/gm2 leaves a right-half-plane zero", "Rz above 1/gm2 creates a left-half-plane zero"],
         )
-    graph.add_dependency(
-        "dc_gain",
-        ["gm1", "ro1", "gm2", "ro2"],
-        "gm1 * ro1 * gm2 * ro2",
-        "Two-stage open-loop gain is the product of first-stage and second-stage gains.",
-        primitive_refs=input_refs + load_refs + stage2_refs,
-        constraints=["all gain devices must remain in saturation at the operating point"],
-    )
+    if stage2_refs:
+        graph.add_dependency(
+            "dc_gain",
+            ["gm1", "ro1", "gm2", "ro2"],
+            "gm1 * ro1 * gm2 * ro2",
+            "Two-stage open-loop gain is the product of first-stage and second-stage gains.",
+            primitive_refs=input_refs + load_refs + stage2_refs,
+            constraints=["all gain devices must remain in saturation at the operating point"],
+        )
+    else:
+        graph.add_dependency(
+            "dc_gain",
+            ["gm1", "rout"],
+            "gm1 * rout",
+            "Single-stage OTA open-loop gain is input transconductance times the active-load output resistance.",
+            primitive_refs=input_refs + load_refs + cascode_refs,
+            constraints=["all input, load, and cascode devices must remain in saturation at the operating point"],
+        )
     if comp_refs:
         graph.add_dependency(
             "slew_rate_pos",

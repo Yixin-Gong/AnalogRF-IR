@@ -140,3 +140,26 @@ def test_source_follower_boosted_ota_is_not_miller_compensated():
     assert counts.get("miller_compensation", 0) == 0
     assert "regulated_rout" in design.dependency_graph.graph
     assert "zero_target_Rz" not in design.dependency_graph.graph
+
+
+def test_ihp130_cascode_ota_topologies_have_formal_semantics():
+    telescopic = build_design_from_v1_yaml("inputs/ota/telescopic/telescopic_ota_ihp130.yaml")
+    folded = build_design_from_v1_yaml("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml")
+
+    for design in (telescopic, folded):
+        counts = design.semantic_graph.primitive_type_counts()
+        dependency = design.dependency_graph.to_dict()
+        cascode_rule = next(rule for rule in dependency["rules"] if rule["output"] == "cascode_rout")
+        headroom_rule = next(rule for rule in dependency["rules"] if rule["output"] == "headroom_margin")
+
+        assert counts["differential_pair"] == 1
+        assert counts["current_mirror_load"] == 1
+        assert counts["cascode_stack"] == 1
+        assert "rout" in design.dependency_graph.graph
+        assert cascode_rule["dependency_type"] == "gain_bandwidth_dependency"
+        assert headroom_rule["dependency_type"] == "voltage_headroom_dependency"
+        assert any(
+            edge["target"] == "cascode_rout"
+            and edge["schema_version"] == "analogrf_ir.typed_symbolic_dependency_edge.v0_1"
+            for edge in dependency["edges"]
+        )

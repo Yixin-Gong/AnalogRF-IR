@@ -37,6 +37,7 @@ class RuleBasedSemanticExtractor:
         primitives.extend(self._extract_ota_input_pairs(topology, has_miller_comp=has_miller_comp))
         primitives.extend(self._extract_ota_current_mirror_loads(topology, has_miller_comp=has_miller_comp))
         primitives.extend(self._extract_ota_tail_bias(topology, has_miller_comp=has_miller_comp))
+        primitives.extend(self._extract_ota_cascode_stacks(topology))
         primitives.extend(self._extract_ota_second_stage(topology))
         primitives.extend(self._extract_ota_source_follower_regulation(topology))
         primitives.extend(comp_primitives)
@@ -152,6 +153,57 @@ class RuleBasedSemanticExtractor:
                 input_nets=sorted({topology.terminal_net(dev, "gate") or "" for dev in devices}),
                 output_nets=sorted({topology.terminal_net(dev, "drain") or "" for dev in devices}),
                 internal_nets=sorted({topology.terminal_net(dev, "source") or "" for dev in devices}),
+            )
+        ]
+
+    def _extract_ota_cascode_stacks(self, topology: TopologyGraph) -> list[SemanticPrimitive]:
+        cascode_devices = [
+            dev for dev in topology.mos_devices()
+            if "cascode" in topology.role_hint(dev).lower()
+            or "folded" in topology.role_hint(dev).lower()
+        ]
+        if not cascode_devices:
+            return []
+        architecture = topology.architecture.lower()
+        folded = "folded" in architecture or any("folded" in topology.role_hint(dev).lower() for dev in cascode_devices)
+        family = "folded-cascode" if folded else "telescopic-cascode"
+        touched_nets = sorted(
+            {
+                topology.terminal_net(dev, terminal) or ""
+                for dev in cascode_devices
+                for terminal in ("drain", "source")
+                if topology.terminal_net(dev, terminal)
+            }
+        )
+        control_nets = sorted({topology.terminal_net(dev, "gate") or "" for dev in cascode_devices})
+        equations = [
+            "rout_cascode ~= ro_core * (1 + gm_cascode * ro_cascode)",
+            "dc_gain ~= gm_input * rout_cascode for a single-stage cascode OTA",
+            "headroom_margin = VDD - VSS - sum(VDSAT_stack)",
+        ]
+        if folded:
+            equations.append("folded branch currents map the input-pair signal current into the output mirror stack")
+        else:
+            equations.append("telescopic stack gain rises with cascoded input and load device output resistance")
+        return [
+            SemanticPrimitive(
+                id="ota_cascode_stack_1",
+                primitive_type="cascode_stack",
+                role=f"{family} output-resistance boost and headroom constraint",
+                member_devices=sorted(cascode_devices),
+                equations=equations,
+                constraints=[
+                    "cascode gate bias voltages must leave every stacked device in saturation",
+                    "higher output resistance trades directly against output swing and input common-mode range",
+                    "cascode devices should preserve branch symmetry",
+                ],
+                active_phases=["bias", "small_signal", "large_signal"],
+                state_variables=["rout_cascode", "cascode_bias", "headroom_margin"],
+                input_nets=control_nets,
+                output_nets=topology.output_nets(),
+                control_nets=control_nets,
+                internal_nets=touched_nets,
+                notes=f"Topology family: {family}",
             )
         ]
 
