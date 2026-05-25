@@ -1,8 +1,8 @@
 # AnalogRF-IR
 
-AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records structure-aware diagnostics for engineer-in-the-loop and agent-assisted design iteration.
+AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow for simulator-backed, agent-assisted circuit design. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records typed causal evidence so planner actions can be accepted or rejected by explicit optimizer-side math.
 
-The current development focus is OTA-class analog design, especially five-transistor OTAs and two-stage Miller OTAs. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
+The current development focus is OTA-class analog design in IHP 130 nm, including current-mirror, telescopic, and folded-cascode OTAs, plus the earlier five-transistor and two-stage Miller examples. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
 
 > License notice: this repository is source-available only. All rights are reserved. See [LICENSE](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/LICENSE).
 
@@ -17,7 +17,8 @@ The current development focus is OTA-class analog design, especially five-transi
 - Optional postprocess repair for OP validation, bias balancing, and compensation tuning.
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
-- Structure-aware causal diagnosis with local intervention modeling and evidence-gated guarded actions.
+- Structure-aware causal diagnosis with typed causal edges, typed ASIR dependencies, local intervention modeling, and evidence-gated guarded actions.
+- Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including publication-ready plotting outputs.
 - Compact schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
 
 ## Repository Layout
@@ -96,6 +97,18 @@ python main.py \
   --seed 17
 ```
 
+Run an IHP 130 nm OTA topology:
+
+```bash
+python main.py \
+  --env environment_ihp_sg13g2.yaml \
+  --schema inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml \
+  --topology yaml \
+  --generations 50 \
+  --pop-size 100 \
+  --seed 1
+```
+
 Run the regression suite:
 
 ```bash
@@ -143,12 +156,18 @@ line:
 python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
-The paper ablation matrix is defined in `configs/ablation.yaml` and can be
-expanded into reproducible per-job configs:
+The current paper-facing IHP 130 nm OTA ablation matrix is defined in
+`configs/ablation_ihp130_ota.yaml`. It compares current-mirror, telescopic,
+and folded-cascode OTAs across optimizer-only, postprocess-control,
+deterministic diagnosis, LLM diagnosis, and LLM-plus-fallback methods:
 
 ```bash
-python scripts/run_ablation.py --config configs/ablation.yaml
-python scripts/run_ablation.py --config configs/ablation.yaml --case optimizer_only --seed 1 --limit 1 --run
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --run --keep-going
+python scripts/plot_ablation_results.py \
+  --manifest runs/ablations_ihp130_ota/manifest.json \
+  --out-dir runs/ablations_ihp130_ota/figures
 ```
 
 If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
@@ -183,14 +202,14 @@ apply_allowed := optimizer_selected OR objective_delta < 0
 
 Custom LLM edits cannot bypass `no_improving_combination`; they are recorded as skipped notes unless they correspond to an admissible optimizer candidate. Candidate actions also carry typed classes such as `compensation`, `operating_point_balance`, and `operating_point_headroom`, keeping OP/balance moves inside the constrained action optimizer instead of relying on postprocess repair.
 
-The mathematical objective used by the evidence gate is:
+The evidence gate minimizes the weighted normalized violation objective:
 
-```text
-J(v) = sum_i w_i * v_i^2
-v' = [v + A_j]_+
-```
+$$
+J(\mathbf{v}) = \sum_i w_i v_i^2,\qquad
+\mathbf{v}'_j = [\mathbf{v} + \mathbf{A}_{:,j}]_+
+$$
 
-where `v` is the normalized specification violation vector and `A_j` is the local intervention column for one action.
+where `v` is the normalized specification violation vector, `A_{:,j}` is the local intervention column for action `j`, and `[\cdot]_+` projects elementwise to nonnegative residual violation.
 
 The action strategy is coarse-to-fine. Large violations permit larger schema-safe coarse moves. Near-feasible states switch to smaller fine moves, and every proposed edit is checked by the hard physical gate before it can seed the next SPICE run.
 
@@ -256,6 +275,7 @@ Additional project notes are maintained in [docs](https://github.com/Yixin-Gong/
 
 - [Quick Start](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/quickstart.md)
 - [Architecture](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/architecture.md)
+- [Ablation Experiments](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/ablation_experiments.md)
 - [Schema Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/schema_guide.md)
 - [Development Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/development.md)
 
@@ -291,8 +311,8 @@ When adding a new circuit family:
 
 ## Roadmap
 
-- Coarse-to-fine constrained combo-action optimization.
-- Budget-aware ablation of postprocess, local intervention, and LLM planning.
+- Expand constrained combo-action optimization with more topology-aware OP and balance moves.
+- Complete paper-scale ablations across topology, method, seed, spec target, and postprocess policy.
 - More complete comparator and RF signoff testbenches.
 - Tighter reproducibility metadata for process, simulator, model, and planner configuration.
 - Additional physical-layout constraints beyond first-order W/L realization.
