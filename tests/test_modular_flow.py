@@ -281,6 +281,21 @@ def test_ihp130_ota_topology_suite_loads_and_routes_to_postprocess(tmp_path):
         assert [item.name for item in registry.resolve(context)] == expected["postprocess"]
 
 
+def test_ihp130_two_stage_miller_compensation_uses_mim_capacitor():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+
+    netlist = generate_netlist(state)
+
+    assert 'cornerCAP.lib" cap_typ' in netlist
+    assert "\nRz n1 ncc 1k" in netlist
+    assert "\nXCc ncc vout cap_cmim " in netlist
+    assert "w=16.33u l=16.33u" in netlist
+    assert "\nCc " not in netlist
+
+
 def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):
     state = build_design_state_from_yaml(
         load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
@@ -302,10 +317,11 @@ def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):
             pcas = state.global_parameters.get("vbias_pcas", 0.0)
             passing = 0.62 <= ncas <= 0.76 and 0.46 <= pcas <= 0.64
             measurements = {
-                "dc_gain_db": 55.0 if passing else 24.0,
-                "unity_gain_bandwidth": 4.0e7 if passing else 8.0e6,
-                "phase_margin": 62.0 if passing else 35.0,
-                "output_swing": 0.35 if passing else 0.12,
+                "dc_gain_db": 70.0 if passing else 24.0,
+                "unity_gain_bandwidth": 1.2e8 if passing else 8.0e6,
+                "phase_margin": 80.0 if passing else 35.0,
+                "slew_rate": 1.0e8 if passing else 1.0e6,
+                "output_swing": 0.90 if passing else 0.12,
                 "total_power": 1.2e-4,
             }
             margin = 0.16 if passing else 0.02
@@ -418,8 +434,9 @@ def test_single_stage_ota_postprocess_selects_ngspice_guided_bias(tmp_path):
                 measurements = {
                     "dc_gain_db": 48.0,
                     "unity_gain_bandwidth": 1.2e8,
-                    "phase_margin": 70.0,
-                    "output_swing": 0.7,
+                    "phase_margin": 80.0,
+                    "slew_rate": 8.0e7,
+                    "output_swing": 0.75,
                     "total_power": 1.0e-4,
                 }
                 margin = 0.2
@@ -428,6 +445,7 @@ def test_single_stage_ota_postprocess_selects_ngspice_guided_bias(tmp_path):
                     "dc_gain_db": 24.0,
                     "unity_gain_bandwidth": 2.0e7,
                     "phase_margin": 80.0,
+                    "slew_rate": 2.0e7,
                     "output_swing": 0.6,
                     "total_power": 5.0e-6,
                 }
@@ -468,7 +486,7 @@ def test_single_stage_ota_postprocess_keeps_bandwidth_guardrail():
             "spec_pass": False,
             "op_required_margin": 0.10,
             "measurements": {
-                "dc_gain_db": 30.0,
+                "dc_gain_db": 37.0,
                 "unity_gain_bandwidth": 6.0e5,
                 "phase_margin": 88.0,
                 "total_power": 1.0e-7,
@@ -487,7 +505,7 @@ def test_single_stage_ota_postprocess_keeps_bandwidth_guardrail():
             "spec_pass": False,
             "op_required_margin": 0.09,
             "measurements": {
-                "dc_gain_db": 28.5,
+                "dc_gain_db": 35.5,
                 "unity_gain_bandwidth": 6.0e7,
                 "phase_margin": 82.0,
                 "total_power": 8.0e-6,
@@ -530,11 +548,11 @@ def test_artifact_writer_emits_result_json(tmp_path):
         success=True,
         return_code=0,
         measurements={
-            "dc_gain_db": 61.0,
+            "dc_gain_db": 80.0,
             "unity_gain_bandwidth": 5.1e8,
             "phase_margin": 65.0,
             "slew_rate": 6.0e7,
-            "output_swing": 0.7,
+            "output_swing": 0.85,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "total_power": 2e-4,
@@ -542,11 +560,11 @@ def test_artifact_writer_emits_result_json(tmp_path):
     )
     best_meta = {
         "performance": {
-            "dc_gain": 60.0,
+            "dc_gain": 80.0,
             "unity_gain_bandwidth": 5.0e8,
             "phase_margin": 64.0,
             "slew_rate": 5.5e7,
-            "output_swing": 0.7,
+            "output_swing": 0.85,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "power": 2.1e-4,
@@ -601,11 +619,11 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
         success=True,
         return_code=0,
         measurements={
-            "dc_gain_db": 62.0,
+            "dc_gain_db": 80.0,
             "unity_gain_bandwidth": 9.0e7,
             "phase_margin": 18.0,
             "slew_rate": 5.0e7,
-            "output_swing": 0.7,
+            "output_swing": 0.85,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "total_power": 2.0e-4,
@@ -613,11 +631,11 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
     )
     best_meta = {
         "performance": {
-            "dc_gain": 62.0,
+            "dc_gain": 80.0,
             "unity_gain_bandwidth": 9.0e7,
             "phase_margin": 18.0,
             "slew_rate": 5.0e7,
-            "output_swing": 0.7,
+            "output_swing": 0.85,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "power": 2.0e-4,
@@ -756,7 +774,7 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
         return_code=0,
         measurements={
             "dc_gain_db": 20.0,
-            "unity_gain_bandwidth": 1.0e7,
+            "unity_gain_bandwidth": 1.0e6,
             "phase_margin": 75.0,
             "output_swing": 0.82,
             "icmr_min": 0.63,
@@ -767,7 +785,7 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
     best_meta = {
         "performance": {
             "dc_gain": 20.0,
-            "unity_gain_bandwidth": 1.0e7,
+                "unity_gain_bandwidth": 1.0e6,
             "phase_margin": 75.0,
             "output_swing": 0.82,
             "icmr_min": 0.63,
@@ -1724,7 +1742,7 @@ def test_postprocess_fallback_decision_uses_near_feasible_estimate():
     )
     far = runner._postprocess_decision(
         state,
-        {"performance": {"dc_gain": 20.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
+            {"performance": {"dc_gain": 10.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
         spec_model,
     )
 
@@ -2143,10 +2161,11 @@ def test_compensation_tune_stops_after_passing_candidate(tmp_path):
                 success=True,
                 return_code=0,
                 measurements={
-                    "dc_gain_db": 55.0,
+                    "dc_gain_db": 80.0,
                     "unity_gain_bandwidth": 1.2e8,
-                    "phase_margin": 60.0,
-                    "output_swing": 0.7,
+                    "phase_margin": 63.0,
+                    "slew_rate": 5.0e7,
+                    "output_swing": 0.85,
                     "icmr_min": 0.7,
                     "icmr_max": 0.9,
                     "total_power": 2e-4,

@@ -26,7 +26,7 @@ simulation:
   ac_start: 1.0
   ac_stop: 10000000000.0
   ac_points: 50
-  cload: 2.0e-13
+  cload: 1.0e-12
   bias_voltage: 0.6
 tools:
   ngspice_bin: ngspice

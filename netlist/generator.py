@@ -9,6 +9,12 @@ from layout.realization import LayoutRealization, realize_transistor_layout
 from schemas.design_state import DesignState
 
 
+IHP_MIM_CAP_MODEL = "cap_cmim"
+IHP_MIM_CAP_CORNER = "cap_typ"
+IHP_MIM_CAP_DENSITY_F_PER_UM2 = 1.5e-15
+IHP_MIM_CAP_MIN_SIDE_UM = 7.0
+
+
 class NetlistGenerator:
     """AnalogRF-IR internal documentation."""
 
@@ -67,6 +73,9 @@ class NetlistGenerator:
             lines.append(f'.lib "{model_path}" {corner}')
         else:
             lines.append(f'.include "{model_path}"')
+        mim_cap_path = self._ihp_mim_cap_corner_path() if self._should_use_ihp_mim_compensation() else None
+        if mim_cap_path is not None:
+            lines.append(f'.lib "{mim_cap_path}" {IHP_MIM_CAP_CORNER}')
         lines.extend([f".temp {self.state.simulation.temperature}", ""])
         return lines
 
@@ -221,6 +230,38 @@ class NetlistGenerator:
             return f"{val:.4g}"
         return f"{val:.6g}"
 
+    def _is_ihp_sg13g2(self) -> bool:
+        process_name = (getattr(self._proc, "process_name", "") or "").lower()
+        model_lib = (getattr(self._proc, "model_lib", "") or "").lower()
+        return "ihp" in process_name or "sg13g2" in process_name or "ihp-sg13g2" in model_lib
+
+    def _ihp_mim_cap_corner_path(self) -> Optional[Path]:
+        model_name = self._proc.model_lib or ""
+        if not model_name:
+            return None
+        model_path = self._resolve_model_path(model_name)
+        candidate = model_path.with_name("cornerCAP.lib")
+        return candidate if candidate.exists() else None
+
+    def _should_use_ihp_mim_compensation(self) -> bool:
+        cc = self._get_global_param("Cc")
+        return bool(cc is not None and cc > 0 and self._is_ihp_sg13g2() and self._ihp_mim_cap_corner_path())
+
+    @staticmethod
+    def _fmt_um(val_um: float) -> str:
+        text = f"{val_um:.3f}".rstrip("0").rstrip(".")
+        return f"{text}u"
+
+    @staticmethod
+    def _ihp_mim_cap_side_um(cap_f: float) -> float:
+        area_um2 = max(cap_f / IHP_MIM_CAP_DENSITY_F_PER_UM2, IHP_MIM_CAP_MIN_SIDE_UM**2)
+        return math.sqrt(area_um2)
+
+    def _mim_cap_instance_line(self, instance_id: str, plus: str, minus: str, cap_f: float) -> str:
+        side_um = self._ihp_mim_cap_side_um(cap_f)
+        side = self._fmt_um(side_um)
+        return f"X{instance_id} {plus} {minus} {IHP_MIM_CAP_MODEL} w={side} l={side}"
+
     def _gen_passives(self) -> List[str]:
         """Generate compensation components driven by global variables."""
         cc = self._get_global_param("Cc")
@@ -245,12 +286,25 @@ class NetlistGenerator:
 
         rz = self._get_global_param("Rz", 0.0) or 0.0
         lines = ["* -- Compensation --"]
+        use_mim = self._should_use_ihp_mim_compensation()
+        if use_mim:
+            side = self._fmt_um(self._ihp_mim_cap_side_um(cc))
+            lines.append(
+                f"* Cc implemented as IHP SG13G2 MIM target={self._fmt_si(cc, 'F')} "
+                f"model={IHP_MIM_CAP_MODEL} w={side} l={side}"
+            )
         if rz > 1e-9:
             mid = "ncc"
             lines.append(f"Rz {comp_node} {mid} {self._fmt_si(rz, 'Ohm')}")
-            lines.append(f"Cc {mid} {out} {self._fmt_si(cc, 'F')}")
+            if use_mim:
+                lines.append(self._mim_cap_instance_line("Cc", mid, out, cc))
+            else:
+                lines.append(f"Cc {mid} {out} {self._fmt_si(cc, 'F')}")
         else:
-            lines.append(f"Cc {comp_node} {out} {self._fmt_si(cc, 'F')}")
+            if use_mim:
+                lines.append(self._mim_cap_instance_line("Cc", comp_node, out, cc))
+            else:
+                lines.append(f"Cc {comp_node} {out} {self._fmt_si(cc, 'F')}")
         lines.append("")
         return lines
 

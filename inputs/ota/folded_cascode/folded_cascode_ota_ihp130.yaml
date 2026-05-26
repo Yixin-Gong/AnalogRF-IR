@@ -33,12 +33,12 @@ topology:
     - {id: M7, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: ncas_out, gate: vbias_ncas, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 45, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 2.0e+07, unit: Hz, priority: 1}
-  phase_margin:         {min: 45, unit: deg, priority: 1}
-  slew_rate:            {min: 8.0e+06, unit: V/s, priority: 2}
-  output_swing:         {min: 3.0e-01, unit: V, priority: 1}
-  power:                {max: 5.0e-04, unit: W, priority: 2}
+  dc_gain:              {min: 32, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 5.0e+07, unit: Hz, priority: 1}
+  phase_margin:         {min: 36, unit: deg, priority: 1}
+  slew_rate:            {min: 3.7e+07, unit: V/s, priority: 2}
+  output_swing:         {min: 5.5e-01, unit: V, priority: 1}
+  power:                {max: 6.0e-04, unit: W, priority: 2}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 8, max: 22}, initial: 15, symmetry_label: sym_M1_M2}

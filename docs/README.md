@@ -157,11 +157,17 @@ python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
 The current IHP 130 nm OTA ablation matrix is defined in
-`configs/ablation_ihp130_ota.yaml`. It compares all bundled OTA examples:
-two-stage Miller, five-transistor, current-mirror, telescopic, folded-cascode,
-and source-follower-boosted OTAs across optimizer-only,
-optimizer-plus-postprocess, deterministic diagnosis, and full LLM diagnosis
-methods:
+`configs/ablation_ihp130_ota.yaml`. It compares five canonical OTA examples:
+five-transistor, current-mirror, telescopic-cascode, folded-cascode, and
+two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
+deterministic diagnosis, and full LLM diagnosis methods.
+
+The default OTA schemas use calibrated IHP 130 nm regression targets for method
+comparison under `simulation.cload = 1 pF`: 24.5 dB / 2.3 MHz for the 5T OTA,
+26 dB / 1 MHz for the current-mirror OTA, 42 dB / 0.2 MHz for the telescopic
+OTA, 32 dB / 50 MHz for the folded-cascode OTA, and 46 dB / 12 MHz for the
+two-stage Miller OTA. These are high-impedance capacitive-load targets; they
+are not low-resistance, pad, cable, or 50 ohm load targets.
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -179,6 +185,8 @@ Recent evaluation snapshots:
 ![Spec achievement heatmap across all bundled OTAs](assets/ablation_spec_achievement_heatmap.png)
 
 ![Gain-bandwidth-power tradeoff across OTA methods](assets/ablation_gain_bandwidth_power.png)
+
+![Method traceability across LLM, postprocess, and ngspice](assets/ablation_method_traceability.png)
 
 ![Measured progressive Pareto frontier for the IHP130 current-mirror OTA](assets/progressive_pareto_current_mirror.png)
 

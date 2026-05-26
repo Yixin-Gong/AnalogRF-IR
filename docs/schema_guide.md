@@ -89,6 +89,9 @@ output-stage bias mirror. For this family:
 
 - Use explicit symmetry labels for matched pairs and mirrors.
 - Declare `Cc` and `Rz` as globals only when the topology has Miller compensation.
+- In IHP SG13G2 netlists, `Cc` is realized as the `cap_cmim` MIM capacitor
+  model from `cornerCAP.lib`; the optimizer still works on the scalar
+  capacitance value.
 - Keep target priorities realistic for compact optimization before ngspice signoff.
 - Use the feasibility checker before expensive searches.
 - Treat postprocess as an optional repair layer. Causal diagnosis and schema

@@ -29,12 +29,12 @@ topology:
     - {id: M5, role: tail_current_source, stage: bias, type: nmos, connections: {drain: tail, gate: vbias, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 28, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 1.0e+07, unit: Hz, priority: 1}
-  phase_margin:         {min: 45, unit: deg, priority: 1}
-  slew_rate:            {min: 8.0e+06, unit: V/s, priority: 2}
-  output_swing:         {min: 4.0e-01, unit: V, priority: 1}
-  power:                {max: 4.0e-04, unit: W, priority: 2}
+  dc_gain:              {min: 26, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 1.0e+06, unit: Hz, priority: 1}
+  phase_margin:         {min: 75, unit: deg, priority: 1}
+  slew_rate:            {min: 5.0e+05, unit: V/s, priority: 2}
+  output_swing:         {min: 6.0e-01, unit: V, priority: 1}
+  power:                {max: 3.0e-04, unit: W, priority: 2}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 10, max: 24}, initial: 16, symmetry_label: sym_M1_M2}

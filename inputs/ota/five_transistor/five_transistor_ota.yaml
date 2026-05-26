@@ -46,10 +46,12 @@ topology:
       connections: {drain: tail, gate: vbias, source: gnd, body: gnd}
 
 targets:
-  dc_gain:              {min: 28, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 4.0e+07, unit: Hz, priority: 1}
-  phase_margin:         {min: 60, unit: deg, priority: 1}
-  power:                {max: 3.0e-04, unit: W, priority: 9}
+  dc_gain:              {min: 24.5, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 2.3e+06, unit: Hz, priority: 1}
+  phase_margin:         {min: 75, unit: deg, priority: 1}
+  slew_rate:            {min: 1.5e+06, unit: V/s, priority: 2}
+  output_swing:         {min: 6.9e-01, unit: V, priority: 1}
+  power:                {max: 2.0e-04, unit: W, priority: 9}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 12, max: 25}, initial: 15, symmetry_label: sym_M1_M2}
@@ -86,10 +88,14 @@ loss_terms:
   - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 4.0, description: "DC gain shortfall"}
   - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 2.0, description: "BW shortfall"}
   - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 0.5, description: "PM penalty"}
+  - {id: sr_deficit,   formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 0.8, description: "Slew-rate shortfall"}
+  - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 1.0, description: "Output-swing shortfall"}
   - {id: power_ratio,  formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.3, description: "Power ratio"}
 
 evaluations:
   - {name: dc_gain, type: ac_gain, probe: vout, target_ref: dc_gain}
   - {name: unity_gain_bandwidth, type: ugbw, probe: vout, target_ref: unity_gain_bandwidth}
   - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
+  - {name: slew_rate, type: slew_rate, probe: vout, target_ref: slew_rate}
+  - {name: output_swing, type: output_swing, probe: vout, target_ref: output_swing}
   - {name: total_power, type: dc_power, target_ref: power}

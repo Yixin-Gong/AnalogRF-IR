@@ -168,14 +168,20 @@ python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
 The current IHP 130 nm OTA ablation matrix is defined in
-`configs/ablation_ihp130_ota.yaml`. It compares all bundled OTA examples:
-two-stage Miller, five-transistor, current-mirror, telescopic, folded-cascode,
-and source-follower-boosted OTAs across optimizer-only,
-optimizer-plus-postprocess, deterministic diagnosis, and full LLM diagnosis
-methods:
+`configs/ablation_ihp130_ota.yaml`. It compares five canonical OTA examples:
+five-transistor, current-mirror, telescopic-cascode, folded-cascode, and
+two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
+deterministic diagnosis, and full LLM diagnosis methods.
 
-The default OTA schemas now use stress targets for method comparison; the
-two-stage Miller OTA is set to 55 dB DC gain and 100 MHz unity-gain bandwidth.
+The default OTA schemas use calibrated IHP 130 nm regression targets for method
+comparison under `simulation.cload = 1 pF`: 24.5 dB / 2.3 MHz for the 5T OTA,
+26 dB / 1 MHz for the current-mirror OTA, 42 dB / 0.2 MHz for the telescopic
+OTA, 32 dB / 50 MHz for the folded-cascode OTA, and 46 dB / 12 MHz for the
+two-stage Miller OTA. These are high-impedance capacitive-load targets; they
+are not low-resistance, pad, cable, or 50 ohm load targets.
+For the IHP two-stage Miller OTA, the feedback compensation value `Cc` is
+realized in generated ngspice netlists with the IHP SG13G2 `cap_cmim` MIM
+capacitor model and `cornerCAP.lib` `cap_typ` corner.
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -191,9 +197,11 @@ Recent evaluation snapshots:
 
 ![Ablation success rate by method and OTA topology](docs/assets/ablation_success_rate.png)
 
-![Spec achievement heatmap across all bundled OTAs](docs/assets/ablation_spec_achievement_heatmap.png)
+![Spec achievement heatmap across canonical OTAs](docs/assets/ablation_spec_achievement_heatmap.png)
 
 ![Gain-bandwidth-power tradeoff across OTA methods](docs/assets/ablation_gain_bandwidth_power.png)
+
+![Method traceability across LLM, postprocess, and ngspice](docs/assets/ablation_method_traceability.png)
 
 ![Measured progressive Pareto frontier for the IHP130 current-mirror OTA](docs/assets/progressive_pareto_current_mirror.png)
 

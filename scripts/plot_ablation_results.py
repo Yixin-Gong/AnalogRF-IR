@@ -111,6 +111,7 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
         topology = _topology_name(schema, schema_path)
         measurements = result.get("measurements", {}) or {}
         status = result.get("status", {}) or {}
+        target_status = _evaluate_targets(measurements, schema.get("targets", {}) or {})
         llm = _llm_usage(runs_dir)
         postprocess_events = _postprocess_events(runs_dir)
         record = {
@@ -126,10 +127,12 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
             "return_code": job.get("return_code", ""),
             "result_json": str(result_path),
             "runs_dir": str(runs_dir),
-            "spec_pass": bool(status.get("spec_pass", False)),
+            "spec_pass": target_status["spec_pass"],
+            "artifact_spec_pass": bool(status.get("spec_pass", False)),
             "ngspice_success": bool(status.get("ngspice_success", False)),
             "best_loss": _to_float(status.get("best_loss")),
-            "failed_targets": "|".join(str(item) for item in status.get("failed_targets", []) or []),
+            "failed_targets": "|".join(target_status["failed_targets"]),
+            "artifact_failed_targets": "|".join(str(item) for item in status.get("failed_targets", []) or []),
             "llm_used": llm["used"],
             "llm_status": llm["status"],
             "llm_reason": llm["reason"],
@@ -144,6 +147,22 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
         record["postprocess_decision"] = decision.get("reason", "")
         records.append(record)
     return pd.DataFrame.from_records(records)
+
+
+def _evaluate_targets(measurements: dict[str, Any], targets: dict[str, Any]) -> dict[str, Any]:
+    failed: list[str] = []
+    for target_name, target in targets.items():
+        metric_name = METRIC_MAP.get(target_name)
+        if not metric_name or not isinstance(target, dict):
+            continue
+        measured = _to_float(measurements.get(metric_name))
+        target_min = _to_float(target.get("min"))
+        target_max = _to_float(target.get("max"))
+        if target_min is not None and (measured is None or measured < target_min):
+            failed.append(str(target_name))
+        if target_max is not None and (measured is None or measured > target_max):
+            failed.append(str(target_name))
+    return {"spec_pass": not failed, "failed_targets": failed}
 
 
 def collect_spec_records(runs: pd.DataFrame) -> pd.DataFrame:
@@ -346,16 +365,16 @@ def plot_method_traceability(runs: pd.DataFrame, out_dir: Path, formats: list[st
             "ngspice_success_rate": "ngspice ok",
         }
     )
-    fig, ax = plt.subplots(figsize=(10.0, 4.8))
+    fig, ax = plt.subplots(figsize=(10.5, 5.8))
     sns.barplot(data=long, x="method", y="rate", hue="trace", palette=["#4c78a8", "#f58518", "#54a24b"], ax=ax)
     ax.set_ylim(0, 1.02)
     ax.set_ylabel("Rate")
     ax.set_xlabel("")
     ax.set_title("Method Traceability: LLM, Postprocess, and Simulation")
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda value, _pos: f"{value:.0%}"))
-    ax.tick_params(axis="x", rotation=25)
-    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.24))
-    fig.tight_layout(rect=(0, 0.12, 1, 1))
+    ax.tick_params(axis="x", rotation=20)
+    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.30))
+    fig.tight_layout(rect=(0, 0.22, 1, 1))
     _save(fig, out_dir / "method_traceability", formats, dpi)
 
 
@@ -383,15 +402,11 @@ def _postprocess_events(runs_dir: Path) -> list[dict[str, Any]]:
 def _llm_usage(runs_dir: Path) -> dict[str, Any]:
     statuses: list[str] = []
     reasons: list[str] = []
-    diagnostic_paths = list(sorted(runs_dir.rglob("agent_diagnostics.json")))
-    diagnostic_paths.extend(sorted(runs_dir.rglob("design_state.yaml")))
-    for diag_path in diagnostic_paths:
-        payload = _load_yaml(diag_path) if diag_path.suffix in {".yaml", ".yml"} else _load_json(diag_path)
-        for node in _walk_dicts(payload):
-            planner = node.get("llm_planner")
-            if not isinstance(planner, dict):
-                continue
-            statuses.append(str(planner.get("status", "")))
+    for state_path in sorted(runs_dir.rglob("design_state.yaml")):
+        for planner in _llm_planner_blocks(state_path):
+            status = str(planner.get("status", ""))
+            if status:
+                statuses.append(status)
             reason = str(planner.get("reason", ""))
             if reason:
                 reasons.append(reason)
@@ -402,14 +417,35 @@ def _llm_usage(runs_dir: Path) -> dict[str, Any]:
     }
 
 
-def _walk_dicts(value: Any):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk_dicts(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk_dicts(child)
+def _llm_planner_blocks(path: Path) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return blocks
+    for idx, line in enumerate(lines):
+        if line.strip() != "llm_planner:":
+            continue
+        base_indent = len(line) - len(line.lstrip(" "))
+        block: dict[str, str] = {}
+        for child in lines[idx + 1:]:
+            if not child.strip():
+                continue
+            indent = len(child) - len(child.lstrip(" "))
+            if indent <= base_indent:
+                break
+            stripped = child.strip()
+            if stripped.startswith("status:"):
+                block["status"] = _yaml_scalar_text(stripped.partition(":")[2])
+            elif stripped.startswith("reason:"):
+                block["reason"] = _yaml_scalar_text(stripped.partition(":")[2])
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _yaml_scalar_text(value: str) -> str:
+    return value.strip().strip("'\"")
 
 
 def _topology_name(schema: dict[str, Any], schema_path: str) -> str:
