@@ -27,6 +27,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Limit generated jobs after filtering")
     parser.add_argument("--output-dir", default="", help="Override ablation output directory")
     parser.add_argument("--python", default=sys.executable, help="Python executable used to launch main.py")
+    parser.add_argument(
+        "--local-config",
+        action="append",
+        default=[],
+        help="Local YAML overrides merged into generated job configs; may be repeated",
+    )
+    parser.add_argument(
+        "--llm-api-key-file",
+        default="",
+        help="Path to a file containing the LLM API key, injected into generated job configs",
+    )
     parser.add_argument("--run", action="store_true", help="Execute jobs; default is dry-run")
     parser.add_argument("--keep-going", action="store_true", help="Continue after a failing job")
     return parser.parse_args(argv)
@@ -37,7 +48,17 @@ def main(argv: list[str] | None = None) -> int:
     plan = _load_yaml(ROOT / args.config if not Path(args.config).is_absolute() else Path(args.config))
     output_dir = ROOT / (args.output_dir or plan.get("output_dir", "runs/ablations"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    jobs = build_jobs(plan, output_dir=output_dir, selected_cases=args.case, selected_schemas=args.schema, selected_seeds=args.seed)
+    local_overrides = [_load_yaml(_resolve_project_path(path)) for path in args.local_config]
+    llm_api_key_file = _normalize_optional_path(args.llm_api_key_file)
+    jobs = build_jobs(
+        plan,
+        output_dir=output_dir,
+        selected_cases=args.case,
+        selected_schemas=args.schema,
+        selected_seeds=args.seed,
+        local_overrides=local_overrides,
+        llm_api_key_file=llm_api_key_file,
+    )
     if args.limit and args.limit > 0:
         jobs = jobs[: args.limit]
     manifest = {
@@ -88,10 +109,17 @@ def build_jobs(
     selected_cases: list[str],
     selected_schemas: list[str],
     selected_seeds: list[int],
+    local_overrides: list[dict[str, Any]] | None = None,
+    llm_api_key_file: str = "",
 ) -> list[dict[str, Any]]:
     base_config_path = ROOT / plan.get("base_config", "configs/default.yaml")
     base_config = _load_yaml(base_config_path)
     base_overrides = plan.get("base_overrides", {}) or {}
+    runtime_overrides: dict[str, Any] = {}
+    for override in local_overrides or []:
+        runtime_overrides = deep_merge_config(runtime_overrides, override)
+    if llm_api_key_file:
+        runtime_overrides = deep_merge_config(runtime_overrides, {"llm": {"api_key_file": llm_api_key_file}})
     schemas = selected_schemas or list(plan.get("schemas", []) or [])
     seeds = selected_seeds or list(plan.get("seeds", []) or [None])
     case_filter = set(selected_cases)
@@ -106,6 +134,7 @@ def build_jobs(
                 run_name = _safe_name(f"{case_name}__{schema_stem}__seed_{seed if seed is not None else 'none'}")
                 runs_dir = output_dir / run_name
                 config = deep_merge_config(base_config, base_overrides)
+                config = deep_merge_config(config, runtime_overrides)
                 config = deep_merge_config(config, case.get("overrides", {}) or {})
                 config = deep_merge_config(
                     config,
@@ -177,6 +206,20 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
     return data
+
+
+def _resolve_project_path(path_like: str) -> Path:
+    path = Path(path_like).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def _normalize_optional_path(path_like: str) -> str:
+    if not path_like:
+        return ""
+    path = _resolve_project_path(path_like)
+    return str(path)
 
 
 def _safe_name(value: str) -> str:

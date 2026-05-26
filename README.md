@@ -18,7 +18,7 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
 - Structure-aware causal diagnosis with typed causal edges, typed ASIR dependencies, local intervention modeling, and evidence-gated guarded actions.
-- Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including publication-ready plotting outputs.
+- Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including clean plotting outputs.
 - Compact schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
 
 ## Repository Layout
@@ -120,16 +120,27 @@ python -m pytest -q
 
 The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the compact source of truth and only applies edits through schema-level tool commands.
 
-Set a DeepSeek API key before running LLM-guided rounds:
+Set a DeepSeek API key before running LLM-guided rounds. Environment
+variables work, but the preferred local setup is a key file referenced by a
+gitignored YAML config:
 
 ```bash
 export DEEPSEEK_API_KEY="..."
+```
+
+```bash
+mkdir -p ~/.config/analogrf-ir
+printf '%s\n' 'YOUR_DEEPSEEK_KEY' > ~/.config/analogrf-ir/deepseek.key
+
+cp configs/local/llm.example.yaml configs/local/llm.yaml
+# Edit configs/local/llm.yaml if your key file lives elsewhere.
 ```
 
 Run a DeepSeek-guided two-stage OTA flow:
 
 ```bash
 python main.py \
+  --config configs/local/llm.yaml \
   --env environment_ihp_sg13g2.yaml \
   --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
   --topology two_stage \
@@ -166,7 +177,8 @@ methods:
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --run --keep-going
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --local-config configs/local/llm.yaml --run --keep-going
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --llm-api-key-file ~/.config/analogrf-ir/deepseek.key --run --keep-going
 python scripts/plot_ablation_results.py \
   --manifest runs/ablations_ihp130_ota/manifest.json \
   --out-dir runs/ablations_ihp130_ota/figures

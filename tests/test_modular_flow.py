@@ -1629,6 +1629,54 @@ def test_ablation_plan_builds_case_seed_schema_jobs(tmp_path):
     assert jobs[0]["config"]["output"]["runs_dir"].startswith(str(tmp_path))
 
 
+def test_ablation_plan_merges_local_config_and_key_file(tmp_path):
+    plan = {
+        "base_config": "configs/default.yaml",
+        "schemas": ["inputs/ota/five_transistor/five_transistor_ota.yaml"],
+        "seeds": [3],
+        "base_overrides": {"llm": {"model": "deepseek-v4-flash"}},
+        "cases": [
+            {
+                "name": "deterministic_case",
+                "overrides": {"agent": {"rounds": 2}, "llm": {"provider": "deterministic"}},
+            }
+        ],
+    }
+
+    jobs = build_jobs(
+        plan,
+        output_dir=tmp_path,
+        selected_cases=[],
+        selected_schemas=[],
+        selected_seeds=[],
+        local_overrides=[{"llm": {"provider": "deepseek", "timeout": 180}}],
+        llm_api_key_file="/home/user/.config/analogrf-ir/deepseek.key",
+    )
+
+    assert jobs[0]["config"]["llm"]["provider"] == "deterministic"
+    assert jobs[0]["config"]["llm"]["timeout"] == 180
+    assert jobs[0]["config"]["llm"]["api_key_file"] == "/home/user/.config/analogrf-ir/deepseek.key"
+
+
+def test_configure_llm_api_key_expands_user_path(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    key_file = home / ".config" / "analogrf-ir" / "deepseek.key"
+    key_file.parent.mkdir(parents=True)
+    key_file.write_text("secret-from-file\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("ANALOGRF_IR_TEST_KEY", raising=False)
+    args = argparse.Namespace(
+        llm_api_key="",
+        llm_api_key_file="~/.config/analogrf-ir/deepseek.key",
+        llm_api_key_stdin=False,
+        llm_api_key_env="ANALOGRF_IR_TEST_KEY",
+    )
+
+    _configure_llm_api_key(args)
+
+    assert os.environ["ANALOGRF_IR_TEST_KEY"] == "secret-from-file"
+
+
 def test_adaptive_strategy_cli_and_short_reoptimization_budget():
     args = _parse_args(
         [

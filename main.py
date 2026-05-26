@@ -170,7 +170,7 @@ def _configure_llm_api_key(args) -> None:
     if args.llm_api_key:
         key = args.llm_api_key
     elif args.llm_api_key_file:
-        key = Path(args.llm_api_key_file).read_text(encoding="utf-8")
+        key = Path(args.llm_api_key_file).expanduser().read_text(encoding="utf-8")
     elif args.llm_api_key_stdin:
         key = sys.stdin.read()
 

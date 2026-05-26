@@ -1,0 +1,6 @@
+schema_version: analogrf_ir.cli_config.v0_1
+
+llm:
+  api_key_file: ~/.config/analogrf-ir/deepseek.key
+  timeout: 180
+  max_tokens: 12000
