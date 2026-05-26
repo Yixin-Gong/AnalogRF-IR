@@ -13,7 +13,7 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 - gm/ID-based compact sizing with NSGA-II exploration.
 - Hard validation for schema write policy, symmetry consistency, operating-point safety, and layout-realizable W/L constraints.
 - Layout realization for oversized devices through finger folding, parallel devices, and series length segmentation.
-- ngspice-backed AC, DC, transient, operating-point, slew-rate, output-swing, ICMR common-mode sweep, headroom, and power measurements.
+- ngspice-backed AC, DC, transient, operating-point, slew-rate, output-swing, headroom, and power measurements.
 - Optional postprocess repair for OP validation, bias balancing, and compensation tuning.
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
@@ -156,10 +156,11 @@ line:
 python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
-The current paper-facing IHP 130 nm OTA ablation matrix is defined in
-`configs/ablation_ihp130_ota.yaml`. It compares current-mirror, telescopic,
-and folded-cascode OTAs across optimizer-only, postprocess-control,
-deterministic diagnosis, LLM diagnosis, and LLM-plus-fallback methods:
+The current IHP 130 nm OTA ablation matrix is defined in
+`configs/ablation_ihp130_ota.yaml`. It compares two-stage Miller,
+five-transistor, current-mirror, telescopic, and folded-cascode OTAs across
+optimizer-only, optimizer-plus-postprocess, deterministic diagnosis, and full
+LLM diagnosis methods:
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -169,6 +170,14 @@ python scripts/plot_ablation_results.py \
   --manifest runs/ablations_ihp130_ota/manifest.json \
   --out-dir runs/ablations_ihp130_ota/figures
 ```
+
+Recent evaluation snapshots:
+
+![Ablation success rate by method and OTA topology](assets/ablation_success_rate.png)
+
+![Gain-bandwidth-power tradeoff across OTA methods](assets/ablation_gain_bandwidth_power.png)
+
+![Measured progressive Pareto frontier for the IHP130 current-mirror OTA](assets/progressive_pareto_current_mirror.png)
 
 Progressive target tightening can be used after a baseline passes to map a
 measured ngspice Pareto frontier. The script materializes one schema per ladder
@@ -316,7 +325,7 @@ When adding a new circuit family:
 ## Current Limitations
 
 - Compact models are optimization guidance, not signoff results.
-- Output swing is extracted from OP/headroom limits; ICMR targets are checked by an explicit ngspice common-mode OP sweep that records the valid range and headroom margin.
+- Output swing is extracted from OP/headroom limits; ICMR is intentionally outside the default OTA optimization and validation targets.
 - Comparator delay, offset, kickback, noise, energy, and metastability require dedicated transient, noise, and Monte Carlo testbenches.
 - RF-specific flows still need S-parameter, noise figure, compression, matching, linearity, and stability extensions.
 - LLM-guided diagnosis is experimental and should be treated as a planner/explainer layer over simulator-backed evidence.
@@ -324,7 +333,7 @@ When adding a new circuit family:
 ## Roadmap
 
 - Expand constrained combo-action optimization with more topology-aware OP and balance moves.
-- Complete paper-scale ablations across topology, method, seed, spec target, and postprocess policy.
+- Expand the project evaluation matrix across topology, method, seed, spec target, and postprocess policy.
 - More complete comparator and RF signoff testbenches.
 - Tighter reproducibility metadata for process, simulator, model, and planner configuration.
 - Additional physical-layout constraints beyond first-order W/L realization.

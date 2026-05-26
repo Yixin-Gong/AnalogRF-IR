@@ -27,8 +27,6 @@ MEASUREMENT_KEYS = {
     "phase_margin": "phase_margin",
     "slew_rate": "slew_rate",
     "output_swing": "output_swing",
-    "icmr_min": "icmr_min",
-    "icmr_max": "icmr_max",
     "power": "total_power",
 }
 
@@ -55,7 +53,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--slew-step", type=float, default=1.20)
     parser.add_argument("--swing-step-v", type=float, default=0.025)
     parser.add_argument("--power-step", type=float, default=0.92)
-    parser.add_argument("--icmr-step-v", type=float, default=0.0)
     parser.add_argument("--run", action="store_true", help="Execute jobs; default is dry-run")
     parser.add_argument("--keep-going", action="store_true", help="Continue other ladders after a job process failure")
     return parser.parse_args(argv)
@@ -151,9 +148,6 @@ def tighten_schema_targets(schema: dict[str, Any], level: int, args: argparse.Na
     _scale_min(targets, "slew_rate", float(args.slew_step) ** level)
     _add_min(targets, "output_swing", level * float(args.swing_step_v))
     _scale_max(targets, "power", float(args.power_step) ** level)
-    if float(args.icmr_step_v) > 0.0:
-        _add_max(targets, "icmr_min", -level * float(args.icmr_step_v))
-        _add_min(targets, "icmr_max", level * float(args.icmr_step_v))
 
     metadata = out.setdefault("metadata", {})
     metadata["progressive_target_level"] = level
@@ -164,7 +158,6 @@ def tighten_schema_targets(schema: dict[str, Any], level: int, args: argparse.Na
         "slew_step": float(args.slew_step),
         "swing_step_v": float(args.swing_step_v),
         "power_step": float(args.power_step),
-        "icmr_step_v": float(args.icmr_step_v),
     }
     return out
 

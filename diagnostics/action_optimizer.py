@@ -322,21 +322,57 @@ def default_selected_actions_from_optimizer(
     selected = optimizer.get("selected_actions", []) or []
     allowed = set(allowed_priorities or ["primary"])
     out = []
-    for item in selected:
+    source_actions = selected or [
+        item
+        for item in optimizer.get("candidate_actions", []) or []
+        if (item.get("action_admissibility") or {}).get("passed")
+        or _optional_float(item.get("objective_delta")) is not None
+        and _optional_float(item.get("objective_delta")) < 0.0
+    ]
+    if not source_actions:
+        tuning = causal.get("attribution_guided_tuning", {}) or {}
+        source_actions = [
+            action
+            for failure in tuning.get("by_failure", []) or []
+            for action in failure.get("actions", []) or []
+            if _action_has_admissible_optimizer_math(action)
+        ]
+    seen_effect_keys: set[tuple[tuple[str, ...], str]] = set()
+    for item in source_actions:
         action_id = item.get("action_id")
         priority = item.get("priority", "primary")
         evidence_passed_guarded = priority == "guarded" and _passes_evidence_gate(item)
         if not action_id or (priority not in allowed and not evidence_passed_guarded):
             continue
+        effect_key = _candidate_effect_key(item)
+        if effect_key in seen_effect_keys:
+            continue
+        seen_effect_keys.add(effect_key)
         out.append(
             {
                 "action_id": action_id,
                 "decision": "apply",
-                "reason": item.get("selection_reason", "Selected by constrained local action optimizer."),
+                "reason": item.get(
+                    "selection_reason",
+                    "Selected because the formal optimizer candidate has objective_delta < 0.",
+                ),
                 "overrides": {},
             }
         )
     return out
+
+
+def _action_has_admissible_optimizer_math(action: dict[str, Any]) -> bool:
+    optimizer = action.get("optimizer", {}) or {}
+    admissibility = action.get("action_admissibility") or optimizer.get("action_admissibility") or {}
+    if admissibility.get("passed"):
+        return True
+    objective_delta = _optional_float(
+        action.get("objective_delta")
+        if action.get("objective_delta") is not None
+        else optimizer.get("objective_delta")
+    )
+    return objective_delta is not None and objective_delta < 0.0
 
 
 def _empty_intervention_model(

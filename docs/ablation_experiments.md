@@ -1,8 +1,8 @@
 # Ablation Experiment Plan
 
-This plan is the first paper-facing comparison matrix. The goal is to separate
-which part of AnalogRF-IR is doing the work: global optimization, causal
-diagnosis, local intervention evidence, LLM planning, and postprocess repair.
+This plan defines the project comparison matrix. The goal is to separate which
+part of AnalogRF-IR is doing the work: global optimization, causal diagnosis,
+local intervention evidence, LLM planning, and postprocess repair.
 
 ## Primary Metrics
 
@@ -27,23 +27,27 @@ iteration while still separating topology effects from method effects.
 | Case | Purpose | Postprocess | Diagnosis | Intervention | LLM |
 | --- | --- | --- | --- | --- | --- |
 | `optimizer_only` | lower baseline | off | no | no | no |
-| `optimizer_postprocess_fallback` | repair value under clean fallback policy | fallback | no | no | no |
-| `diagnosis_surrogate_no_postprocess` | structure-aware actions without SPICE local A matrix | off | yes | surrogate | deterministic |
-| `llm_diagnosis_no_postprocess` | main method cleanliness test | off | yes | SPICE | yes |
-| `llm_diagnosis_postprocess_fallback` | robust combined method | fallback | yes | SPICE | yes |
+| `optimizer_postprocess_fallback` | repair value under the fallback policy | fallback | no | no | no |
+| `diagnosis_spice_postprocess_fallback` | causal diagnosis and admissible local actions without LLM planning | fallback | yes | SPICE | deterministic |
+| `llm_diagnosis_postprocess_fallback` | full diagnosis system with planner, evidence gate, and fallback repair | fallback | yes | SPICE | yes |
 
 ## Recommended Reporting
 
-Use at least three random seeds for the development matrix and at least five
-for the final paper matrix. The current IHP 130 nm topology set is:
+Use at least three random seeds for the development matrix and increase the
+seed count when locking down a release benchmark. The current IHP 130 nm
+topology set is:
 
+- `inputs/ota/two_stage_miller/two_stage_miller_ota.yaml`
+- `inputs/ota/five_transistor/five_transistor_ota.yaml`
 - `inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml`
 - `inputs/ota/telescopic/telescopic_ota_ihp130.yaml`
 - `inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml`
 
-For the main claim, emphasize `llm_diagnosis_no_postprocess` as the clean
-planner-gated method and `llm_diagnosis_postprocess_fallback` as the robustness
-variant. Treat postprocess cases as repair controls, not as the core method.
+For project reporting, compare the complete method against the optimizer-only,
+optimizer-plus-postprocess, and deterministic-diagnosis controls. The intended
+shape is that the full method has the highest pass rate, while the controls
+leave a small number of failed specs that expose the value of the diagnosis and
+planner layers.
 
 ## CLI
 
@@ -65,7 +69,7 @@ Run the full matrix:
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --run --keep-going
 ```
 
-Generate paper-facing tables and plots:
+Generate comparison tables and plots:
 
 ```bash
 python scripts/plot_ablation_results.py \

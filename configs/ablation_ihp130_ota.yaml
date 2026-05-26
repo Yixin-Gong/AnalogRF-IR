@@ -4,9 +4,11 @@ description: IHP SG13G2 130 nm OTA topology-family ablation matrix.
 base_config: configs/default.yaml
 output_dir: runs/ablations_ihp130_ota
 schemas:
+  - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
   - inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml
   - inputs/ota/telescopic/telescopic_ota_ihp130.yaml
   - inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml
+  - inputs/ota/five_transistor/five_transistor_ota.yaml
 seeds: [1, 2, 3]
 
 base_overrides:
@@ -51,36 +53,23 @@ cases:
       postprocess:
         policy: 'fallback'
 
-  - name: diagnosis_surrogate_no_postprocess
+  - name: diagnosis_spice_postprocess_fallback
     family: diagnosis_control
-    description: Deterministic diagnosis-guided rounds over IHP130 topologies without LLM or postprocess.
+    description: Deterministic diagnosis-guided rounds with constrained local intervention evidence and fallback postprocess, but without LLM planning.
     overrides:
       agent:
-        rounds: 3
+        rounds: 2
       llm:
         provider: deterministic
-      intervention:
-        enable: false
-      postprocess:
-        policy: 'off'
-
-  - name: llm_diagnosis_no_postprocess
-    family: llm_control
-    description: LLM planner with constrained optimizer evidence on IHP130 topologies; postprocess disabled for main-method cleanliness.
-    overrides:
-      agent:
-        rounds: 3
-      llm:
-        provider: deepseek
       intervention:
         enable: true
         max_actions: 8
       postprocess:
-        policy: 'off'
+        policy: 'fallback'
 
   - name: llm_diagnosis_postprocess_fallback
     family: combined_method
-    description: Main LLM diagnosis flow plus topology-specific fallback repair for IHP130 OTA families.
+    description: Full LLM diagnosis flow with constrained local intervention evidence and topology-specific fallback repair for IHP130 OTA families.
     overrides:
       agent:
         rounds: 3

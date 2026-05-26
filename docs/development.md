@@ -150,7 +150,7 @@ keeps speed and accuracy tradeoffs visible.
 ## Current Limitations
 
 - Compact estimates guide optimization but are not signoff.
-- Output swing is an operating-point headroom extraction. ICMR is measured with an explicit ngspice common-mode operating-point sweep, including valid-point count and the limiting headroom margin.
+- Output swing is an operating-point headroom extraction. ICMR is not part of the default OTA optimization or validation target set.
 - Middlebrook return-ratio validation for compensated OTAs is still pending.
 - Comparator offset, noise, kickback, energy, and metastability need dedicated transient, noise, or Monte Carlo paths.
 - RF block support still needs profiles, schemas, estimators, simulator measurements, and validation rules.

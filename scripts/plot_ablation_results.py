@@ -24,8 +24,6 @@ METRIC_MAP = {
     "phase_margin": "phase_margin",
     "slew_rate": "slew_rate",
     "output_swing": "output_swing",
-    "icmr_min": "icmr_min",
-    "icmr_max": "icmr_max",
     "power": "total_power",
 }
 
@@ -35,8 +33,6 @@ SPEC_LABELS = {
     "phase_margin": "Phase margin",
     "slew_rate": "Slew rate",
     "output_swing": "Output swing",
-    "icmr_min": "ICMR min",
-    "icmr_max": "ICMR max",
     "power": "Power",
 }
 
@@ -46,6 +42,7 @@ CASE_LABELS = {
     "optimizer_postprocess_always": "Opt + always PP",
     "diagnosis_surrogate_no_postprocess": "Diagnosis",
     "diagnosis_spice_intervention_no_postprocess": "Diagnosis + SPICE",
+    "diagnosis_spice_postprocess_fallback": "Diagnosis + PP",
     "llm_diagnosis_no_postprocess": "LLM diagnosis",
     "llm_diagnosis_postprocess_fallback": "LLM + fallback PP",
     "llm_diagnosis_postprocess_always": "LLM + always PP",
@@ -268,8 +265,6 @@ def plot_metric_distributions(specs: pd.DataFrame, out_dir: Path, formats: list[
         "phase_margin",
         "slew_rate",
         "output_swing",
-        "icmr_min",
-        "icmr_max",
         "power",
     ]
     selected = specs[specs["spec"].isin(ordered_specs)].copy()
@@ -429,7 +424,7 @@ def _ordered(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _setup_style() -> None:
-    sns.set_theme(context="paper", style="whitegrid", font_scale=1.05)
+    sns.set_theme(context="notebook", style="whitegrid", font_scale=1.05)
     plt.rcParams.update(
         {
             "figure.facecolor": "white",

@@ -103,7 +103,7 @@ common-mode headroom as a central trade-off.
 Comparator schemas should include dynamic context such as clock, load, input
 step, and reset/regeneration behavior. Useful targets include delay,
 regeneration time, reset time, offset, input-referred noise, kickback, energy,
-PDP/EDP, input capacitance, output swing, ICMR, metastability margin, maximum
+PDP/EDP, input capacitance, output swing, metastability margin, maximum
 sample rate, area, and average dynamic power.
 
 The current comparator path is strongest for ASIR semantics and validation

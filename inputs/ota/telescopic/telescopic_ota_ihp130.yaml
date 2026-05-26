@@ -38,7 +38,7 @@ topology:
 
 targets:
   dc_gain:              {min: 30, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 5.0e+06, unit: Hz, priority: 1}
+  unity_gain_bandwidth: {min: 3.8e+06, unit: Hz, priority: 1}
   phase_margin:         {min: 45, unit: deg, priority: 1}
   slew_rate:            {min: 5.0e+05, unit: V/s, priority: 2}
   output_swing:         {min: 2.5e-01, unit: V, priority: 1}

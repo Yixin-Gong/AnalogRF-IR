@@ -91,7 +91,6 @@ def test_progressive_pareto_tightens_targets_without_mutating_base():
         slew_step=1.2,
         swing_step_v=0.025,
         power_step=0.9,
-        icmr_step_v=0.0,
     )
 
     tightened = tighten_schema_targets(schema, 2, args)
@@ -671,7 +670,7 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
         success=True,
         return_code=0,
         measurements={
-            "dc_gain_db": 34.0,
+            "dc_gain_db": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
@@ -682,7 +681,7 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     )
     best_meta = {
         "performance": {
-            "dc_gain": 34.0,
+            "dc_gain": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
@@ -756,8 +755,8 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
         success=True,
         return_code=0,
         measurements={
-            "dc_gain_db": 34.0,
-            "unity_gain_bandwidth": 5.0e7,
+            "dc_gain_db": 20.0,
+            "unity_gain_bandwidth": 1.0e7,
             "phase_margin": 75.0,
             "output_swing": 0.82,
             "icmr_min": 0.63,
@@ -767,8 +766,8 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
     )
     best_meta = {
         "performance": {
-            "dc_gain": 34.0,
-            "unity_gain_bandwidth": 5.0e7,
+            "dc_gain": 20.0,
+            "unity_gain_bandwidth": 1.0e7,
             "phase_margin": 75.0,
             "output_swing": 0.82,
             "icmr_min": 0.63,
@@ -880,7 +879,7 @@ def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
     spec_model = SpecRegistry().select(state)
     base_measurements = {
         "dc_gain_db": 58.0,
-        "unity_gain_bandwidth": 5.0e7,
+        "unity_gain_bandwidth": 2.0e6,
         "phase_margin": 60.0,
         "slew_rate": 3.0e7,
         "output_swing": 0.7,
@@ -1138,6 +1137,52 @@ def test_llm_apply_is_rejected_when_optimizer_math_gate_fails():
     assert m1_gm_id.initial == original
 
 
+def test_default_command_uses_negative_objective_optimizer_candidate():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    m1_gm_id = next(dv for dv in state.design_variables if dv.device == "M1" and dv.variable == "gm_id")
+    m2_gm_id = next(dv for dv in state.design_variables if dv.device == "M2" and dv.variable == "gm_id")
+    next_value = min(float(m1_gm_id.range.max), float(m1_gm_id.initial) + 1.0)
+    action = {
+        "action_id": "gain_01_M1_gm_id_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "action_class": "transconductance_bias",
+        "knob": "M1.gm_id",
+        "apply_to": ["M1.gm_id", "M2.gm_id"],
+        "direction": "increase",
+        "suggested_unclipped_value": next_value,
+        "expected_effect": {"dc_gain": "increase"},
+        "optimizer": {"objective_delta": -0.01},
+        "optimizer_selected": False,
+    }
+    tuning = {"by_failure": [{"metric": "dc_gain", "actions": [action]}]}
+    optimizer = {
+        "status": "no_improving_combination",
+        "selected_actions": [],
+        "candidate_actions": [
+            {
+                **action,
+                "objective_delta": -0.01,
+                "action_admissibility": {"passed": True},
+            }
+        ],
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": optimizer,
+        "attribution_guided_tuning": tuning,
+    }
+
+    command = write_tuning_tool_command(state, round_index=1)
+    assert command["args"]["selected_actions"][0]["action_id"] == "gain_01_M1_gm_id_increase"
+
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert application["applied_actions"]
+    assert m1_gm_id.initial == next_value
+    assert m2_gm_id.initial == next_value
+
+
 def test_passing_spice_evidence_gate_allows_guarded_action_execution():
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
     target_status = {
@@ -1210,7 +1255,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
         success=True,
         return_code=0,
         measurements={
-            "dc_gain_db": 34.0,
+            "dc_gain_db": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
@@ -1221,7 +1266,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     )
     best_meta = {
         "performance": {
-            "dc_gain": 34.0,
+            "dc_gain": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
@@ -1878,7 +1923,7 @@ def test_optimizer_and_netlist_include_slew_rate():
     assert perf["icmr_max"] >= perf["icmr_min"]
     assert "sr_deficit" in meta["loss_breakdown"]
     assert "swing_deficit" in meta["loss_breakdown"]
-    assert "icmr_min_excess" in meta["loss_breakdown"]
+    assert "icmr_min_excess" not in meta["loss_breakdown"]
     assert ".tran" in netlist
 
 
@@ -2002,15 +2047,24 @@ Vinn vinn 0 DC 0.6 AC -0.5
             self.common_modes = []
 
         def _exec_ngspice(self, sample_netlist, work_dir, suffix):
-            vinp = re.search(r"^\s*Vinp\s+\S+\s+\S+\s+DC\s+(\S+)", sample_netlist, flags=re.IGNORECASE | re.MULTILINE)
-            vinn = re.search(r"^\s*Vinn\s+\S+\s+\S+\s+DC\s+(\S+)", sample_netlist, flags=re.IGNORECASE | re.MULTILINE)
-            assert vinp is not None
-            assert vinn is not None
-            vcm_p = float(vinp.group(1))
-            vcm_n = float(vinn.group(1))
-            assert abs(vcm_p - vcm_n) < 1e-12
-            self.common_modes.append(vcm_p)
-            valid = 0.35 <= vcm_p <= 0.85
+            sources = re.findall(
+                r"^\s*(Vinp|Vinn)\s+\S+\s+(\S+)\s+DC\s+(\S+)",
+                sample_netlist,
+                flags=re.IGNORECASE | re.MULTILINE,
+            )
+            assert len(sources) == 2
+            driven = [float(value) for _name, neg, value in sources if neg == "0"]
+            feedback = [(neg, float(value)) for _name, neg, value in sources if neg == "vout"]
+            if feedback:
+                assert len(driven) == 1
+                assert len(feedback) == 1
+                assert feedback[0][1] == 0.0
+            else:
+                assert len(driven) == 2
+                assert abs(driven[0] - driven[1]) < 1e-12
+            vcm = driven[0]
+            self.common_modes.append(vcm)
+            valid = 0.35 <= vcm <= 0.85
             vds = 0.30 if valid else 0.08
             op = {
                 name: {"gm": 1e-4, "vds": vds, "vdsat": 0.10}
@@ -2021,7 +2075,7 @@ Vinn vinn 0 DC 0.6 AC -0.5
     sim = FakeIcmrSimulator()
     result = sim._run_icmr_pass(netlist, None)
 
-    assert len(sim.common_modes) == 25
+    assert len(sim.common_modes) == 75
     assert 0.34 <= result.measurements["icmr_min"] <= 0.38
     assert 0.82 <= result.measurements["icmr_max"] <= 0.86
     assert result.measurements["icmr"] > 0.45

@@ -238,21 +238,28 @@ class NgspiceSimulator:
         return_codes: List[int] = []
         executed = 0
         for idx, vcm in enumerate(grid):
-            sample_netlist = self._set_common_mode_sources(netlist, source_names, vcm)
-            sample_netlist = self._strip_for_op(sample_netlist)
-            sample_netlist = self._add_op_control(sample_netlist)
-            sample = self._exec_ngspice(sample_netlist, sample_dir, suffix=f"icmr_{idx:02d}")
-            if sample.return_code >= 0:
-                return_codes.append(sample.return_code)
-            raw_stdout.append(sample.raw_stdout)
-            raw_stderr.append(sample.raw_stderr)
-            if not sample.operating_points:
-                continue
-            margin = self._icmr_headroom_margin(devices, sample.operating_points, factor)
-            if margin is None or not math.isfinite(margin):
+            best_margin: Optional[float] = None
+            variants = self._icmr_source_variants(netlist, source_names, vcm)
+            for variant_idx, variant_netlist in enumerate(variants):
+                sample_netlist = self._strip_for_op(variant_netlist)
+                sample_netlist = self._add_op_control(sample_netlist)
+                suffix = f"icmr_{idx:02d}" if len(variants) == 1 else f"icmr_{idx:02d}_{variant_idx}"
+                sample = self._exec_ngspice(sample_netlist, sample_dir, suffix=suffix)
+                if sample.return_code >= 0:
+                    return_codes.append(sample.return_code)
+                raw_stdout.append(sample.raw_stdout)
+                raw_stderr.append(sample.raw_stderr)
+                if not sample.operating_points:
+                    continue
+                margin = self._icmr_headroom_margin(devices, sample.operating_points, factor)
+                if margin is None or not math.isfinite(margin):
+                    continue
+                if best_margin is None or margin > best_margin:
+                    best_margin = margin
+            if best_margin is None:
                 continue
             executed += 1
-            samples.append((vcm, margin >= -1e-4, margin))
+            samples.append((vcm, best_margin >= -1e-4, best_margin))
 
         if return_codes:
             result.return_code = 0 if any(code == 0 for code in return_codes) else max(return_codes)
@@ -354,6 +361,57 @@ class NgspiceSimulator:
             else:
                 tail = f"DC {value}"
             out.append(prefix + tail)
+        return "\n".join(out)
+
+    def _icmr_source_variants(self, netlist: str, source_names: List[str], vcm: float) -> List[str]:
+        output_node = self._infer_output_node(netlist)
+        records = self._voltage_source_records(netlist, source_names)
+        vinp = next((item for item in records if item[0].lower() == "vinp" or item[1].lower() == "vinp"), None)
+        vinn = next((item for item in records if item[0].lower() == "vinn" or item[1].lower() == "vinn"), None)
+        if output_node and vinp and vinn:
+            return [
+                self._set_feedback_icmr_sources(netlist, vinp[0], vinn[0], vinn[1], output_node, vcm),
+                self._set_feedback_icmr_sources(netlist, vinn[0], vinp[0], vinp[1], output_node, vcm),
+                self._set_common_mode_sources(netlist, source_names, vcm),
+            ]
+        return [self._set_common_mode_sources(netlist, source_names, vcm)]
+
+    def _voltage_source_records(self, netlist: str, source_names: List[str]) -> List[Tuple[str, str, str]]:
+        source_set = {name.lower() for name in source_names}
+        records: List[Tuple[str, str, str]] = []
+        for line in netlist.splitlines():
+            m = re.match(r"^\s*(V\S+)\s+(\S+)\s+(\S+)\s+", line, flags=re.IGNORECASE)
+            if not m or m.group(1).lower() not in source_set:
+                continue
+            records.append((m.group(1), m.group(2), m.group(3)))
+        return records
+
+    def _set_feedback_icmr_sources(
+        self,
+        netlist: str,
+        driven_source: str,
+        feedback_source: str,
+        feedback_node: str,
+        output_node: str,
+        vcm: float,
+    ) -> str:
+        driven = driven_source.lower()
+        feedback = feedback_source.lower()
+        value = f"{vcm:.8g}"
+        out: List[str] = []
+        for line in netlist.splitlines():
+            m = re.match(r"^(\s*)(V\S+)\s+(\S+)\s+(\S+)\s+(.*)$", line, flags=re.IGNORECASE)
+            if not m:
+                out.append(line)
+                continue
+            name = m.group(2)
+            name_low = name.lower()
+            if name_low == driven:
+                out.append(f"{m.group(1)}{name} {m.group(3)} 0 DC {value}")
+            elif name_low == feedback:
+                out.append(f"{m.group(1)}{name} {feedback_node} {output_node} DC 0")
+            else:
+                out.append(line)
         return "\n".join(out)
 
     def _strip_for_op(self, netlist: str) -> str:
