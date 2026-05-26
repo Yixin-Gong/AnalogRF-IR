@@ -46,8 +46,8 @@ topology:
       connections: {drain: tail, gate: vbias, source: gnd, body: gnd}
 
 targets:
-  dc_gain:              {min: 26, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 2.5e+07, unit: Hz, priority: 1}
+  dc_gain:              {min: 28, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 4.0e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
   power:                {max: 3.0e-04, unit: W, priority: 9}
 

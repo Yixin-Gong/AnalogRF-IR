@@ -32,10 +32,10 @@ topology:
     - {id: M7, role: regulated_source_current_source, stage: bias, type: nmos, connections: {drain: nreg, gate: vbias_reg, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 50, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 9.0e+06, unit: Hz, priority: 1}
+  dc_gain:              {min: 55, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 1.5e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 55, unit: deg, priority: 1}
-  slew_rate:            {min: 2.0e+07, unit: V/s, priority: 1}
+  slew_rate:            {min: 2.5e+07, unit: V/s, priority: 1}
   output_swing:         {min: 3.0e-01, unit: V, priority: 1}
   power:                {max: 5.0e-04, unit: W, priority: 2}
 

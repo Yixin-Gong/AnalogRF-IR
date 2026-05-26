@@ -174,6 +174,9 @@ and source-follower-boosted OTAs across optimizer-only,
 optimizer-plus-postprocess, deterministic diagnosis, and full LLM diagnosis
 methods:
 
+The default OTA schemas now use stress targets for method comparison; the
+two-stage Miller OTA is set to 55 dB DC gain and 100 MHz unity-gain bandwidth.
+
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run

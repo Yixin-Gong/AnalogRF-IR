@@ -487,7 +487,7 @@ def test_single_stage_ota_postprocess_keeps_bandwidth_guardrail():
             "spec_pass": False,
             "op_required_margin": 0.09,
             "measurements": {
-                "dc_gain_db": 27.0,
+                "dc_gain_db": 28.5,
                 "unity_gain_bandwidth": 6.0e7,
                 "phase_margin": 82.0,
                 "total_power": 8.0e-6,
