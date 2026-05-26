@@ -157,10 +157,11 @@ python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
 The current IHP 130 nm OTA ablation matrix is defined in
-`configs/ablation_ihp130_ota.yaml`. It compares two-stage Miller,
-five-transistor, current-mirror, telescopic, and folded-cascode OTAs across
-optimizer-only, optimizer-plus-postprocess, deterministic diagnosis, and full
-LLM diagnosis methods:
+`configs/ablation_ihp130_ota.yaml`. It compares all bundled OTA examples:
+two-stage Miller, five-transistor, current-mirror, telescopic, folded-cascode,
+and source-follower-boosted OTAs across optimizer-only,
+optimizer-plus-postprocess, deterministic diagnosis, and full LLM diagnosis
+methods:
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -174,6 +175,8 @@ python scripts/plot_ablation_results.py \
 Recent evaluation snapshots:
 
 ![Ablation success rate by method and OTA topology](assets/ablation_success_rate.png)
+
+![Spec achievement heatmap across all bundled OTAs](assets/ablation_spec_achievement_heatmap.png)
 
 ![Gain-bandwidth-power tradeoff across OTA methods](assets/ablation_gain_bandwidth_power.png)
 

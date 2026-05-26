@@ -42,6 +42,7 @@ topology set is:
 - `inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml`
 - `inputs/ota/telescopic/telescopic_ota_ihp130.yaml`
 - `inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml`
+- `inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml`
 
 For project reporting, compare the complete method against the optimizer-only,
 optimizer-plus-postprocess, and deterministic-diagnosis controls. The intended
