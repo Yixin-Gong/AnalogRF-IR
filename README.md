@@ -199,14 +199,13 @@ python scripts/plot_ablation_results.py \
 
 Latest IHP130 OTA evaluation snapshots:
 
-These figures use the calibrated IHP130 OTA matrix as the baseline and overlay
-a DeepSeek Pro seed-10, 30-round full-flow agent rerun for the telescopic and
-two-stage Miller OTA columns only. All other topology and method cells are
-kept from the prior matrix. In the overlay run, telescopic passes at 54.6 dB /
-252 kHz and the two-stage Miller OTA passes at 53.8 dB / 50.5 MHz. The
-ablation manifest records the best verified result for each job, so a later
-exploratory diagnosis round cannot overwrite an earlier, better validated
-candidate.
+These figures summarize the current calibrated IHP130 OTA evaluation matrix
+under a single reporting convention: each topology, method, and seed cell
+contributes its best ngspice-verified candidate from the recorded ablation
+manifest. The suite covers the five maintained OTA topologies and the method
+variants shown below, all measured with the high-impedance `CL = 1 pF` setup.
+The manifest-level best-candidate rule keeps exploratory later rounds from
+overwriting an earlier, stronger validated candidate.
 
 ![Ablation success rate by method and OTA topology](docs/assets/ablation_success_rate.png)
 
