@@ -185,7 +185,7 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "Use the combo_coarse_fine strategy: coarse actions can take larger schema-safe steps when violations are large; fine actions should be small near feasibility.",
             "Favor compatible action combinations selected by the constrained_action_optimizer instead of hand-picking isolated knobs when optimizer evidence is available.",
             "An action may use decision='apply' only when action_admissibility.passed is true, or when optimizer_selected is true, or when optimizer.objective_delta < 0.",
-            "If constrained_action_optimizer.status is no_improving_combination, return skip decisions or notes; do not invent a custom apply action to bypass the mathematical gate.",
+            "If constrained_action_optimizer.status is no_improving_combination, apply only existing actions whose action_admissibility.passed is true or optimizer.objective_delta < 0; otherwise return skip decisions or notes.",
             "A priority='guarded' action may be selected with decision='apply' only when evidence_gate.passed is true.",
             "If a guarded action lacks a passing evidence_gate, skip it or mention it in notes; the executor rejects it without local SPICE intervention evidence.",
             "Do not use legacy_sensitivity_top as the final decision rule when it diverges from causal_top.",

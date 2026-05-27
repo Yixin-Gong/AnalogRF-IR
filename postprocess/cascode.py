@@ -196,6 +196,18 @@ def _stack_balance_presets(original: dict[str, float], vdd: float) -> list[dict[
                 {
                     "phase": "telescopic_stack_balance",
                     "vbias_tail": 0.25 * vdd,
+                    "vbias_ncas": 0.78 * vdd,
+                    "vbias_pcas": 0.24 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.25 * vdd,
+                    "vbias_ncas": 0.74 * vdd,
+                    "vbias_pcas": 0.24 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.25 * vdd,
                     "vbias_ncas": 0.74 * vdd,
                     "vbias_pcas": 0.36 * vdd,
                 },

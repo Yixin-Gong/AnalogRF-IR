@@ -1574,6 +1574,85 @@ def _bias_voltage_tuning_actions(
                 target_value=target,
             )
         )
+    actions.extend(_stack_balance_tuning_actions(state, metric=metric, cause_node=cause_node, score=score * 1.08))
+    return actions
+
+
+def _stack_balance_tuning_actions(
+    state: DesignState,
+    *,
+    metric: str,
+    cause_node: str,
+    score: float,
+) -> list[dict[str, Any]]:
+    architecture = (state.topology.architecture or "").lower()
+    if "telescopic" not in architecture:
+        return []
+    required = ("vbias_tail", "vbias_ncas", "vbias_pcas")
+    if not all(_primary_design_variable(state, "", name) for name in required):
+        return []
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    presets = [
+        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.78 * vdd, "vbias_pcas": 0.24 * vdd},
+        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.74 * vdd, "vbias_pcas": 0.24 * vdd},
+        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.74 * vdd, "vbias_pcas": 0.36 * vdd},
+        {"vbias_tail": 0.30 * vdd, "vbias_ncas": 0.78 * vdd, "vbias_pcas": 0.40 * vdd},
+        {"vbias_tail": 0.34 * vdd, "vbias_ncas": 0.82 * vdd, "vbias_pcas": 0.42 * vdd},
+        {"vbias_tail": 0.40 * vdd, "vbias_ncas": 0.70 * vdd, "vbias_pcas": 0.44 * vdd},
+        {"vbias_tail": 0.46 * vdd, "vbias_ncas": 0.62 * vdd, "vbias_pcas": 0.48 * vdd},
+    ]
+    actions: list[dict[str, Any]] = []
+    current = {
+        f"global.{name}": _current_variable_value(state, "", name)
+        for name in required
+    }
+    for index, preset in enumerate(presets, start=1):
+        per_knob_values = {
+            f"global.{name}": round(_clip_to_bounds(value, _variable_range(state, "", name)), 4)
+            for name, value in preset.items()
+        }
+        if all(
+            current.get(knob) is not None and abs(float(current[knob]) - float(value)) < 0.005
+            for knob, value in per_knob_values.items()
+        ):
+            continue
+        actions.append(
+            {
+                "metric": metric,
+                "cause_node": cause_node,
+                "action_class": "telescopic_stack_balance",
+                "score": round(float(score) * (1.0 - 0.04 * (index - 1)), 4),
+                "priority": "primary",
+                "knob": "global.vbias_tail",
+                "apply_to": list(per_knob_values),
+                "direction": "set",
+                "current_value": current,
+                "suggested_next_value": None,
+                "per_knob_values": per_knob_values,
+                "range": {
+                    f"global.{name}": _variable_range(state, "", name)
+                    for name in required
+                },
+                "limit_status": "explicit_multi_knob_preset",
+                "step_hint": "set the telescopic tail, NMOS cascode, and PMOS cascode biases as one stack-balance candidate",
+                "rationale": "The telescopic stack is strongly coupled; local evidence must evaluate the bias triple together instead of optimizing each bias port independently.",
+                "expected_effect": {
+                    "dc_gain": "increase if the stack recovers saturation headroom",
+                    "unity_gain_bandwidth": "increase if gm and output resistance recover",
+                    "phase_margin": "increase if the output pole is no longer collapsed by a bad OP",
+                    "slew_rate": "increase if the output device bias recovers",
+                    "output_swing": "increase if stack headroom improves",
+                    "headroom": "improve",
+                },
+                "tradeoffs": [
+                    "A stack-balance preset can move several operating-point voltages at once; accept it only with optimizer evidence.",
+                    "The best preset is topology and seed dependent, so ngspice remains the authority.",
+                ],
+                "schema_variable_present": True,
+                "auto_range_expansion_allowed": False,
+                "target_formula": "telescopic_stack_balance_preset",
+            }
+        )
     return actions
 
 
@@ -1607,9 +1686,9 @@ def _bias_voltage_target_value(state: DesignState, variable: str) -> float | Non
     name = variable.lower()
     if "telescopic" in architecture:
         ratios = {
-            "vbias_tail": 0.46,
-            "vbias_ncas": 0.62,
-            "vbias_pcas": 0.48,
+            "vbias_tail": 0.25,
+            "vbias_ncas": 0.78,
+            "vbias_pcas": 0.24,
         }
     elif "folded" in architecture:
         ratios = {
@@ -1854,7 +1933,13 @@ def _dedupe_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     seen = set()
     for action in actions:
-        key = (tuple(action.get("apply_to", [])), action.get("direction"), action.get("metric"))
+        per_knob_values = action.get("per_knob_values") or {}
+        value_key = (
+            tuple(sorted((str(key), float(value)) for key, value in per_knob_values.items()))
+            if isinstance(per_knob_values, dict) and per_knob_values
+            else action.get("target_value")
+        )
+        key = (tuple(action.get("apply_to", [])), action.get("direction"), action.get("metric"), value_key)
         if key in seen:
             continue
         seen.add(key)

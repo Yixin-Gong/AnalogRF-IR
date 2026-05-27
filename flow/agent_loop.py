@@ -38,6 +38,8 @@ class AgentGraphState(TypedDict, total=False):
     llm_planner: dict[str, Any]
     last_tool_command: dict[str, Any]
     last_tuning_application: dict[str, Any]
+    force_postprocess_once: bool
+    postprocess_rescue_attempted: bool
     stop_reason: str
 
 
@@ -72,6 +74,8 @@ class DiagnosticAgentLoop:
                 "round_index": 1,
                 "max_rounds": self.rounds,
                 "rounds": [],
+                "force_postprocess_once": False,
+                "postprocess_rescue_attempted": False,
                 "stop_reason": "",
             },
             config={"recursion_limit": max(12, self.rounds * 5 + 4)},
@@ -130,6 +134,7 @@ class DiagnosticAgentLoop:
             "last_artifact_dir": str(result.artifacts.output_dir),
             "last_spec_pass": bool(summary["spec_pass"]),
             "last_failed_targets": list(summary["failed_targets"]),
+            "force_postprocess_once": False,
             "stop_reason": "",
         }
 
@@ -200,6 +205,16 @@ class DiagnosticAgentLoop:
         application = execute_tuning_tool_commands(schema_state, round_index=round_index)
         self._print_application(application)
         if not application["applied_actions"]:
+            if self._should_force_postprocess_rescue(state):
+                self.emit("       No schema edits were available; running one forced postprocess fallback before stopping")
+                return {
+                    "current_schema": state["current_schema"],
+                    "round_index": round_index + 1,
+                    "last_tuning_application": application,
+                    "force_postprocess_once": True,
+                    "postprocess_rescue_attempted": True,
+                    "stop_reason": "",
+                }
             return {
                 "last_tuning_application": application,
                 "stop_reason": "no automatic schema edits were available",
@@ -252,8 +267,12 @@ class DiagnosticAgentLoop:
         if round_index > 1:
             generations = self._short_reopt_generations()
             pop_size = self._short_reopt_pop_size()
-        force_postprocess = self._stagnation_detected(state.get("rounds", []))
-        if force_postprocess:
+        force_once = bool(state.get("force_postprocess_once", False))
+        stagnated = self._stagnation_detected(state.get("rounds", []))
+        force_postprocess = force_once or stagnated
+        if force_once:
+            self.emit("       Adaptive policy: enabling postprocess fallback because no admissible schema edit was available")
+        elif stagnated:
             self.emit("       Adaptive policy: enabling postprocess fallback because recent rounds stagnated")
         return replace(
             self.config,
@@ -289,6 +308,20 @@ class DiagnosticAgentLoop:
             return False
         improvement = losses[0] - losses[1]
         return improvement <= max(1e-9, 0.03 * abs(losses[0]))
+
+    def _should_force_postprocess_rescue(self, state: AgentGraphState) -> bool:
+        if str(self.config.postprocess_policy or "fallback").lower() != "fallback":
+            return False
+        if self.config.skip_dc_repair and self.config.skip_comp_tune:
+            return False
+        if state.get("postprocess_rescue_attempted"):
+            return False
+        if int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
+            return False
+        rounds = state.get("rounds", []) or []
+        if not rounds or rounds[-1].get("spec_pass"):
+            return False
+        return int(rounds[-1].get("postprocess_event_count", 0) or 0) == 0
 
     def _load_design_state(self, path: Path) -> DesignState:
         schema_state = DesignState.from_yaml(path)

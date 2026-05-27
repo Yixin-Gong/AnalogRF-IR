@@ -114,6 +114,7 @@ def build_spice_intervention_model(
                 "knob": action.get("knob"),
                 "apply_to": action.get("apply_to", []),
                 "direction": action.get("direction"),
+                "per_knob_values": action.get("per_knob_values", {}),
                 "source": "spice_small_perturbation",
                 "status": "ok" if result.success else "sim_failed",
                 "applied_proxy": applied,
@@ -159,6 +160,7 @@ def build_surrogate_intervention_model(
                 "knob": action.get("knob"),
                 "apply_to": action.get("apply_to", []),
                 "direction": action.get("direction"),
+                "per_knob_values": action.get("per_knob_values", {}),
                 "source": "surrogate_from_structural_action_model",
                 "status": "ok",
                 "delta_violation_vector": delta,
@@ -234,6 +236,11 @@ def optimize_tuning_actions(
                 best_objective = objective
 
     selected = list(best_combo)
+    if not selected:
+        individual = _best_individually_admissible_action(searchable_records)
+        if individual is not None:
+            selected = [individual]
+            best_objective = baseline + float(individual.get("objective_delta", 0.0) or 0.0)
     return _optimizer_result(
         status="ok" if selected else "no_improving_combination",
         metrics=metrics,
@@ -500,7 +507,7 @@ def _optimizer_result(
         rec = dict(item)
         rec["optimizer_selected"] = rec["action_id"] in selected_ids
         if rec["optimizer_selected"]:
-            rec["selection_reason"] = (
+            rec["selection_reason"] = rec.get("selection_reason") or (
                 "Selected because the constrained combination reduced the weighted normalized violation objective."
             )
         rec["action_admissibility"] = action_admissibility_trace(rec)
@@ -590,7 +597,39 @@ def _optimizer_planning_mode(base_violation: dict[str, float]) -> str:
 
 def _candidate_effect_key(action: dict[str, Any]) -> tuple[tuple[str, ...], str]:
     knobs = tuple(str(item) for item in (action.get("apply_to") or [action.get("knob", "")]) if item)
-    return (knobs, str(action.get("direction", "")))
+    values = action.get("per_knob_values") or {}
+    if isinstance(values, dict) and values:
+        value_key = ";".join(f"{key}={values[key]}" for key in sorted(values))
+    elif action.get("target_value") is not None:
+        value_key = f"target={action.get('target_value')}"
+    else:
+        value_key = ""
+    return (knobs, f"{action.get('direction', '')}:{value_key}")
+
+
+def _best_individually_admissible_action(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    admissible = [
+        item
+        for item in records
+        if _optional_float(item.get("objective_delta")) is not None
+        and _optional_float(item.get("objective_delta")) < 0.0
+        and (item.get("priority") != "guarded" or _passes_evidence_gate(item))
+    ]
+    if not admissible:
+        return None
+    best = min(
+        admissible,
+        key=lambda item: (
+            float(item.get("objective_delta", 0.0) or 0.0),
+            float(item.get("uncertainty", 0.0) or 0.0),
+            float(item.get("constraint_penalty", 0.0) or 0.0),
+        ),
+    )
+    out = dict(best)
+    out["selection_reason"] = (
+        "Selected as an individually admissible fallback because objective_delta < 0 even though no bounded combination improved after combo penalties."
+    )
+    return out
 
 
 def _action_record(
@@ -633,6 +672,12 @@ def _action_record(
         "knob": action.get("knob"),
         "apply_to": action.get("apply_to", []),
         "direction": action.get("direction"),
+        "current_value": action.get("current_value"),
+        "suggested_next_value": action.get("suggested_next_value"),
+        "suggested_unclipped_value": action.get("suggested_unclipped_value"),
+        "target_value": action.get("target_value"),
+        "per_knob_values": action.get("per_knob_values", {}),
+        "range_update": action.get("range_update"),
         "objective_delta": round(float(after - before + penalty), 6),
         "predicted_violation_delta": {metric: round(float(delta.get(metric, 0.0)), 6) for metric in base_violation},
         "local_model_source": source,
@@ -881,6 +926,10 @@ def _parse_knob(knob: str) -> tuple[str, str]:
     return tuple(knob.split(".", 1))  # type: ignore[return-value]
 
 
+def _format_knob(device: str, variable: str) -> str:
+    return f"{device}.{variable}" if device else f"global.{variable}"
+
+
 def _current_value(state: DesignState, device: str, variable: str) -> float | None:
     if not device:
         value = state.global_parameters.get(variable)
@@ -909,6 +958,10 @@ def _action_target_value(
     current: float | None,
     perturbation_fraction: float,
 ) -> float | None:
+    knob = _format_knob(device, variable)
+    per_knob_values = action.get("per_knob_values") or {}
+    if isinstance(per_knob_values, dict) and knob in per_knob_values:
+        return float(per_knob_values[knob])
     explicit = action.get("suggested_unclipped_value")
     if explicit is None:
         explicit = action.get("suggested_next_value")

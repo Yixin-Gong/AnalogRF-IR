@@ -127,6 +127,7 @@ def write_tuning_tool_command(
                 "overrides.direction",
                 "overrides.suggested_next_value",
                 "overrides.suggested_unclipped_value",
+                "overrides.per_knob_values",
                 "overrides.agent_step_fraction",
                 "overrides.range_update",
                 "overrides.rationale",
@@ -139,6 +140,7 @@ def write_tuning_tool_command(
                 "apply_to",
                 "suggested_next_value",
                 "suggested_unclipped_value",
+                "per_knob_values",
                 "range_update",
                 "direction",
                 "metric",
@@ -267,6 +269,7 @@ def _action_for_llm(action: dict[str, Any]) -> dict[str, Any]:
         "tuning_mode": action.get("tuning_mode"),
         "range": action.get("range"),
         "range_update": action.get("range_update"),
+        "per_knob_values": action.get("per_knob_values", {}),
         "hard_physical_gate": action.get("hard_physical_gate", {}),
         "optimizer_selected": action.get("optimizer_selected"),
         "action_class": action.get("action_class", "schema_parameter_tuning"),
@@ -336,6 +339,7 @@ def _actions_from_llm_selection(plan: dict[str, Any], selected_actions: list[dic
             "direction",
             "suggested_next_value",
             "suggested_unclipped_value",
+            "per_knob_values",
             "agent_step_fraction",
             "range_update",
             "rationale",
@@ -363,6 +367,7 @@ def _actions_from_custom_actions(custom_actions: list[dict[str, Any]]) -> list[d
                 "apply_to": apply_to,
                 "suggested_next_value": custom.get("suggested_next_value"),
                 "suggested_unclipped_value": custom.get("suggested_unclipped_value", custom.get("value")),
+                "per_knob_values": custom.get("per_knob_values", {}),
                 "agent_step_fraction": custom.get("agent_step_fraction"),
                 "tuning_mode": custom.get("tuning_mode"),
                 "range_update": custom.get("range_update"),
@@ -379,13 +384,19 @@ def _actions_from_custom_actions(custom_actions: list[dict[str, Any]]) -> list[d
 
 def _dedupe_execution_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
-    seen: dict[tuple[tuple[str, ...], str], str] = {}
+    seen: dict[tuple[tuple[str, ...], str, object], str] = {}
     for action in actions:
         if action.get("_selection_error") or action.get("llm_decision", "apply") != "apply":
             out.append(action)
             continue
         target_knobs = tuple(action.get("apply_to") or [action.get("knob", "")])
-        key = (target_knobs, str(action.get("direction", "")))
+        per_knob_values = action.get("per_knob_values") or {}
+        value_key = (
+            tuple(sorted((str(key), float(value)) for key, value in per_knob_values.items()))
+            if isinstance(per_knob_values, dict) and per_knob_values
+            else action.get("target_value")
+        )
+        key = (target_knobs, str(action.get("direction", "")), value_key)
         previous = seen.get(key)
         if previous:
             duplicate = dict(action)
@@ -431,7 +442,7 @@ def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
             return {**_action_summary(action), "applied": False, "reason": f"agent write policy rejected knob outside design_variables: {knob}"}
         _apply_range_update(design_var, action)
         _apply_constraint_update(state, device, variable, design_var.range)
-        next_value = _value_after_range_update(action, design_var.range)
+        next_value = _value_after_range_update(action, design_var.range, knob)
         if next_value is None:
             return {**_action_summary(action), "applied": False, "reason": f"action has no numeric value: {knob}"}
         design_var.initial = next_value
@@ -554,6 +565,7 @@ def _action_summary(action: dict[str, Any]) -> dict[str, Any]:
         "agent_step_fraction": action.get("agent_step_fraction"),
         "tuning_mode": action.get("tuning_mode"),
         "action_class": action.get("action_class", "schema_parameter_tuning"),
+        "per_knob_values": action.get("per_knob_values", {}),
         "action_admissibility": action.get("action_admissibility") or (action.get("optimizer", {}) or {}).get("action_admissibility"),
         "evidence_gate": action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate"),
         "llm_decision": action.get("llm_decision"),
@@ -610,7 +622,10 @@ def _apply_constraint_update(state: DesignState, device: str, variable: str, upd
         constraint.L = Range(updated_range.min, updated_range.max)
 
 
-def _value_after_range_update(action: dict[str, Any], range_: Range) -> float | None:
+def _value_after_range_update(action: dict[str, Any], range_: Range, knob: str = "") -> float | None:
+    per_knob_values = action.get("per_knob_values") or {}
+    if knob and isinstance(per_knob_values, dict) and knob in per_knob_values:
+        return min(max(float(per_knob_values[knob]), float(range_.min)), float(range_.max))
     raw = action.get("suggested_unclipped_value")
     if raw is None:
         raw = action.get("suggested_next_value")

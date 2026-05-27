@@ -1,0 +1,62 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: IHP SG13G2 telescopic and two-stage Miller OTA full-flow DeepSeek Pro run, seed 10, max 30 agent rounds.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations_ihp130_llm_pro_telescopic_two_stage_seed10_maxiter30
+
+schemas:
+  - inputs/ota/telescopic/telescopic_ota_ihp130.yaml
+  - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
+seeds: [10]
+
+base_overrides:
+  input:
+    env: environment_ihp_sg13g2.yaml
+    topology: yaml
+  optimizer:
+    generations: 80
+    pop_size: 160
+  agent:
+    rounds: 30
+  llm:
+    provider: deepseek
+    model: deepseek-v4-pro
+    thinking: enabled
+    reasoning_effort: max
+    temperature: 0.0
+    timeout: 300
+    max_tokens: 20000
+  intervention:
+    enable: true
+    max_actions: 12
+    perturbation: 0.15
+  actions:
+    strategy: combo_coarse_fine
+  reoptimization:
+    generations: 8
+    pop_size: 64
+  postprocess:
+    policy: fallback
+    near_feasible_ratio: 0.30
+
+cases:
+  - name: llm_diagnosis_postprocess_fallback
+    family: combined_method
+    description: Full DeepSeek Pro LLM diagnosis flow with maximum local intervention/reoptimization settings and fallback repair.
+    overrides:
+      agent:
+        rounds: 30
+      llm:
+        provider: deepseek
+        model: deepseek-v4-pro
+        thinking: enabled
+        reasoning_effort: max
+        temperature: 0.0
+        timeout: 300
+        max_tokens: 20000
+      intervention:
+        enable: true
+        max_actions: 12
+        perturbation: 0.15
+      postprocess:
+        policy: fallback

@@ -30,7 +30,7 @@ from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mappin
 from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from optimizer.problem import OptimizationProblem
-from outputs.artifacts import ArtifactWriter
+from outputs.artifacts import ArtifactWriter, _compact_tuning_action
 from postprocess.cascode import (
     _candidate_points as _cascode_candidate_points,
     _select_candidate as _select_cascode_candidate,
@@ -615,6 +615,72 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert typed_edge["source_type"]
     assert typed_edge["target_type"]
     assert typed_edge["typing"]["relation_type"] == typed_edge["edge_type"]
+
+
+def test_compact_telescopic_stack_balance_action_remains_executable():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    action = {
+        "action_id": "dc_gain_01_global_vbias_tail_set",
+        "metric": "dc_gain",
+        "cause_node": "device.M1.headroom",
+        "priority": "primary",
+        "action_class": "telescopic_stack_balance",
+        "knob": "global.vbias_tail",
+        "apply_to": ["global.vbias_tail", "global.vbias_ncas", "global.vbias_pcas"],
+        "direction": "set",
+        "current_value": {
+            "global.vbias_tail": 0.7465,
+            "global.vbias_ncas": 0.6457,
+            "global.vbias_pcas": 0.35,
+        },
+        "per_knob_values": {
+            "global.vbias_tail": 0.3000,
+            "global.vbias_ncas": 0.8880,
+            "global.vbias_pcas": 0.4320,
+        },
+        "optimizer_selected": True,
+        "action_admissibility": {
+            "schema_version": "analogrf_ir.formal_action_admissibility.v0_1",
+            "formal_rule": "apply_allowed := optimizer_selected OR objective_delta < 0; guarded actions also require evidence_gate.passed",
+            "passed": True,
+            "conditions": {
+                "has_optimizer_math": True,
+                "optimizer_selected": True,
+                "objective_delta_negative": True,
+                "guarded_evidence_passed": True,
+            },
+            "objective_delta": -0.25,
+            "reasons": ["formal admissibility predicate passed"],
+        },
+        "optimizer": {"objective_delta": -0.25, "optimizer_selected": True},
+    }
+    compact_action = _compact_tuning_action(action)
+    state.diagnostics = {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
+        "causal_diagnostics": {
+            "constrained_action_optimizer": {
+                "candidate_actions": [compact_action],
+                "selected_actions": [compact_action],
+            },
+            "attribution_guided_tuning": {
+                "decision_model": {"type": "constrained_local_action_optimizer"},
+                "by_failure": [{"metric": "dc_gain", "actions": [compact_action]}],
+            },
+        },
+    }
+
+    command = write_tuning_tool_command(state, round_index=1, allowed_priorities=["primary"])
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert compact_action["per_knob_values"] == action["per_knob_values"]
+    assert command["args"]["selected_actions"][0]["action_id"] == action["action_id"]
+    assert application["applied_actions"]
+    applied = application["applied_actions"][0]["applied_knobs"]
+    assert {item["knob"]: item["new_initial"] for item in applied} == action["per_knob_values"]
+    assert state.global_parameters["vbias_ncas"] == 0.8880
 
 
 def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
@@ -1802,6 +1868,7 @@ def test_cascode_op_repair_prioritizes_telescopic_stack_balance():
         point["phase"] == "telescopic_stack_balance"
         and point["vbias_tail"] == 0.3
         and point["vbias_ncas"] >= 0.888
+        and point["vbias_pcas"] == 0.35
         for point in points[:8]
     )
 

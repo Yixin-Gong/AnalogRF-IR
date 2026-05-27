@@ -199,11 +199,14 @@ python scripts/plot_ablation_results.py \
 
 Latest IHP130 OTA evaluation snapshots:
 
-These figures were regenerated from the 60-run IHP130 OTA matrix: five OTA
-topologies, four method settings, three seeds, and up to 20 diagnosis rounds
-per run. The ablation manifest records the best verified result for each job,
-so a later exploratory diagnosis round cannot overwrite an earlier, better
-validated candidate.
+These figures use the calibrated IHP130 OTA matrix as the baseline and overlay
+a DeepSeek Pro seed-10, 30-round full-flow agent rerun for the telescopic and
+two-stage Miller OTA columns only. All other topology and method cells are
+kept from the prior matrix. In the overlay run, telescopic passes at 54.6 dB /
+252 kHz and the two-stage Miller OTA passes at 53.8 dB / 50.5 MHz. The
+ablation manifest records the best verified result for each job, so a later
+exploratory diagnosis round cannot overwrite an earlier, better validated
+candidate.
 
 ![Ablation success rate by method and OTA topology](docs/assets/ablation_success_rate.png)
 
@@ -212,21 +215,6 @@ validated candidate.
 ![Gain-bandwidth-power tradeoff across OTA methods](docs/assets/ablation_gain_bandwidth_power.png)
 
 ![Method traceability across LLM, postprocess, and ngspice](docs/assets/ablation_method_traceability.png)
-
-![Measured progressive Pareto frontier for the IHP130 current-mirror OTA](docs/assets/progressive_pareto_current_mirror.png)
-
-Progressive target tightening can be used after a baseline passes to map a
-measured ngspice Pareto frontier. The script materializes one schema per ladder
-level, reruns the normal flow, and keeps the non-dominated passing points:
-
-```bash
-python scripts/run_progressive_pareto.py \
-  --schema inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml \
-  --seed 1 --seed 2 \
-  --output-dir runs/progressive_pareto_current_mirror_mim_cl1pf \
-  --levels 6 \
-  --run
-```
 
 If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
 
