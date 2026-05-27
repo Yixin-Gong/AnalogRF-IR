@@ -340,12 +340,33 @@ def _latest_result_summary(runs_dir: Path) -> dict[str, Any]:
     results = sorted(runs_dir.rglob("result.json"), key=lambda path: path.stat().st_mtime)
     if not results:
         return {}
-    payload = json.loads(results[-1].read_text(encoding="utf-8"))
+    ranked: list[tuple[tuple[float, float, float, float], Path, dict[str, Any]]] = []
+    for result_path in results:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        ranked.append((_result_rank(payload), result_path, payload))
+    _rank, result_path, payload = min(ranked, key=lambda item: item[0])
     return {
-        "result_json": str(results[-1]),
+        "result_json": str(result_path),
         "status": payload.get("status", {}) or {},
         "measurements": payload.get("measurements", {}) or {},
     }
+
+
+def _result_rank(payload: dict[str, Any]) -> tuple[float, float, float, float]:
+    status = payload.get("status", {}) or {}
+    try:
+        best_loss = float(status.get("best_loss"))
+    except (TypeError, ValueError):
+        best_loss = float("inf")
+    failed_count = len(status.get("failed_targets", []) or [])
+    measurements = payload.get("measurements", {}) or {}
+    gain = float(measurements.get("dc_gain_db", -200.0) or -200.0)
+    return (
+        0.0 if status.get("spec_pass", False) else 1.0,
+        float(failed_count),
+        best_loss,
+        -gain,
+    )
 
 
 def _summary(rows: list[dict[str, Any]], output_dir: Path) -> dict[str, Any]:

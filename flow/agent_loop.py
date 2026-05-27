@@ -57,6 +57,8 @@ class DiagnosticAgentLoop:
         self.llm_config = llm_config or LLMPlannerConfig.from_env()
         self.emit = emit or (lambda _msg: None)
         self._final_result: FlowResult | None = None
+        self._best_result: FlowResult | None = None
+        self._best_summary: dict[str, Any] | None = None
         self._environment = load_environment(config.env)
 
     def run(self) -> AgentLoopResult:
@@ -78,6 +80,8 @@ class DiagnosticAgentLoop:
             raise RuntimeError("Diagnostic agent loop did not run any rounds")
         if final_state.get("stop_reason"):
             self.emit(f"       Agent graph stopped: {final_state['stop_reason']}")
+        if self._best_result is not None:
+            self._final_result = self._best_result
         self._print_final_result(final_state)
         return AgentLoopResult(rounds=final_state.get("rounds", []), final_result=self._final_result)
 
@@ -116,6 +120,9 @@ class DiagnosticAgentLoop:
         ).run()
         self._final_result = result
         summary = self._round_summary(round_index, result)
+        if self._is_better_summary(summary, self._best_summary):
+            self._best_result = result
+            self._best_summary = summary
         self._print_round_summary(summary)
         return {
             "rounds": list(state.get("rounds", [])) + [summary],
@@ -324,6 +331,12 @@ class DiagnosticAgentLoop:
             "postprocess_event_count": len(result.flow_meta.get("postprocess", []) or []),
         }
 
+    @staticmethod
+    def _is_better_summary(candidate: dict[str, Any], incumbent: dict[str, Any] | None) -> bool:
+        if incumbent is None:
+            return True
+        return _summary_rank(candidate) < _summary_rank(incumbent)
+
     def _print_round_summary(self, summary: dict[str, Any]) -> None:
         self.emit("       Round summary:")
         self.emit(f"         artifacts: {summary['artifact_dir']}")
@@ -354,7 +367,7 @@ class DiagnosticAgentLoop:
 
     def _print_final_result(self, state: AgentGraphState) -> None:
         rounds = state.get("rounds", [])
-        final_round = rounds[-1] if rounds else {}
+        final_round = getattr(self, "_best_summary", None) or (rounds[-1] if rounds else {})
         self.emit("\n" + "=" * 70)
         self.emit("  LangGraph final result")
         self.emit("=" * 70)
@@ -365,6 +378,19 @@ class DiagnosticAgentLoop:
         self.emit(f"       spec_pass: {final_round.get('spec_pass', state.get('last_spec_pass', False))}")
         self.emit(f"       failed_targets: {final_round.get('failed_targets', state.get('last_failed_targets', []))}")
         self.emit(f"       best_loss: {final_round.get('best_loss')}")
+
+
+def _summary_rank(summary: dict[str, Any]) -> tuple[float, float, float]:
+    try:
+        best_loss = float(summary.get("best_loss"))
+    except (TypeError, ValueError):
+        best_loss = float("inf")
+    failed_count = len(summary.get("failed_targets", []) or [])
+    return (
+        0.0 if summary.get("spec_pass", False) else 1.0,
+        float(failed_count),
+        best_loss,
+    )
 
 
 def _next_round_diagnostics(application: dict[str, Any]) -> dict[str, Any]:

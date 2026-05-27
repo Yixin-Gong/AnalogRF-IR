@@ -40,8 +40,8 @@ def tune_cascode_ota_operating_point(
     sim: NgspiceSimulator,
     work_dir: Path,
     *,
-    max_candidates: int = 32,
-    time_budget_sec: float = 55.0,
+    max_candidates: int = 72,
+    time_budget_sec: float = 90.0,
     candidate_timeout_sec: float = 5.0,
 ) -> dict[str, Any]:
     if not is_cascode_ota_state(state):
@@ -159,7 +159,25 @@ def _candidate_points(
             candidates.extend([0.40 * vdd, 0.50 * vdd, 0.60 * vdd])
         heuristic[name] = _unique_values(candidates, low, high)
 
-    # One-at-a-time moves give a small, interpretable OP repair budget.
+    # Named stack-balance presets are evaluated before one-at-a-time moves so
+    # telescopic/folded stacks get a physically meaningful OP repair budget.
+    for preset in _stack_balance_presets(original, vdd):
+        point = dict(original)
+        used = False
+        for name, value in preset.items():
+            if name == "phase":
+                continue
+            if name not in original:
+                continue
+            low, high = _bias_range(state, name, vdd)
+            point[name] = _snap_voltage(_clip(value, low, high))
+            used = True
+        if used:
+            point["phase"] = str(preset.get("phase", "stack_balance"))
+            points.append(point)
+
+    # One-at-a-time moves keep the repair trace interpretable when a preset is
+    # not enough or a topology exposes a non-standard bias port.
     for name in ports:
         for value in heuristic[name]:
             point = dict(original)
@@ -167,30 +185,61 @@ def _candidate_points(
             point["phase"] = f"{name}_sweep"
             points.append(point)
 
-    # A few named stack-balance presets keep telescopic/folded families from
-    # depending on a full Cartesian bias grid.
-    presets = [
-        {"vbias_tail": 0.40 * vdd, "vbias_ncas": 0.58 * vdd, "vbias_pcas": 0.42 * vdd},
-        {"vbias_tail": 0.46 * vdd, "vbias_ncas": 0.62 * vdd, "vbias_pcas": 0.48 * vdd},
-        {"vbias_tail": 0.52 * vdd, "vbias_ncas": 0.68 * vdd, "vbias_pcas": 0.52 * vdd},
-        {"vbias_ptail": 0.68 * vdd, "vbias_ncas": 0.44 * vdd},
-        {"vbias_ptail": 0.74 * vdd, "vbias_ncas": 0.50 * vdd},
-        {"vbias_ptail": 0.82 * vdd, "vbias_ncas": 0.56 * vdd},
-    ]
-    for preset in presets:
-        point = dict(original)
-        used = False
-        for name, value in preset.items():
-            if name not in original:
-                continue
-            low, high = _bias_range(state, name, vdd)
-            point[name] = _snap_voltage(_clip(value, low, high))
-            used = True
-        if used:
-            point["phase"] = "stack_balance"
-            points.append(point)
-
     return _dedupe(points)
+
+
+def _stack_balance_presets(original: dict[str, float], vdd: float) -> list[dict[str, Any]]:
+    presets: list[dict[str, Any]] = []
+    if {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(original):
+        presets.extend(
+            [
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.25 * vdd,
+                    "vbias_ncas": 0.74 * vdd,
+                    "vbias_pcas": 0.36 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.25 * vdd,
+                    "vbias_ncas": 0.74 * vdd,
+                    "vbias_pcas": 0.40 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.30 * vdd,
+                    "vbias_ncas": 0.78 * vdd,
+                    "vbias_pcas": 0.40 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.34 * vdd,
+                    "vbias_ncas": 0.82 * vdd,
+                    "vbias_pcas": 0.42 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.40 * vdd,
+                    "vbias_ncas": 0.70 * vdd,
+                    "vbias_pcas": 0.44 * vdd,
+                },
+                {
+                    "phase": "telescopic_stack_balance",
+                    "vbias_tail": 0.46 * vdd,
+                    "vbias_ncas": 0.62 * vdd,
+                    "vbias_pcas": 0.48 * vdd,
+                },
+            ]
+        )
+    if {"vbias_ptail", "vbias_ncas"}.issubset(original):
+        presets.extend(
+            [
+                {"phase": "folded_stack_balance", "vbias_ptail": 0.68 * vdd, "vbias_ncas": 0.44 * vdd},
+                {"phase": "folded_stack_balance", "vbias_ptail": 0.74 * vdd, "vbias_ncas": 0.50 * vdd},
+                {"phase": "folded_stack_balance", "vbias_ptail": 0.82 * vdd, "vbias_ncas": 0.56 * vdd},
+            ]
+        )
+    return presets
 
 
 def _bias_range(state: DesignState, name: str, vdd: float) -> tuple[float, float]:
@@ -248,6 +297,10 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
         score += 25.0 * max(0.0, power - power_max) / max(power_max, 1e-12)
     if op_required_margin < 0.0:
         score += 220.0 * abs(op_required_margin)
+    if op_required_margin < -0.12:
+        score += 180.0 * abs(op_required_margin + 0.12)
+    if gain <= 0.0:
+        score += 120.0
     if spec_pass and op_required_margin >= -0.02:
         score -= 250.0
     item = dict(candidate)
@@ -270,7 +323,25 @@ def _select_candidate(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not records:
         return None
     usable = [item for item in records if item.get("success", False)] or records
-    return min(usable, key=lambda item: float(item.get("score", float("inf"))))
+    return min(usable, key=_candidate_priority)
+
+
+def _candidate_priority(item: dict[str, Any]) -> tuple[float, ...]:
+    meas = item.get("measurements", {}) or {}
+    gain = float(meas.get("dc_gain_db", -200.0) or -200.0)
+    bw = float(meas.get("unity_gain_bandwidth", 0.0) or 0.0)
+    swing = float(meas.get("output_swing", 0.0) or 0.0)
+    op_required_margin = float(item.get("op_required_margin", -1.0) or -1.0)
+    op_bucket = 0.0 if op_required_margin >= -0.02 else 1.0 if op_required_margin >= -0.12 else 2.0
+    return (
+        0.0 if item.get("spec_pass", False) else 1.0,
+        0.0 if gain > 0.0 else 1.0,
+        op_bucket,
+        float(item.get("score", float("inf"))),
+        -gain,
+        -bw,
+        -swing,
+    )
 
 
 def _minimum_margins(state: DesignState, operating_points: dict[str, dict[str, float]]) -> tuple[float, float]:

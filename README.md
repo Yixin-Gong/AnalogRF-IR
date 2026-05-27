@@ -1,6 +1,6 @@
 # AnalogRF-IR
 
-AnalogRF-IR is a schema-driven analog and RF circuit optimization research flow for simulator-backed, agent-assisted circuit design. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records typed causal evidence so planner actions can be accepted or rejected by explicit optimizer-side math.
+AnalogRF-IR is a schema-driven analog and RF circuit optimization project for simulator-backed, agent-assisted circuit design. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records typed causal evidence so planner actions can be accepted or rejected by explicit optimizer-side math.
 
 The current development focus is OTA-class analog design in IHP 130 nm, including current-mirror, telescopic, and folded-cascode OTAs, plus the earlier five-transistor and two-stage Miller examples. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
 
@@ -187,13 +187,23 @@ capacitor model and `cornerCAP.lib` `cap_typ` corner.
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --local-config configs/local/llm.yaml --run --keep-going
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --llm-api-key-file ~/.config/analogrf-ir/deepseek.key --run --keep-going
+python scripts/run_ablation.py \
+  --config configs/ablation_ihp130_ota.yaml \
+  --output-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20 \
+  --llm-api-key-file ~/.config/analogrf-ir/deepseek.key \
+  --run --keep-going
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota/manifest.json \
-  --out-dir runs/ablations_ihp130_ota/figures
+  --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
+  --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
 ```
 
-Recent evaluation snapshots:
+Latest IHP130 OTA evaluation snapshots:
+
+These figures were regenerated from the 60-run IHP130 OTA matrix: five OTA
+topologies, four method settings, three seeds, and up to 20 diagnosis rounds
+per run. The ablation manifest records the best verified result for each job,
+so a later exploratory diagnosis round cannot overwrite an earlier, better
+validated candidate.
 
 ![Ablation success rate by method and OTA topology](docs/assets/ablation_success_rate.png)
 
@@ -213,6 +223,7 @@ level, reruns the normal flow, and keeps the non-dominated passing points:
 python scripts/run_progressive_pareto.py \
   --schema inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml \
   --seed 1 --seed 2 \
+  --output-dir runs/progressive_pareto_current_mirror_mim_cl1pf \
   --levels 6 \
   --run
 ```
@@ -223,7 +234,7 @@ If the API key is not configured, the flow records an LLM fallback status and co
 
 The diagnosis layer is a structure-aware causal diagnosis system, not a raw sensitivity ranking tool.
 
-The default research strategy is budget-aware:
+The default project strategy is budget-aware:
 
 ```text
 global optimizer with small budget
@@ -306,7 +317,7 @@ Postprocess is an optional repair layer, not the core diagnosis method. It can i
 - LLM planning,
 - schema command execution.
 
-For research comparisons, postprocess can be ablated against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
+For method comparisons, postprocess can be ablated against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
 
 CLI policy:
 

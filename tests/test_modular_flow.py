@@ -31,7 +31,11 @@ from netlist.generator import generate_netlist
 from optimizer.nsga2 import CircuitEvaluator
 from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter
-from postprocess.cascode import tune_cascode_ota_operating_point
+from postprocess.cascode import (
+    _candidate_points as _cascode_candidate_points,
+    _select_candidate as _select_cascode_candidate,
+    tune_cascode_ota_operating_point,
+)
 from postprocess.ota import _select_two_phase_candidate, tune_single_stage_ota_operating_point
 from postprocess.registry import PostprocessConfig, PostprocessContext, PostprocessRegistry
 from postprocess.source_follower import _candidate_points
@@ -39,7 +43,7 @@ from postprocess.two_stage import set_symmetric_width, tune_two_stage_compensati
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
-from scripts.run_ablation import build_jobs
+from scripts.run_ablation import _latest_result_summary, build_jobs
 from scripts.run_progressive_pareto import pareto_frontier, tighten_schema_targets
 
 
@@ -1751,6 +1755,82 @@ def test_postprocess_fallback_decision_uses_near_feasible_estimate():
     assert far["run"] is False
 
 
+def test_postprocess_fallback_runs_cascode_op_repair_before_ac_metrics():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    runner = AnalogRFIRFlowRunner(
+        config=FlowConfig(postprocess_policy="fallback", postprocess_near_feasible_ratio=0.20)
+    )
+    spec_model = SpecRegistry().select(state)
+
+    decision = runner._postprocess_decision(
+        state,
+        {
+            "performance": {
+                "dc_gain": -20.0,
+                "unity_gain_bandwidth": 0.0,
+                "phase_margin": 0.0,
+                "slew_rate": 1.0,
+                "output_swing": 0.1,
+                "power": 1e-6,
+            }
+        },
+        spec_model,
+    )
+
+    assert decision["run"] is True
+    assert decision["near_feasible"] is False
+    assert decision["cascode_op_repair"] is True
+    assert decision["reason"] == "cascode operating-point repair required before AC metrics are reliable"
+
+
+def test_cascode_op_repair_prioritizes_telescopic_stack_balance():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+
+    points = _cascode_candidate_points(
+        state,
+        {"vbias_tail": 0.7281, "vbias_ncas": 0.6559, "vbias_pcas": 0.432},
+        1.2,
+    )
+
+    assert any(
+        point["phase"] == "telescopic_stack_balance"
+        and point["vbias_tail"] == 0.3
+        and point["vbias_ncas"] >= 0.888
+        for point in points[:8]
+    )
+
+
+def test_cascode_candidate_selection_avoids_collapsed_negative_gain_points():
+    selected = _select_cascode_candidate(
+        [
+            {
+                "success": True,
+                "score": 1.0,
+                "spec_pass": False,
+                "op_required_margin": -0.40,
+                "measurements": {"dc_gain_db": -42.0, "unity_gain_bandwidth": 0.0, "output_swing": 0.58},
+                "phase": "collapsed",
+            },
+            {
+                "success": True,
+                "score": 25.0,
+                "spec_pass": False,
+                "op_required_margin": -0.08,
+                "measurements": {"dc_gain_db": 39.0, "unity_gain_bandwidth": 2.0e5, "output_swing": 0.78},
+                "phase": "recovering",
+            },
+        ]
+    )
+
+    assert selected["phase"] == "recovering"
+
+
 def test_llm_json_loader_extracts_object_from_non_strict_response():
     data = _loads_json_object(
         "The selected actions are:\n"
@@ -1846,6 +1926,7 @@ def test_agent_loop_final_log_outputs_result_summary():
     messages = []
     loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
     loop.emit = messages.append
+    loop._best_summary = None
 
     loop._print_final_result(
         {
@@ -1867,6 +1948,50 @@ def test_agent_loop_final_log_outputs_result_summary():
     assert "stop_reason: spec satisfied" in log
     assert "completed_iterations: 1" in log
     assert "spec_pass: True" in log
+
+
+def test_agent_loop_tracks_best_verified_round():
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+
+    worse = {"spec_pass": False, "failed_targets": ["dc_gain", "output_swing"], "best_loss": 120.0}
+    better = {"spec_pass": False, "failed_targets": ["phase_margin"], "best_loss": 95.0}
+    passing = {"spec_pass": True, "failed_targets": [], "best_loss": 100.0}
+
+    assert loop._is_better_summary(worse, None) is True
+    assert loop._is_better_summary(better, worse) is True
+    assert loop._is_better_summary(passing, better) is True
+    assert loop._is_better_summary(worse, passing) is False
+
+
+def test_ablation_summary_uses_best_verified_result_not_latest(tmp_path):
+    run_dir = tmp_path / "job"
+    early = run_dir / "iter_001"
+    late = run_dir / "iter_002"
+    early.mkdir(parents=True)
+    late.mkdir(parents=True)
+    (early / "result.json").write_text(
+        json.dumps(
+            {
+                "status": {"spec_pass": False, "failed_targets": ["phase_margin"], "best_loss": 90.0},
+                "measurements": {"dc_gain_db": 49.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (late / "result.json").write_text(
+        json.dumps(
+            {
+                "status": {"spec_pass": False, "failed_targets": ["dc_gain", "output_swing"], "best_loss": 160.0},
+                "measurements": {"dc_gain_db": -40.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = _latest_result_summary(run_dir)
+
+    assert summary["result_json"].endswith("iter_001/result.json")
+    assert summary["failed_targets"] == ["phase_margin"]
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():

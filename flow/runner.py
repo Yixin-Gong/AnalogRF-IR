@@ -367,6 +367,16 @@ class AnalogRFIRFlowRunner:
             }
 
         near = self._estimated_near_feasible(state, best_meta, spec_model)
+        cascode_repair = self._cascode_op_repair_fallback(state, near)
+        if cascode_repair["run"]:
+            decision = {
+                "policy": policy,
+                "run": True,
+                "reason": cascode_repair["reason"],
+            }
+            decision.update(near)
+            decision.update(cascode_repair)
+            return decision
         decision = {
             "policy": policy,
             "run": bool(near["near_feasible"]),
@@ -374,6 +384,32 @@ class AnalogRFIRFlowRunner:
         }
         decision.update(near)
         return decision
+
+    def _cascode_op_repair_fallback(self, state: DesignState, near: dict[str, Any]) -> dict[str, Any]:
+        if not self._is_biasable_cascode_ota(state):
+            return {"run": False}
+        failed = set(near.get("estimated_failed_or_unverified", []) or [])
+        op_sensitive = failed.intersection(
+            {"dc_gain", "unity_gain_bandwidth", "phase_margin", "slew_rate", "output_swing"}
+        )
+        if not op_sensitive:
+            return {"run": False}
+        return {
+            "run": True,
+            "reason": "cascode operating-point repair required before AC metrics are reliable",
+            "cascode_op_repair": True,
+            "op_sensitive_failed_or_unverified": sorted(op_sensitive),
+        }
+
+    @staticmethod
+    def _is_biasable_cascode_ota(state: DesignState) -> bool:
+        if (state.topology.class_ or "").lower() != "ota":
+            return False
+        if not any(port.direction == "bias" for port in state.topology.ports):
+            return False
+        architecture = (state.topology.architecture or "").lower()
+        roles = {(dev.role or "").lower() for dev in state.topology.devices}
+        return "cascode" in architecture or any("cascode" in role or "folded" in role for role in roles)
 
     def _estimated_near_feasible(
         self,

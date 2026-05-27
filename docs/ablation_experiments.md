@@ -74,8 +74,8 @@ Generate comparison tables and plots:
 
 ```bash
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota/manifest.json \
-  --out-dir runs/ablations_ihp130_ota/figures
+  --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
+  --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
 ```
 
 After a design passes its baseline targets, run a progressive target ladder to
@@ -87,6 +87,7 @@ writes the non-dominated passing points:
 python scripts/run_progressive_pareto.py \
   --schema inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml \
   --seed 1 --seed 2 \
+  --output-dir runs/progressive_pareto_current_mirror_mim_cl1pf \
   --levels 6 \
   --run
 ```
