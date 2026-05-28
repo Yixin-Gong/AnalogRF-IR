@@ -8,9 +8,9 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 
 ## Highlights
 
-- YAML-first design state for topology, variables, targets, constraints, evaluations, and compact diagnostics.
+- YAML-first design state for topology, variables, targets, constraints, evaluations, and concise diagnostics.
 - ASIR semantic extraction for roles, symmetry groups, gain stages, bias paths, and compensation networks.
-- gm/ID-based compact sizing with NSGA-II exploration.
+- gm/ID surrogate sizing with NSGA-II exploration.
 - Hard validation for schema write policy, symmetry consistency, operating-point safety, and layout-realizable W/L constraints.
 - Layout realization for oversized devices through finger folding, parallel devices, and series length segmentation.
 - ngspice-backed AC, DC, transient, operating-point, slew-rate, output-swing, headroom, and power measurements.
@@ -19,7 +19,37 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
 - Structure-aware causal diagnosis with typed causal edges, typed ASIR dependencies, local intervention modeling, and evidence-gated guarded actions.
 - Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including clean plotting outputs.
-- Compact schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
+- Concise schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
+
+## Diagnosis-Centered Method
+
+The current OTA flow is organized around a shared executable schema. Human
+review and LLM diagnosis can propose or select actions, but accepted edits must
+pass the optimizer-side evidence gate and ngspice-backed validation.
+
+![Diagnosis-centered analog optimization architecture](docs/assets/analogdiag_architecture.png)
+
+The schema keeps the concise decision state readable while large simulator
+artifacts stay in JSON evidence files.
+
+![Schema as the shared executable state](docs/assets/analogdiag_schema_state.png)
+
+The execution side combines gm/ID estimation, NSGA-II search, ngspice
+validation, explicit fallback repair, and short re-optimization after accepted
+diagnosis actions.
+
+The gm/ID surrogate is used as a fast design-space guide, while ngspice remains
+the final measurement authority. Stability targets follow the usual loop-gain
+view behind Middlebrook feedback analysis; the current OTA benches extract UGB
+and phase margin from AC response data, with the schema leaving room for
+return-ratio loop-gain testbenches when a closed-loop block requires them.
+
+![Optimization and validation execution loop](docs/assets/analogdiag_optimization_loop.png)
+
+The diagnosis side converts failed specs into typed causal evidence and local
+SPICE interventions, then admits only optimizer-supported schema edits.
+
+![Causal diagnosis and evidence-gated action selection](docs/assets/analogdiag_diagnosis_loop.png)
 
 ## Repository Layout
 
@@ -33,8 +63,8 @@ frontends/     YAML and SPICE input frontends
 inputs/        Maintained circuit-family schema examples
 layout/        Physical realization helpers for folding and segmentation
 netlist/       Schema-to-SPICE generation
-optimizer/     Compact evaluators and NSGA-II optimization
-outputs/       Run artifact writers and compact schema views
+optimizer/     Surrogate evaluators and NSGA-II optimization
+outputs/       Run artifact writers and concise schema views
 postprocess/   Optional ngspice-guided repair and compensation tuning
 schemas/       Typed design-state schema definitions
 simulator/     ngspice execution and measurement extraction
@@ -118,7 +148,7 @@ python -m pytest -q
 
 ## LLM-Guided Diagnosis
 
-The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the compact source of truth and only applies edits through schema-level tool commands.
+The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the concise source of truth and only applies edits through schema-level tool commands.
 
 Set a DeepSeek API key before running LLM-guided rounds. Environment
 variables work, but the preferred local setup is a key file referenced by a
@@ -262,14 +292,14 @@ Full causal artifacts use typed causal edges with node types, relation type, pol
 
 ## Design State Contract
 
-AnalogRF-IR treats generated schemas as a compact, user-readable decision interface. Heavy evidence is written to JSON artifacts instead of being embedded into the YAML state.
+AnalogRF-IR treats generated schemas as a concise, user-readable decision interface. Heavy evidence is written to JSON artifacts instead of being embedded into the YAML state.
 
 ```text
-design_state.yaml        Compact state, measurements, summary diagnostics, and schema actions
+design_state.yaml        Concise state, measurements, summary diagnostics, and schema actions
 causal_diagnostics.json  Full causal graph, local intervention model, and evidence details
 agent_diagnostics.json   Agent-facing diagnostic report
 sim_log.json             Simulator and optimizer log view
-result.json              Compact pass/fail and metric summary
+result.json              Concise pass/fail and metric summary
 ```
 
 The agent write policy is intentionally narrow:
@@ -341,14 +371,14 @@ When adding a new circuit family:
 1. Define or update the IR profile in `asir/profiles.py`.
 2. Add schema examples with explicit device roles, symmetry labels, variables, targets, and evaluations.
 3. Register profile-specific rules and validation behavior.
-4. Add compact estimators only where the analytical model is defensible.
+4. Add surrogate estimators only where the analytical model is defensible.
 5. Add simulator measurements for final validation.
 6. Add optional postprocess repair only when it is physically justified and ablatable.
 7. Add regression tests for profile selection, constraints, diagnostics, artifacts, and physical validation.
 
 ## Current Limitations
 
-- Compact models are optimization guidance, not signoff results.
+- Surrogate models are optimization guidance, not signoff results.
 - Output swing is extracted from OP/headroom limits; ICMR is intentionally outside the default OTA optimization and validation targets.
 - Comparator delay, offset, kickback, noise, energy, and metastability require dedicated transient, noise, and Monte Carlo testbenches.
 - RF-specific flows still need S-parameter, noise figure, compression, matching, linearity, and stability extensions.
