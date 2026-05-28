@@ -238,23 +238,19 @@ python scripts/run_ablation.py \
 python scripts/plot_ablation_results.py \
   --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
   --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
+python scripts/plot_diagnosis_validation.py
 ```
 
 Latest IHP130 OTA evaluation snapshots:
 
-These figures summarize the current calibrated IHP130 OTA evaluation matrix
-under a single reporting convention: each topology, method, and seed cell
-contributes its best ngspice-verified candidate from the recorded ablation
-manifest. The suite covers the five maintained OTA topologies and the method
-variants shown below, all measured with the high-impedance `CL = 1 pF` setup.
-The manifest-level best-candidate rule keeps exploratory later rounds from
-overwriting an earlier, stronger validated candidate.
+These figures keep the project view aligned with the evaluation narrative:
+diagnosis claims are checked by local SPICE probes and executable actions are
+reported through explicit flow components. The underlying ablation manifest
+uses a single reporting convention: each topology, method, and seed cell
+contributes its best ngspice-verified candidate under the high-impedance
+`CL = 1 pF` setup.
 
-![Ablation success rate by method and OTA topology](docs/assets/ablation_success_rate.png)
-
-![Spec achievement heatmap across canonical OTAs](docs/assets/ablation_spec_achievement_heatmap.png)
-
-![Gain-bandwidth-power tradeoff across OTA methods](docs/assets/ablation_gain_bandwidth_power.png)
+![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
 
 ![Method traceability across LLM, postprocess, and ngspice](docs/assets/ablation_method_traceability.png)
 
