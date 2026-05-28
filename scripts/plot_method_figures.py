@@ -85,8 +85,8 @@ def draw_schema_state() -> plt.Figure:
 
 
 def draw_optimization_loop() -> plt.Figure:
-    fig, ax = base_fig(9.6, 4.25)
-    center = (4.72, 2.18)
+    fig, ax = base_fig(9.6, 4.9)
+    center = (4.72, 2.38)
     radius = 1.58
     ax.add_patch(
         Circle(
@@ -116,7 +116,7 @@ def draw_optimization_loop() -> plt.Figure:
     panel(
         ax,
         3.78,
-        1.44,
+        1.64,
         1.88,
         1.02,
         "Objective",
