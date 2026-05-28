@@ -29,10 +29,17 @@ pass the optimizer-side evidence gate and ngspice-backed validation.
 
 ![Diagnosis-centered analog optimization architecture](docs/assets/analogdiag_architecture.png)
 
+Architecture sketch: human review and LLM diagnosis interact through the shared
+schema, while accepted edits are executed by the surrogate-search-SPICE-repair
+loop.
+
 The schema keeps the concise decision state readable while large simulator
 artifacts stay in JSON evidence files.
 
 ![Schema as the shared executable state](docs/assets/analogdiag_schema_state.png)
+
+Schema sketch: the executable state is organized as topology, variables,
+targets, typed dependencies, and simulator evidence.
 
 The execution side combines gm/ID estimation, NSGA-II search, ngspice
 validation, explicit fallback repair, and short re-optimization after accepted
@@ -46,10 +53,16 @@ return-ratio loop-gain testbenches when a closed-loop block requires them.
 
 ![Optimization and validation execution loop](docs/assets/analogdiag_optimization_loop.png)
 
+Execution sketch: the circular loop keeps the gm/ID surrogate, bounded NSGA-II
+search, SPICE validation, candidate archive, and objective gate in one path.
+
 The diagnosis side converts failed specs into typed causal evidence and local
 SPICE interventions, then admits only optimizer-supported schema edits.
 
 ![Causal diagnosis and evidence-gated action selection](docs/assets/analogdiag_diagnosis_loop.png)
+
+Diagnosis sketch: failed metrics are converted into typed edges, ranked causes,
+local SPICE probes, and optimizer-approved apply/skip decisions.
 
 ## Repository Layout
 
