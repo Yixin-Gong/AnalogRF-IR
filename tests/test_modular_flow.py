@@ -294,10 +294,13 @@ def test_ihp130_two_stage_miller_compensation_uses_mim_capacitor():
     netlist = generate_netlist(state)
 
     assert 'cornerCAP.lib" cap_typ' in netlist
-    assert "\nRz n1 ncc 1k" in netlist
+    assert 'cornerRES.lib" res_typ' in netlist
+    assert "* .osdi" in netlist and "r3_cmc.osdi" in netlist
+    assert "\nXRz n1 ncc gnd rhigh " in netlist
     assert "\nXCc ncc vout cap_cmim " in netlist
     assert "w=16.33u l=16.33u" in netlist
     assert "\nCc " not in netlist
+    assert "\nRz " not in netlist
 
 
 def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from netlist.generator import generate_netlist
-from postprocess.common import backfill_state_from_ngspice
+from postprocess.common import backfill_state_from_ngspice, phase_margin_window_penalty
 from schemas.design_state import DesignState, Target
 from simulator.ngspice import NgspiceSimulator
 
@@ -326,7 +326,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     score = 0.0
     score += 80.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
     score += 55.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-    score += 40.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    score += 32.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
     score += 30.0 * max(0.0, sr_min - sr) / max(sr_min, 1.0)
     if power_max < float("inf"):
         score += 35.0 * max(0.0, power - power_max) / max(power_max, 1e-12)
@@ -480,9 +480,10 @@ def _bandwidth_merit(
     power_ratio = power / max(power_max, 1e-12) if power_max < float("inf") else 0.0
     spec_pass = bool(item.get("spec_pass", False))
     gain_margin = gain - gain_min if gain_min > 0.0 else gain
+    pm_penalty = phase_margin_window_penalty(pm, pm_min or 60.0)
     pm_ok = pm_min <= 0.0 or pm >= pm_min
     bw_ratio = bw / max(bw_min, 1.0) if bw_min > 0.0 else bw
-    return (spec_pass, min(bw_ratio, 2.0), gain_margin, pm_ok, -power_ratio)
+    return (spec_pass, min(bw_ratio, 2.0), gain_margin, pm_ok, -pm_penalty, -power_ratio)
 
 
 def _compact_candidate_summary(item: dict[str, Any]) -> dict[str, Any]:

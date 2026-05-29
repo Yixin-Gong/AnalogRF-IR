@@ -16,6 +16,31 @@ def normalize_phase_margin(raw_value: float) -> float:
     return value
 
 
+def phase_margin_window_penalty(
+    pm: float,
+    target_min: float = 60.0,
+    *,
+    hard_min: float = 55.0,
+    target_high: float = 65.0,
+    acceptable_high: float = 70.0,
+    conservative_high: float = 75.0,
+) -> float:
+    """Piecewise PM cost: hard below 55, best near 60-65, no reward above 75."""
+    pm = float(pm or 0.0)
+    target_min = float(target_min or 60.0)
+    if pm < hard_min:
+        return 2.5 + (hard_min - pm) / max(hard_min, 1.0)
+    if pm < target_min:
+        return (target_min - pm) / max(target_min - hard_min, 1.0)
+    if pm <= target_high:
+        return 0.0
+    if pm <= acceptable_high:
+        return 0.04 * (pm - target_high) / max(acceptable_high - target_high, 1.0)
+    if pm <= conservative_high:
+        return 0.10 + 0.10 * (pm - acceptable_high) / max(conservative_high - acceptable_high, 1.0)
+    return 0.25 + min((pm - conservative_high) / 50.0, 1.5)
+
+
 def backfill_state_from_ngspice(state: DesignState, result: SimulationResult) -> None:
     for dev_id, ts in state.transistors.items():
         op = _op_for_device(result, dev_id)

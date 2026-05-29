@@ -37,10 +37,10 @@ topology:
     - {id: M9, role: load_cascode, stage: cascode, type: pmos, connections: {drain: vout, gate: vbias_pcas, source: pcas_out, body: vdd}}
 
 targets:
-  dc_gain:              {min: 45, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 5.0e+06, unit: Hz, priority: 1}
+  dc_gain:              {min: 50, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 2.0e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
-  slew_rate:            {min: 5.0e+06, unit: V/s, priority: 2}
+  slew_rate:            {min: 1.5e+07, unit: V/s, priority: 2}
   output_swing:         {min: 5.5e-01, unit: V, priority: 1}
   saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
   power:                {max: 3.0e-04, unit: W, priority: 2}
@@ -95,9 +95,9 @@ constraints:
 
 loss_terms:
   - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 12.0}
-  - {id: bw_deficit, formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 4.0}
-  - {id: pm_deficit, formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 5.0}
-  - {id: sr_deficit, formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 1.0}
+  - {id: bw_deficit, formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 9.0}
+  - {id: pm_window, formula: "pm_window_penalty(realized.phase_margin, targets.phase_margin.min)", weight: 2.5}
+  - {id: sr_deficit, formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 4.0}
   - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 5.0}
   - {id: saturation_margin_deficit, formula: "relu(targets.saturation_margin.min - realized.saturation_margin)/max(targets.saturation_margin.min, 1e-3)", weight: 40.0}
   - {id: power_over, formula: "relu(realized.power - targets.power.max)/max(targets.power.max, 1e-9)", weight: 2.0}

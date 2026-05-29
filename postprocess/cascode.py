@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from netlist.generator import generate_netlist
-from postprocess.common import backfill_state_from_ngspice
+from postprocess.common import backfill_state_from_ngspice, phase_margin_window_penalty
 from postprocess.ota import tune_single_stage_ota_operating_point
 from schemas.design_state import DesignState, Target
 from simulator.ngspice import NgspiceSimulator
@@ -309,6 +309,24 @@ def _stack_balance_presets(original: dict[str, float], vdd: float) -> list[dict[
                     "vbias_ncas": 0.66 * vdd,
                     "vbias_pcas": 0.66 * vdd,
                 },
+                {
+                    "phase": "telescopic_speed_bias",
+                    "vbias_tail": 0.54 * vdd,
+                    "vbias_ncas": 0.72 * vdd,
+                    "vbias_pcas": 0.48 * vdd,
+                },
+                {
+                    "phase": "telescopic_speed_bias",
+                    "vbias_tail": 0.58 * vdd,
+                    "vbias_ncas": 0.70 * vdd,
+                    "vbias_pcas": 0.52 * vdd,
+                },
+                {
+                    "phase": "telescopic_speed_bias",
+                    "vbias_tail": 0.62 * vdd,
+                    "vbias_ncas": 0.68 * vdd,
+                    "vbias_pcas": 0.56 * vdd,
+                },
             ]
         )
     if {"vbias_ptail", "vbias_ncas"}.issubset(original):
@@ -389,7 +407,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     score = 0.0
     score += 90.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
     score += 45.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-    score += 45.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    score += 36.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
     score += 35.0 * max(0.0, sr_min - sr) / max(sr_min, 1.0)
     score += 35.0 * max(0.0, swing_min - swing) / max(swing_min, 1.0)
     if power_max < float("inf"):
@@ -411,6 +429,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
     bw_deficit = max(0.0, bw_min - bw) / max(bw_min, 1.0)
     pm_deficit = max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    pm_window_cost = phase_margin_window_penalty(pm, pm_min or 60.0)
     sr_deficit = max(0.0, sr_min - sr) / max(sr_min, 1.0)
     swing_deficit = max(0.0, swing_min - swing) / max(swing_min, 1.0)
     op_deficit = max(0.0, -op_required_margin) / max(_target_saturation_margin(state), 1e-3)
@@ -429,6 +448,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
             "gain_deficit": gain_deficit,
             "bw_deficit": bw_deficit,
             "pm_deficit": pm_deficit,
+            "pm_window_cost": pm_window_cost,
             "sr_deficit": sr_deficit,
             "swing_deficit": swing_deficit,
             "measurements": meas,
@@ -525,14 +545,16 @@ def _refine_widths_for_speed(
     candidate_timeout_sec: float,
 ) -> dict[str, Any]:
     targets = state.targets
+    gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
     bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
     sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
     meas = best.get("measurements", {}) or {}
-    speed_gap = (
-        (bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min)
+    geometry_gap = (
+        (gain_min > 0.0 and float(meas.get("dc_gain_db", 0.0) or 0.0) < gain_min)
+        or (bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min)
         or (sr_min > 0.0 and float(meas.get("slew_rate", 0.0) or 0.0) < sr_min)
     )
-    if not speed_gap:
+    if not geometry_gap:
         return best
 
     templates = _width_speed_templates(state)
@@ -583,6 +605,22 @@ def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
         return [
             {
                 "__role_min_widths__": {
+                    "input_pair": 55.0e-6,
+                    "tail_current_source": 45.0e-6,
+                    "input_cascode": 18.0e-6,
+                    "current_mirror_load": 120.0e-6,
+                    "load_cascode": 90.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 0.75e-6,
+                    "tail_current_source": 0.30e-6,
+                    "input_cascode": 1.10e-6,
+                    "current_mirror_load": 2.00e-6,
+                    "load_cascode": 1.60e-6,
+                },
+            },
+            {
+                "__role_min_widths__": {
                     "input_pair": 22.0e-6,
                     "tail_current_source": 11.0e-6,
                     "input_cascode": 7.5e-6,
@@ -620,6 +658,39 @@ def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
                 "tail_current_source": 3.0,
                 "current_mirror_load": 2.0,
                 "load_cascode": 8.0,
+            },
+        ]
+    if family == "folded_cascode_ota":
+        return [
+            {
+                "__role_min_lengths__": {
+                    "input_pair": 1.35e-6,
+                    "tail_current_source": 1.20e-6,
+                    "current_mirror_load": 2.20e-6,
+                    "folded_cascode": 2.20e-6,
+                },
+                "input_pair": 1.25,
+                "tail_current_source": 0.85,
+                "current_mirror_load": 1.10,
+                "folded_cascode": 1.10,
+            },
+            {
+                "__role_min_lengths__": {
+                    "input_pair": 1.70e-6,
+                    "tail_current_source": 1.50e-6,
+                    "current_mirror_load": 2.80e-6,
+                    "folded_cascode": 2.80e-6,
+                },
+                "input_pair": 1.10,
+                "tail_current_source": 0.75,
+                "current_mirror_load": 0.90,
+                "folded_cascode": 0.90,
+            },
+            {
+                "input_pair": 1.6,
+                "tail_current_source": 1.4,
+                "current_mirror_load": 1.5,
+                "folded_cascode": 1.5,
             },
         ]
     return [
@@ -750,6 +821,7 @@ def _candidate_priority(item: dict[str, Any]) -> tuple[float, ...]:
         float(item.get("gain_deficit", 1.0)),
         float(item.get("swing_deficit", 1.0)),
         float(item.get("pm_deficit", 1.0)),
+        float(item.get("pm_window_cost", 1.0)),
         float(item.get("sr_deficit", 1.0)),
         float(item.get("bw_deficit", 1.0)),
         op_bucket,

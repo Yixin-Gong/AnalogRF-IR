@@ -13,6 +13,11 @@ IHP_MIM_CAP_MODEL = "cap_cmim"
 IHP_MIM_CAP_CORNER = "cap_typ"
 IHP_MIM_CAP_DENSITY_F_PER_UM2 = 1.5e-15
 IHP_MIM_CAP_MIN_SIDE_UM = 7.0
+IHP_RZ_MODEL = "rhigh"
+IHP_RZ_CORNER = "res_typ"
+IHP_RZ_SHEET_OHM_PER_SQ = 1360.0
+IHP_RZ_MIN_W_UM = 0.5
+IHP_RZ_MIN_L_UM = 0.96
 
 
 class NetlistGenerator:
@@ -63,7 +68,10 @@ class NetlistGenerator:
         model_name = self._proc.model_lib or "ptm_130.lib"
         model_path = self._resolve_model_path(model_name)
         corner = getattr(self._proc, "model_corner", "") or ""
-        osdi_libs = getattr(self._proc, "osdi_libs", []) or []
+        osdi_libs = list(getattr(self._proc, "osdi_libs", []) or [])
+        res_osdi = self._ihp_resistor_osdi_path() if self._should_use_ihp_resistor_compensation() else None
+        if res_osdi is not None and str(res_osdi) not in {str(item) for item in osdi_libs}:
+            osdi_libs.append(str(res_osdi))
         lines = []
         if osdi_libs:
             lines.append("* OSDI models are loaded by simulator/ngspice.py via local .spiceinit")
@@ -76,6 +84,9 @@ class NetlistGenerator:
         mim_cap_path = self._ihp_mim_cap_corner_path() if self._should_use_ihp_mim_compensation() else None
         if mim_cap_path is not None:
             lines.append(f'.lib "{mim_cap_path}" {IHP_MIM_CAP_CORNER}')
+        res_path = self._ihp_resistor_corner_path() if self._should_use_ihp_resistor_compensation() else None
+        if res_path is not None:
+            lines.append(f'.lib "{res_path}" {IHP_RZ_CORNER}')
         lines.extend([f".temp {self.state.simulation.temperature}", ""])
         return lines
 
@@ -247,6 +258,26 @@ class NetlistGenerator:
         cc = self._get_global_param("Cc")
         return bool(cc is not None and cc > 0 and self._is_ihp_sg13g2() and self._ihp_mim_cap_corner_path())
 
+    def _ihp_resistor_corner_path(self) -> Optional[Path]:
+        model_name = self._proc.model_lib or ""
+        if not model_name:
+            return None
+        model_path = self._resolve_model_path(model_name)
+        candidate = model_path.with_name("cornerRES.lib")
+        return candidate if candidate.exists() else None
+
+    def _ihp_resistor_osdi_path(self) -> Optional[Path]:
+        model_name = self._proc.model_lib or ""
+        if not model_name:
+            return None
+        model_path = self._resolve_model_path(model_name)
+        candidate = model_path.parent.parent / "osdi" / "r3_cmc.osdi"
+        return candidate if candidate.exists() else None
+
+    def _should_use_ihp_resistor_compensation(self) -> bool:
+        rz = self._get_global_param("Rz", 0.0) or 0.0
+        return bool(rz > 1e-9 and self._is_ihp_sg13g2() and self._ihp_resistor_corner_path())
+
     @staticmethod
     def _fmt_um(val_um: float) -> str:
         text = f"{val_um:.3f}".rstrip("0").rstrip(".")
@@ -261,6 +292,22 @@ class NetlistGenerator:
         side_um = self._ihp_mim_cap_side_um(cap_f)
         side = self._fmt_um(side_um)
         return f"X{instance_id} {plus} {minus} {IHP_MIM_CAP_MODEL} w={side} l={side}"
+
+    @staticmethod
+    def _ihp_rz_dimensions_um(resistance_ohm: float) -> tuple[float, float]:
+        resistance = max(float(resistance_ohm), 1.0)
+        width = IHP_RZ_MIN_W_UM
+        length = resistance * width / IHP_RZ_SHEET_OHM_PER_SQ
+        if length < IHP_RZ_MIN_L_UM:
+            length = IHP_RZ_MIN_L_UM
+            width = max(IHP_RZ_MIN_W_UM, IHP_RZ_SHEET_OHM_PER_SQ * length / resistance)
+        return width, length
+
+    def _ihp_resistor_instance_line(self, instance_id: str, plus: str, minus: str, resistance_ohm: float) -> str:
+        width_um, length_um = self._ihp_rz_dimensions_um(resistance_ohm)
+        width = self._fmt_um(width_um)
+        length = self._fmt_um(length_um)
+        return f"X{instance_id} {plus} {minus} gnd {IHP_RZ_MODEL} w={width} l={length}"
 
     def _gen_passives(self) -> List[str]:
         """Generate compensation components driven by global variables."""
@@ -295,7 +342,15 @@ class NetlistGenerator:
             )
         if rz > 1e-9:
             mid = "ncc"
-            lines.append(f"Rz {comp_node} {mid} {self._fmt_si(rz, 'Ohm')}")
+            if self._should_use_ihp_resistor_compensation():
+                width_um, length_um = self._ihp_rz_dimensions_um(rz)
+                lines.append(
+                    f"* Rz implemented as IHP SG13G2 {IHP_RZ_MODEL} target={self._fmt_si(rz, 'Ohm')} "
+                    f"w={self._fmt_um(width_um)} l={self._fmt_um(length_um)}"
+                )
+                lines.append(self._ihp_resistor_instance_line("Rz", comp_node, mid, rz))
+            else:
+                lines.append(f"Rz {comp_node} {mid} {self._fmt_si(rz, 'Ohm')}")
             if use_mim:
                 lines.append(self._mim_cap_instance_line("Cc", mid, out, cc))
             else:

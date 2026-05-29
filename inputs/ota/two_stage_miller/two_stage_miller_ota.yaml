@@ -29,29 +29,29 @@ topology:
     - {id: M9, role: output_bias_mirror,  stage: bias,   type: nmos, connections: {drain: vbias_stage2, gate: vbias_stage2, source: gnd, body: gnd}}
 
 targets:
-  dc_gain:              {min: 59, unit: dB, priority: 1}
+  dc_gain:              {min: 60, unit: dB, priority: 1}
   unity_gain_bandwidth: {min: 1.0e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
-  slew_rate:            {min: 5.0e+06, unit: V/s, priority: 1}
+  slew_rate:            {min: 1.0e+07, unit: V/s, priority: 1}
   output_swing:         {min: 4.9e-01, unit: V, priority: 1}
   saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
   power:                {max: 1.0e-03, unit: W, priority: 2}
 
 design_variables:
   - {device: M1, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_M1_M2}
-  - {device: M1, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M1, variable: L,     range: {min: 5.0e-07, max: 3.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
   - {device: M2, variable: gm_id, range: {min: 10, max: 22}, initial: 16, symmetry_label: sym_M1_M2}
-  - {device: M2, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
+  - {device: M2, variable: L,     range: {min: 5.0e-07, max: 3.0e-06}, initial: 1.0e-06, symmetry_label: sym_M1_M2}
   - {device: M3, variable: gm_id, range: {min: 5, max: 12}, initial: 7, symmetry_label: sym_load_M3_M4}
-  - {device: M3, variable: L,     range: {min: 3.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M3, variable: L,     range: {min: 3.0e-07, max: 3.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
   - {device: M4, variable: gm_id, range: {min: 5, max: 12}, initial: 7, symmetry_label: sym_load_M3_M4}
-  - {device: M4, variable: L,     range: {min: 3.0e-07, max: 2.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
+  - {device: M4, variable: L,     range: {min: 3.0e-07, max: 3.0e-06}, initial: 1.0e-06, symmetry_label: sym_load_M3_M4}
   - {device: M5, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_tail_M5_M8}
   - {device: M5, variable: L,     range: {min: 2.0e-07, max: 1.5e-06}, initial: 5.0e-07, symmetry_label: sym_tail_M5_M8}
   - {device: M8, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_tail_M5_M8}
   - {device: M8, variable: L,     range: {min: 2.0e-07, max: 1.5e-06}, initial: 5.0e-07, symmetry_label: sym_tail_M5_M8}
   - {device: M6, variable: gm_id, range: {min: 6, max: 18}, initial: 10}
-  - {device: M6, variable: L,     range: {min: 5.0e-07, max: 2.0e-06}, initial: 8.0e-07}
+  - {device: M6, variable: L,     range: {min: 5.0e-07, max: 3.0e-06}, initial: 8.0e-07}
   - {device: M7, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_outbias_M7_M9}
   - {device: M7, variable: L,     range: {min: 6.0e-07, max: 1.5e-06}, initial: 8.0e-07, symmetry_label: sym_outbias_M7_M9}
   - {device: M9, variable: gm_id, range: {min: 6, max: 14}, initial: 9, symmetry_label: sym_outbias_M7_M9}
@@ -69,22 +69,22 @@ corrections:
 
 constraints:
   gm_id: {min: 5, max: 25}
-  L: {min: 1.3e-07, max: 2.0e-06}
+  L: {min: 1.3e-07, max: 3.0e-06}
   devices:
-    M1: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
-    M2: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 2.0e-06}}
-    M3: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 2.0e-06}}
-    M4: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 2.0e-06}}
+    M1: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 3.0e-06}}
+    M2: {gm_id: {min: 10, max: 22}, L: {min: 5.0e-07, max: 3.0e-06}}
+    M3: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 3.0e-06}}
+    M4: {gm_id: {min: 5, max: 12},  L: {min: 3.0e-07, max: 3.0e-06}}
     M5: {gm_id: {min: 6, max: 14},  L: {min: 2.0e-07, max: 1.5e-06}}
     M8: {gm_id: {min: 6, max: 14},  L: {min: 2.0e-07, max: 1.5e-06}}
-    M6: {gm_id: {min: 6, max: 18},  L: {min: 5.0e-07, max: 2.0e-06}}
+    M6: {gm_id: {min: 6, max: 18},  L: {min: 5.0e-07, max: 3.0e-06}}
     M7: {gm_id: {min: 6, max: 14},  L: {min: 6.0e-07, max: 1.5e-06}}
     M9: {gm_id: {min: 6, max: 14},  L: {min: 6.0e-07, max: 1.5e-06}}
 
 loss_terms:
   - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 60.0}
   - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 90.0}
-  - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 12.0}
+  - {id: pm_window,    formula: "pm_window_penalty(realized.phase_margin, targets.phase_margin.min)", weight: 8.0}
   - {id: sr_deficit,   formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 8.0}
   - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 5.0}
   - {id: saturation_margin_deficit, formula: "relu(targets.saturation_margin.min - realized.saturation_margin)/max(targets.saturation_margin.min, 1e-3)", weight: 40.0}

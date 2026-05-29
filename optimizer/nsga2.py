@@ -1432,6 +1432,7 @@ def _safe_eval_loss_formula(formula: str, perf: Dict[str, float],
         "log10": math.log10,
         "log": math.log,
         "exp": math.exp,
+        "pm_window_penalty": _phase_margin_window_penalty,
         "penalty_if": lambda cond, penalty, base: penalty if cond else base,
         "realized": type("Realized", (), perf)(),
         "targets": _targets_namespace(targets),
@@ -1447,6 +1448,26 @@ def _safe_eval_loss_formula(formula: str, perf: Dict[str, float],
         return float(result)
     except Exception:
         return 1e6  # Internal implementation note.
+
+
+def _phase_margin_window_penalty(pm: float, target_min: float = 60.0) -> float:
+    pm = float(pm or 0.0)
+    target_min = float(target_min or 60.0)
+    hard_min = 55.0
+    target_high = 65.0
+    acceptable_high = 70.0
+    conservative_high = 75.0
+    if pm < hard_min:
+        return 2.5 + (hard_min - pm) / max(hard_min, 1.0)
+    if pm < target_min:
+        return (target_min - pm) / max(target_min - hard_min, 1.0)
+    if pm <= target_high:
+        return 0.0
+    if pm <= acceptable_high:
+        return 0.04 * (pm - target_high) / max(acceptable_high - target_high, 1.0)
+    if pm <= conservative_high:
+        return 0.10 + 0.10 * (pm - acceptable_high) / max(conservative_high - acceptable_high, 1.0)
+    return 0.25 + min((pm - conservative_high) / 50.0, 1.5)
 
 
 def _targets_namespace(targets: Dict[str, Any]) -> Any:

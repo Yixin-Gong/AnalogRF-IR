@@ -218,18 +218,25 @@ deterministic diagnosis, and full LLM diagnosis methods.
 
 The default OTA schemas use calibrated IHP 130 nm regression targets for method
 comparison under `simulation.cload = 1 pF` and a high-impedance output node:
-5T OTA at 25 dB / 15 MHz / 70 deg / 10 V/us, current-mirror OTA at
-28 dB / 15 MHz / 60 deg / 10 V/us, telescopic OTA at
-45 dB / 5 MHz / 60 deg / 5 V/us, folded-cascode OTA at
-37 dB / 20 MHz / 55 deg / 15 V/us, and two-stage Miller OTA at
-59 dB / 10 MHz / 60 deg / 5 V/us. Output-swing targets are topology-specific,
+5T OTA at 25 dB / 25 MHz / 60 deg / 15 V/us, current-mirror OTA at
+28 dB / 30 MHz / 60 deg / 25 V/us, folded-cascode OTA at
+42 dB / 25 MHz / 60 deg / 15 V/us, telescopic OTA at
+50 dB / 20 MHz / 60 deg / 15 V/us, and two-stage Miller OTA at
+60 dB / 10 MHz / 60 deg / 10 V/us. Output-swing targets are topology-specific,
 and the `saturation_margin` target records a diagnostic 10 mV
 `Vds - Vdsat` headroom check without counting it as a full-spec pass criterion.
 These are high-impedance capacitive-load targets; they are not low-resistance,
 pad, cable, or 50 ohm load targets.
 For the IHP two-stage Miller OTA, the feedback compensation value `Cc` is
 realized in generated ngspice netlists with the IHP SG13G2 `cap_cmim` MIM
-capacitor model and `cornerCAP.lib` `cap_typ` corner.
+capacitor model and `cornerCAP.lib` `cap_typ` corner. The nulling resistor
+`Rz` is realized as an IHP SG13G2 `rhigh` PDK resistor from `cornerRES.lib`
+`res_typ`, not as an ideal resistor.
+
+Phase-margin scoring uses a window rather than a one-way reward: PM below
+55 deg is treated as a hard stability failure, 60-65 deg is the preferred
+target window, 55-70 deg is acceptable, and PM above 75 deg receives no extra
+credit because it usually means bandwidth is being left on the table.
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -248,19 +255,19 @@ python scripts/plot_diagnosis_validation.py
 
 Latest IHP130 OTA evaluation snapshots:
 
-The latest full-flow check uses `LLM + fallback postprocess`, seed `10`,
-`maxiter = 30`, IHP SG13G2, and a high-impedance `CL = 1 pF` output load. The
-same fixed schema targets above are used for all five OTA examples, and
-`saturation_margin` remains a diagnostic headroom check rather than a
-full-spec pass criterion.
+The table below is the latest completed reference snapshot, re-scored against
+the updated targets above. The new targets deliberately make folded-cascode,
+telescopic, and two-stage gain/speed harder than the earlier pass-oriented
+regression point, so this snapshot is now a diagnostic baseline rather than a
+claim that every topology already passes the retargeted matrix.
 
-| Topology | Pass iter | Gain | UGBW | PM | SR | Swing | Power |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
-| Current-mirror OTA | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
-| Telescopic OTA | 1 | 49.26 dB | 5.89 MHz | 63.8 deg | 7.36 V/us | 0.838 V | 13.61 uW |
-| Folded-cascode OTA | 7 | 38.02 dB | 32.97 MHz | 59.2 deg | 21.96 V/us | 0.650 V | 48.15 uW |
-| Two-stage Miller OTA | 6 | 59.04 dB | 15.87 MHz | 65.4 deg | 14.70 V/us | 0.624 V | 155.84 uW |
+| Topology | Updated-target status | Reference iter | Gain | UGBW | PM | SR | Swing | Power |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5T OTA | pass | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
+| Current-mirror OTA | pass | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
+| Folded-cascode OTA | gain/PM short | 7 | 38.02 dB | 32.97 MHz | 59.2 deg | 21.96 V/us | 0.650 V | 48.15 uW |
+| Telescopic OTA | gain/UGBW/SR short | 1 | 49.26 dB | 5.89 MHz | 63.8 deg | 7.36 V/us | 0.838 V | 13.61 uW |
+| Two-stage Miller OTA | gain short | 6 | 59.04 dB | 15.87 MHz | 65.4 deg | 14.70 V/us | 0.624 V | 155.84 uW |
 
 ![Full-flow OTA target achievement](docs/assets/full_flow_ota_results.png)
 

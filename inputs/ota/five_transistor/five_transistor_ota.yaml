@@ -47,9 +47,9 @@ topology:
 
 targets:
   dc_gain:              {min: 25.0, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 1.5e+07, unit: Hz, priority: 1}
-  phase_margin:         {min: 70, unit: deg, priority: 1}
-  slew_rate:            {min: 1.0e+07, unit: V/s, priority: 2}
+  unity_gain_bandwidth: {min: 2.5e+07, unit: Hz, priority: 1}
+  phase_margin:         {min: 60, unit: deg, priority: 1}
+  slew_rate:            {min: 1.5e+07, unit: V/s, priority: 2}
   output_swing:         {min: 6.5e-01, unit: V, priority: 1}
   saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
   power:                {max: 2.0e-04, unit: W, priority: 9}
@@ -88,7 +88,7 @@ constraints:
 loss_terms:
   - {id: gain_deficit, formula: "relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)", weight: 4.0, description: "DC gain shortfall"}
   - {id: bw_deficit,   formula: "relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min, 1)", weight: 2.0, description: "BW shortfall"}
-  - {id: pm_deficit,   formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 0.5, description: "PM penalty"}
+  - {id: pm_window,    formula: "pm_window_penalty(realized.phase_margin, targets.phase_margin.min)", weight: 0.8, description: "PM window penalty: hard below 55 deg, best around 60-65 deg, no reward above 75 deg"}
   - {id: sr_deficit,   formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 0.8, description: "Slew-rate shortfall"}
   - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 1.0, description: "Output-swing shortfall"}
   - {id: saturation_margin_deficit, formula: "relu(targets.saturation_margin.min - realized.saturation_margin)/max(targets.saturation_margin.min, 1e-3)", weight: 40.0, description: "VDS-VDSAT saturation margin shortfall"}

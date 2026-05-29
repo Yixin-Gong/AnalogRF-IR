@@ -16,14 +16,17 @@ base_overrides:
     env: environment_ihp_sg13g2.yaml
     topology: yaml
   optimizer:
-    generations: 50
-    pop_size: 100
+    generations: 30
+    pop_size: 80
   reoptimization:
-    generations: 3
-    pop_size: 24
+    generations: 8
+    pop_size: 64
   llm:
-    model: deepseek-v4-flash
-    thinking: disabled
+    model: deepseek-v4-pro
+    thinking: enabled
+    timeout: 180
+    max_tokens: 12000
+    reasoning_effort: max
     temperature: 0.0
   intervention:
     max_actions: 8
@@ -55,10 +58,10 @@ cases:
 
   - name: diagnosis_spice_postprocess_fallback
     family: diagnosis_control
-    description: Deterministic diagnosis-guided rounds with constrained local intervention evidence and fallback postprocess, but without LLM planning; runs up to 20 rounds when specs remain unsatisfied.
+    description: Deterministic diagnosis-guided rounds with constrained local intervention evidence and fallback postprocess, but without LLM planning; runs up to 30 rounds when specs remain unsatisfied.
     overrides:
       agent:
-        rounds: 20
+        rounds: 30
       llm:
         provider: deterministic
       intervention:
@@ -69,10 +72,10 @@ cases:
 
   - name: llm_diagnosis_postprocess_fallback
     family: combined_method
-    description: Full LLM diagnosis flow with constrained local intervention evidence and topology-specific fallback repair for IHP130 OTA families; runs up to 20 rounds when specs remain unsatisfied.
+    description: Full LLM diagnosis flow with constrained local intervention evidence and topology-specific fallback repair for IHP130 OTA families; runs up to 30 rounds when specs remain unsatisfied.
     overrides:
       agent:
-        rounds: 20
+        rounds: 30
       llm:
         provider: deepseek
       intervention:

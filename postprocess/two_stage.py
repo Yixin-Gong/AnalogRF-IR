@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core.compensation import has_miller_rc_compensation
 from netlist.generator import generate_netlist
-from postprocess.common import backfill_state_from_ngspice
+from postprocess.common import backfill_state_from_ngspice, phase_margin_window_penalty
 from schemas.design_state import DesignState, Target
 from simulator.ngspice import NgspiceSimulator
 
@@ -277,7 +277,7 @@ def tune_two_stage_compensation(
     max_refine_candidates: int = 8,
     max_load_candidates: int = 8,
     max_current_candidates: int = 16,
-    max_gain_candidates: int = 8,
+    max_gain_candidates: int = 16,
     time_budget_sec: float = 160.0,
     candidate_timeout_sec: float = 12.0,
 ) -> dict:
@@ -329,6 +329,20 @@ def tune_two_stage_compensation(
         for dev_id in input_pair_ids
         if dev_id in state.transistors
     }
+    gain_refine_ids = [
+        dev.id
+        for dev in state.topology.devices
+        if dev.role in {"current_mirror_load", "second_stage_gain", "output_current_source"}
+    ]
+    gain_refine_dims = {
+        dev_id: (
+            state.transistors[dev_id].parameters.W,
+            state.transistors[dev_id].parameters.L,
+            state.transistors[dev_id].L_strategy,
+        )
+        for dev_id in gain_refine_ids
+        if dev_id in state.transistors
+    }
     base_currents = {
         "I_tail": float(state.global_parameters.get("I_tail", 0.0) or 0.0),
         "I_stage2": float(state.global_parameters.get("I_stage2", 0.0) or 0.0),
@@ -356,6 +370,14 @@ def tune_two_stage_compensation(
 
     def apply_input_pair_geometry(width_scale: float, length_scale: float) -> None:
         for dev_id, (base_w, base_l, base_strategy_l) in input_pair_dims.items():
+            ts = state.transistors[dev_id]
+            ts.parameters.W = min(max(_snap_to_grid(base_w * width_scale, w_grid), min_w), max_w)
+            scaled_l = min(max(_snap_to_grid(base_l * length_scale, l_grid), min_l), max_l)
+            ts.parameters.L = scaled_l
+            ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
+
+    def apply_gain_refine_geometry(width_scale: float, length_scale: float) -> None:
+        for dev_id, (base_w, base_l, base_strategy_l) in gain_refine_dims.items():
             ts = state.transistors[dev_id]
             ts.parameters.W = min(max(_snap_to_grid(base_w * width_scale, w_grid), min_w), max_w)
             scaled_l = min(max(_snap_to_grid(base_l * length_scale, l_grid), min_l), max_l)
@@ -394,8 +416,8 @@ def tune_two_stage_compensation(
     def robust_spec_pass(meas: dict) -> bool:
         if not spec_pass(meas):
             return False
-        pm_guard = 2.0 if pm_min > 0 else 0.0
-        return meas.get("phase_margin", 0.0) >= pm_min + pm_guard
+        pm = meas.get("phase_margin", 0.0)
+        return pm_min <= 0.0 or (pm >= pm_min and pm <= 70.0)
 
     def score_measurements(meas: dict) -> float:
         gain = meas.get("dc_gain_db", 0.0)
@@ -405,9 +427,9 @@ def tune_two_stage_compensation(
         score = 0.0
         score += 25.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
         score += 25.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-        score += 70.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
-        if pm < 0.0:
-            score += 80.0 + min(abs(pm), 180.0) / 4.0
+        score += 48.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
+        if pm < 55.0:
+            score += 80.0 + max(0.0, 55.0 - pm)
         if bw_max < float("inf"):
             score += 0.7 * max(0.0, bw - bw_max) / max(bw_max, 1.0)
         if power_max < float("inf"):
@@ -422,7 +444,6 @@ def tune_two_stage_compensation(
         if icmr_max_min is not None:
             score += 4.0 * max(0.0, icmr_max_min - meas.get("icmr_max", 0.0)) / max(icmr_max_min, 1.0)
         if pm >= pm_min and gain >= gain_min and bw >= bw_min:
-            score -= min(pm - pm_min, 40.0) / 200.0
             score -= min(max(0.0, bw - bw_min) / max(bw_min, 1.0), 1.0) / 50.0
         return score
 
@@ -780,26 +801,31 @@ def tune_two_stage_compensation(
         if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
             return best
         candidates = (
-            (1.20, 1.80),
-            (1.50, 2.30),
-            (2.00, 3.00),
-            (1.20, 2.00),
-            (1.50, 2.60),
-            (2.00, 2.60),
-            (1.00, 2.00),
-            (1.00, 2.60),
+            (1.20, 1.80, 1.00, 2.00),
+            (1.50, 2.30, 1.00, 2.40),
+            (2.00, 3.00, 1.00, 3.00),
+            (1.20, 2.00, 0.90, 2.80),
+            (1.50, 2.60, 0.90, 3.00),
+            (2.00, 2.60, 1.10, 2.80),
+            (1.00, 2.00, 0.85, 3.00),
+            (1.00, 2.60, 0.85, 3.00),
+            (1.20, 3.00, 0.75, 3.00),
+            (1.60, 3.00, 0.85, 3.00),
+            (2.20, 3.00, 1.00, 3.00),
+            (1.40, 2.80, 1.20, 2.80),
         )
         selected = best
         original_timeout = getattr(sim, "timeout_sec", None)
         if original_timeout is not None:
             sim.timeout_sec = min(float(original_timeout), max(float(candidate_timeout_sec), 12.0))
         try:
-            for width_scale, length_scale in candidates[:max_gain_candidates]:
+            for width_scale, length_scale, gain_width_scale, gain_length_scale in candidates[:max_gain_candidates]:
                 if time.time() - started >= time_budget_sec:
                     break
                 apply_load_scale(best.get("load_scale", 1.0))
                 apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
                 apply_input_pair_geometry(width_scale, length_scale)
+                apply_gain_refine_geometry(gain_width_scale, gain_length_scale)
                 state.global_parameters["Cc"] = best["Cc"]
                 state.global_parameters["Rz"] = best["Rz"]
                 trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=True)
@@ -816,6 +842,8 @@ def tune_two_stage_compensation(
                         "score": score,
                         "input_pair_width_scale": width_scale,
                         "input_pair_length_scale": length_scale,
+                        "gain_refine_width_scale": gain_width_scale,
+                        "gain_refine_length_scale": gain_length_scale,
                         "measurements": meas,
                         "_has_operating_points": bool(trial.operating_points),
                     }
@@ -832,6 +860,10 @@ def tune_two_stage_compensation(
     apply_input_pair_geometry(
         best.get("input_pair_width_scale", 1.0),
         best.get("input_pair_length_scale", 1.0),
+    )
+    apply_gain_refine_geometry(
+        best.get("gain_refine_width_scale", 1.0),
+        best.get("gain_refine_length_scale", 1.0),
     )
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
