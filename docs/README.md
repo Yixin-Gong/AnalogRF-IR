@@ -163,11 +163,13 @@ two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
 deterministic diagnosis, and full LLM diagnosis methods.
 
 The default OTA schemas use calibrated IHP 130 nm regression targets for method
-comparison under `simulation.cload = 1 pF`: 24.5 dB / 2.3 MHz for the 5T OTA,
-26 dB / 1 MHz for the current-mirror OTA, 42 dB / 0.2 MHz for the telescopic
-OTA, 32 dB / 50 MHz for the folded-cascode OTA, and 46 dB / 12 MHz for the
-two-stage Miller OTA. These are high-impedance capacitive-load targets; they
-are not low-resistance, pad, cable, or 50 ohm load targets.
+comparison under `simulation.cload = 1 pF` and a high-impedance output node:
+5T OTA at 25 dB / 25 MHz / 60 deg / 15 V/us, current-mirror OTA at
+28 dB / 30 MHz / 60 deg / 25 V/us, folded-cascode OTA at
+45 dB / 20 MHz / 60 deg / 12 V/us, telescopic OTA at
+48 dB / 7 MHz / 60 deg / 6 V/us, and two-stage Miller OTA at
+57 dB / 20 MHz / 60 deg / 10 V/us. These are high-impedance capacitive-load
+targets; they are not low-resistance, pad, cable, or 50 ohm load targets.
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
@@ -180,25 +182,23 @@ python scripts/run_ablation.py \
 python scripts/plot_ablation_results.py \
   --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
   --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
+python scripts/plot_full_flow_results.py --out-dir docs/assets
+python scripts/plot_diagnosis_validation.py
 ```
 
 Latest IHP130 OTA evaluation snapshots:
 
-These figures were regenerated from the 60-run IHP130 OTA matrix: five OTA
-topologies, four method settings, three seeds, and up to 20 diagnosis rounds
-per run. The ablation manifest records the best verified result for each job,
-so a later exploratory diagnosis round cannot overwrite an earlier, better
-validated candidate.
+The full-flow snapshot is re-scored against the current fixed targets above.
+Folded-cascode, telescopic, and two-stage Miller use the updated
+topology-guided repair flow and pass the current high-impedance CL=1 pF
+targets.
 
-![Ablation success rate by method and OTA topology](assets/ablation_success_rate.png)
+![Full-flow OTA target achievement](assets/full_flow_ota_results.png)
 
-![Spec achievement heatmap across all bundled OTAs](assets/ablation_spec_achievement_heatmap.png)
+Diagnosis claims are checked by local SPICE probes, and executable actions are
+reported through explicit objective-gated apply/skip records.
 
-![Gain-bandwidth-power tradeoff across OTA methods](assets/ablation_gain_bandwidth_power.png)
-
-![Method traceability across LLM, postprocess, and ngspice](assets/ablation_method_traceability.png)
-
-![Measured progressive Pareto frontier for the IHP130 current-mirror OTA](assets/progressive_pareto_current_mirror.png)
+![Diagnosis validation from local SPICE probes and objective-gated actions](assets/diagnosis_validation.png)
 
 Progressive target tightening can be used after a baseline passes to map a
 measured ngspice Pareto frontier. The script materializes one schema per ladder

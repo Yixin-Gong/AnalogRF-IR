@@ -1,109 +1,142 @@
 # AnalogRF-IR
 
-AnalogRF-IR is a schema-driven analog and RF circuit optimization project for simulator-backed, agent-assisted circuit design. It turns circuit intent into a typed intermediate representation, runs gm/ID-aware optimization, validates candidates with ngspice, and records typed causal evidence so planner actions can be accepted or rejected by explicit optimizer-side math.
+AnalogRF-IR is a simulator-backed analog circuit optimization framework with
+explicit causal diagnosis and evidence-gated agent actions. The current
+implementation focuses on OTA sizing in IHP SG13G2 130 nm under high-impedance
+capacitive loading, while keeping the schema, optimizer, simulator, diagnosis,
+and postprocess layers separated for reproducible ablation.
 
-The current development focus is OTA-class analog design in IHP 130 nm, including current-mirror, telescopic, and folded-cascode OTAs, plus the earlier five-transistor and two-stage Miller examples. Comparator and broader RF support are present as extensible foundations, but are not yet signoff-grade flows.
+The central design contract is simple: optimizer, human review, deterministic
+diagnosis, and LLM planning all operate through the same typed YAML schema, and
+an executable edit is admitted only when it is supported by optimizer-side
+evidence and physical validation.
 
-> License notice: this repository is source-available only. All rights are reserved. See [LICENSE](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/LICENSE).
+> License: source-available, all rights reserved. See [LICENSE](LICENSE).
 
-## Highlights
+## Core Capabilities
 
-- YAML-first design state for topology, variables, targets, constraints, evaluations, and concise diagnostics.
-- ASIR semantic extraction for roles, symmetry groups, gain stages, bias paths, and compensation networks.
-- gm/ID surrogate sizing with NSGA-II exploration.
-- Hard validation for schema write policy, symmetry consistency, operating-point safety, and layout-realizable W/L constraints.
-- Layout realization for oversized devices through finger folding, parallel devices, and series length segmentation.
-- ngspice-backed AC, DC, transient, operating-point, slew-rate, output-swing, headroom, and power measurements.
-- Optional postprocess repair for OP validation, bias balancing, and compensation tuning.
-- LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
-- DeepSeek-compatible LLM planner with deterministic fallback behavior.
-- Structure-aware causal diagnosis with typed causal edges, typed ASIR dependencies, local intervention modeling, and evidence-gated guarded actions.
-- Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including clean plotting outputs.
-- Concise schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
+- YAML design schemas for topology, device roles, variables, constraints,
+  targets, evaluations, process setup, and concise diagnostics.
+- gm/ID-guided surrogate sizing with bounded NSGA-II exploration.
+- ngspice validation for AC gain, UGBW, phase margin, transient slew rate,
+  output swing, power, and operating-point/headroom metrics.
+- Typed causal diagnosis over device roles, bias paths, symmetry groups,
+  compensation networks, pole/gain dependencies, and simulator evidence.
+- Local SPICE intervention models for action-to-violation estimates.
+- Constrained action optimization with symmetry copying, physical gates, and
+  explicit apply/skip records.
+- Optional topology-aware postprocess repair for operating-point balance,
+  cascode headroom, and Miller compensation.
+- DeepSeek-compatible LLM planning as a diagnosis and selection layer, not as
+  an unrestricted schema editor.
 
-## Diagnosis-Centered Method
-
-The current OTA flow is organized around a shared executable schema. Human
-review and LLM diagnosis can propose or select actions, but accepted edits must
-pass the optimizer-side evidence gate and ngspice-backed validation.
+## Method Overview
 
 ![Diagnosis-centered analog optimization architecture](docs/assets/analogdiag_architecture.png)
 
-Architecture sketch: human review and LLM diagnosis interact through the shared
-schema, while accepted edits are executed by the surrogate-search-SPICE-repair
-loop.
-
-The schema keeps the concise decision state readable while large simulator
-artifacts stay in JSON evidence files.
+The flow uses a shared schema state as the executable interface between human
+review, agent diagnosis, surrogate search, ngspice validation, and repair.
+Planner suggestions are not applied directly. They must map to admissible
+schema commands.
 
 ![Schema as the shared executable state](docs/assets/analogdiag_schema_state.png)
 
-Schema sketch: the executable state is organized as topology, variables,
-targets, typed dependencies, and simulator evidence.
-
-The execution side combines gm/ID estimation, NSGA-II search, ngspice
-validation, explicit fallback repair, and short re-optimization after accepted
-diagnosis actions.
-
-The gm/ID surrogate is used as a fast design-space guide, while ngspice remains
-the final measurement authority. Stability targets follow the usual loop-gain
-view behind Middlebrook feedback analysis; the current OTA benches extract UGB
-and phase margin from AC response data, with the schema leaving room for
-return-ratio loop-gain testbenches when a closed-loop block requires them.
+The schema records topology \(G\), editable variables \(\theta\), targets and
+losses, typed dependencies, and simulator evidence. Large artifacts remain in
+JSON logs, keeping YAML inputs reviewable.
 
 ![Optimization and validation execution loop](docs/assets/analogdiag_optimization_loop.png)
 
-Execution sketch: the circular loop keeps the gm/ID surrogate, bounded NSGA-II
-search, SPICE validation, candidate archive, and objective gate in one path.
-
-The diagnosis side converts failed specs into typed causal evidence and local
-SPICE interventions, then admits only optimizer-supported schema edits.
+The execution loop combines gm/ID estimation, bounded NSGA-II search, SPICE
+validation, candidate archiving, objective gating, and optional repair.
+Middlebrook-style loop-gain reasoning motivates the UGBW/phase-margin
+measurements and Miller-compensation tuning.
 
 ![Causal diagnosis and evidence-gated action selection](docs/assets/analogdiag_diagnosis_loop.png)
 
-Diagnosis sketch: failed metrics are converted into typed edges, ranked causes,
-local SPICE probes, and optimizer-approved apply/skip decisions.
+The diagnosis layer turns failed specifications into typed causal edges, ranked
+causes, local SPICE probes, and optimizer-approved actions. Unsupported LLM
+edits are recorded as skipped notes.
 
-## Repository Layout
+## Evidence Gate
+
+For normalized violation vector \(\mathbf{v}\), action response column
+\(\mathbf{A}_{:,j}\), and weights \(w_i\), the action objective is
 
 ```text
-asir/          Semantic IR, profile selection, and extraction helpers
-core/          Design rules, validation, regions, and process environment models
-diagnostics/   Causal diagnostics, intervention models, and agent-safe tuning
-feasibility/   Physics-informed feasibility estimation
-flow/          End-to-end orchestration and LangGraph agent loop control
-frontends/     YAML and SPICE input frontends
-inputs/        Maintained circuit-family schema examples
-layout/        Physical realization helpers for folding and segmentation
-netlist/       Schema-to-SPICE generation
-optimizer/     Surrogate evaluators and NSGA-II optimization
-outputs/       Run artifact writers and concise schema views
-postprocess/   Optional ngspice-guided repair and compensation tuning
-schemas/       Typed design-state schema definitions
-simulator/     ngspice execution and measurement extraction
-specs/         Specification and metric utilities
-tests/         Regression tests
-docs/          Architecture, quickstart, schema, and development notes
+J(v) = sum_i w_i v_i^2
+v'_j = [v + A_:,j]_+
 ```
 
-## Requirements
+An action can be applied only if it passes the physical gate and is either
+selected by the constrained optimizer or reduces the weighted violation
+objective:
+
+```text
+admissible(a) := physical_gate(a) AND
+                 (optimizer_selected(a) OR delta_J(a) < 0)
+```
+
+This rule is the boundary between diagnosis and authority: the LLM can explain
+and select, but it cannot bypass simulator-backed optimizer evidence.
+
+## IHP130 OTA Targets
+
+The maintained OTA schemas use high-impedance \(C_L \approx 1\) pF targets.
+They are not pad, cable, low-resistance, or 50 ohm load specifications.
+
+| Topology | Gain | UGBW | PM | SR | Swing | Power |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5T OTA | 25 dB | 25 MHz | 60 deg | 15 V/us | 0.65 V | 200 uW |
+| Current-mirror OTA | 28 dB | 30 MHz | 60 deg | 25 V/us | 0.60 V | 300 uW |
+| Folded-cascode OTA | 45 dB | 20 MHz | 60 deg | 12 V/us | 0.60 V | 600 uW |
+| Telescopic OTA | 48 dB | 7 MHz | 60 deg | 6 V/us | 0.55 V | 300 uW |
+| Two-stage Miller OTA | 57 dB | 20 MHz | 60 deg | 10 V/us | 0.49 V | 1000 uW |
+
+Phase margin is treated as a bounded stability window: below 55 deg is a hard
+failure, 60-65 deg is preferred, 55-70 deg is acceptable for schematic-level
+experiments, and values above 75 deg receive no extra reward. The default
+schema records a diagnostic 10 mV \(V_{DS}-V_{DS,sat}\) headroom check without
+counting it as a full-spec pass target.
+
+For the IHP two-stage Miller OTA, `Cc` is emitted as the SG13G2 `cap_cmim` MIM
+capacitor and `Rz` as the SG13G2 `rhigh` PDK resistor.
+
+## Current Reference Results
+
+The following seed-10 full-flow reference points were measured with ngspice and
+scored against the targets above.
+
+| Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5T OTA | pass | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
+| Current-mirror OTA | pass | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
+| Folded-cascode OTA | pass | 1 | 45.62 dB | 27.33 MHz | 63.9 deg | 19.17 V/us | 0.812 V | 25.01 uW |
+| Telescopic OTA | pass | 6 | 51.96 dB | 9.33 MHz | 60.6 deg | 6.09 V/us | 0.836 V | 20.31 uW |
+| Two-stage Miller OTA | pass | 7 | 57.75 dB | 26.46 MHz | 62.7 deg | 13.02 V/us | 0.592 V | 140.37 uW |
+
+![Full-flow OTA target achievement](docs/assets/full_flow_ota_results.png)
+
+Diagnosis quality is evaluated from artifacts rather than pass rate alone:
+local SPICE probes test whether proposed actions reduce failed violations, and
+the evidence gate records which actions are admitted.
+
+![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
+
+## Installation
+
+Requirements:
 
 - Ubuntu Linux or WSL Ubuntu
-- Python 3.10 or newer
-- `python3-venv`, `pip`, and `ngspice`
+- Python 3.10+
+- `ngspice`
 - Python packages in `requirements.txt`
-- Process model files and lookup tables for the target technology
-
-Install system dependencies:
+- IHP SG13G2 model files referenced by `environment_ihp_sg13g2.yaml`
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 python3-venv python3-pip ngspice
-```
 
-Create a local Python environment:
-
-```bash
 cd /path/to/AnalogRF-IR
 python3 -m venv .venv
 . .venv/bin/activate
@@ -111,320 +144,100 @@ python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
 ```
 
-## Quick Start
+## Running A Flow
 
-Run a two-stage OTA optimization:
-
-```bash
-cd /path/to/AnalogRF-IR
-. .venv/bin/activate
-
-python main.py \
-  --env environment_ihp_sg13g2.yaml \
-  --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
-  --topology two_stage \
-  --generations 4 \
-  --pop-size 20 \
-  --seed 17
-```
-
-Run a five-transistor OTA optimization:
-
-```bash
-python main.py \
-  --env environment_ihp_sg13g2.yaml \
-  --schema inputs/ota/five_transistor/five_transistor_ota.yaml \
-  --topology five \
-  --generations 4 \
-  --pop-size 20 \
-  --seed 17
-```
-
-Run an IHP 130 nm OTA topology:
+Single topology optimization:
 
 ```bash
 python main.py \
   --env environment_ihp_sg13g2.yaml \
   --schema inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml \
   --topology yaml \
-  --generations 50 \
-  --pop-size 100 \
-  --seed 1
+  --generations 30 \
+  --pop-size 80 \
+  --seed 10
 ```
 
-Run the regression suite:
-
-```bash
-. .venv/bin/activate
-python -m pytest -q
-```
-
-## LLM-Guided Diagnosis
-
-The multi-round agent flow uses LangGraph to separate simulation, diagnosis, schema-command generation, and command execution. The agent reads generated `design_state.yaml` artifacts as the concise source of truth and only applies edits through schema-level tool commands.
-
-Set a DeepSeek API key before running LLM-guided rounds. Environment
-variables work, but the preferred local setup is a key file referenced by a
-gitignored YAML config:
-
-```bash
-export DEEPSEEK_API_KEY="..."
-```
+LLM-assisted diagnosis uses a local config file. The API key can be supplied
+through the environment or a gitignored key file.
 
 ```bash
 mkdir -p ~/.config/analogrf-ir
 printf '%s\n' 'YOUR_DEEPSEEK_KEY' > ~/.config/analogrf-ir/deepseek.key
-
 cp configs/local/llm.example.yaml configs/local/llm.yaml
-# Edit configs/local/llm.yaml if your key file lives elsewhere.
 ```
-
-Run a DeepSeek-guided two-stage OTA flow:
 
 ```bash
 python main.py \
   --config configs/local/llm.yaml \
   --env environment_ihp_sg13g2.yaml \
   --schema inputs/ota/two_stage_miller/two_stage_miller_ota.yaml \
-  --topology two_stage \
-  --generations 4 \
-  --pop-size 20 \
-  --seed 17 \
-  --agent-rounds 20 \
-  --llm-provider deepseek \
-  --llm-model deepseek-v4-pro \
-  --llm-thinking enabled \
-  --llm-reasoning-effort max \
-  --llm-timeout 180 \
-  --llm-max-tokens 12000 \
+  --topology yaml \
+  --agent-rounds 30 \
   --postprocess-policy fallback \
-  --reopt-generations 3 \
-  --reopt-pop-size 12 \
-  --intervention-max-actions 3
+  --seed 10
 ```
 
-CLI options can also be edited in YAML and then overridden from the command
-line:
+## Experiments And Figures
+
+Run the OTA ablation matrix:
 
 ```bash
-python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
-```
-
-The current IHP 130 nm OTA ablation matrix is defined in
-`configs/ablation_ihp130_ota.yaml`. It compares five canonical OTA examples:
-five-transistor, current-mirror, telescopic-cascode, folded-cascode, and
-two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
-deterministic diagnosis, and full LLM diagnosis methods.
-
-The default OTA schemas use calibrated IHP 130 nm regression targets for method
-comparison under `simulation.cload = 1 pF` and a high-impedance output node:
-5T OTA at 25 dB / 25 MHz / 60 deg / 15 V/us, current-mirror OTA at
-28 dB / 30 MHz / 60 deg / 25 V/us, folded-cascode OTA at
-42 dB / 25 MHz / 60 deg / 15 V/us, telescopic OTA at
-50 dB / 20 MHz / 60 deg / 15 V/us, and two-stage Miller OTA at
-60 dB / 10 MHz / 60 deg / 10 V/us. Output-swing targets are topology-specific,
-and the `saturation_margin` target records a diagnostic 10 mV
-`Vds - Vdsat` headroom check without counting it as a full-spec pass criterion.
-These are high-impedance capacitive-load targets; they are not low-resistance,
-pad, cable, or 50 ohm load targets.
-For the IHP two-stage Miller OTA, the feedback compensation value `Cc` is
-realized in generated ngspice netlists with the IHP SG13G2 `cap_cmim` MIM
-capacitor model and `cornerCAP.lib` `cap_typ` corner. The nulling resistor
-`Rz` is realized as an IHP SG13G2 `rhigh` PDK resistor from `cornerRES.lib`
-`res_typ`, not as an ideal resistor.
-
-Phase-margin scoring uses a window rather than a one-way reward: PM below
-55 deg is treated as a hard stability failure, 60-65 deg is the preferred
-target window, 55-70 deg is acceptable, and PM above 75 deg receives no extra
-credit because it usually means bandwidth is being left on the table.
-
-```bash
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --local-config configs/local/llm.yaml --run --keep-going
 python scripts/run_ablation.py \
   --config configs/ablation_ihp130_ota.yaml \
-  --output-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20 \
-  --llm-api-key-file ~/.config/analogrf-ir/deepseek.key \
+  --local-config configs/local/llm.yaml \
   --run --keep-going
-python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
-  --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
-python scripts/plot_diagnosis_validation.py
 ```
 
-Latest IHP130 OTA evaluation snapshots:
-
-The table below is the latest completed reference snapshot, re-scored against
-the updated targets above. The new targets deliberately make folded-cascode,
-telescopic, and two-stage gain/speed harder than the earlier pass-oriented
-regression point, so this snapshot is now a diagnostic baseline rather than a
-claim that every topology already passes the retargeted matrix.
-
-| Topology | Updated-target status | Reference iter | Gain | UGBW | PM | SR | Swing | Power |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | pass | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
-| Current-mirror OTA | pass | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
-| Folded-cascode OTA | gain/PM short | 7 | 38.02 dB | 32.97 MHz | 59.2 deg | 21.96 V/us | 0.650 V | 48.15 uW |
-| Telescopic OTA | gain/UGBW/SR short | 1 | 49.26 dB | 5.89 MHz | 63.8 deg | 7.36 V/us | 0.838 V | 13.61 uW |
-| Two-stage Miller OTA | gain short | 6 | 59.04 dB | 15.87 MHz | 65.4 deg | 14.70 V/us | 0.624 V | 155.84 uW |
-
-![Full-flow OTA target achievement](docs/assets/full_flow_ota_results.png)
-
-Diagnosis claims are also checked by local SPICE probes, and executable
-actions are reported through explicit objective-gated apply/skip records.
-
-![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
-
-If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
-
-## Causal Action Planning
-
-The diagnosis layer is a structure-aware causal diagnosis system, not a raw sensitivity ranking tool.
-
-The default project strategy is budget-aware:
-
-```text
-global optimizer with small budget
-  -> causal diagnosis + local intervention evidence
-  -> constrained action optimizer / LLM planner
-  -> short re-optimization
-  -> postprocess only if stuck or near-feasible
-```
-
-Each agent round follows three decoupled decision steps:
-
-1. **Causal graph diagnosis** ranks structural root-cause nodes using dependency paths, operating-point evidence, propagation effects, and weak sensitivity priors.
-2. **Local intervention modeling** perturbs a small number of schema-safe actions in SPICE and builds a local action-to-violation model.
-3. **Constrained action optimization** selects compatible action combinations by minimizing residual weighted violation plus penalties for uncertainty, duplicate writes, guarded actions, and cross-metric regressions.
-
-Guarded actions are evidence-gated. A guarded action can be applied automatically only when the local SPICE intervention evidence predicts a sufficient decrease in the weighted normalized violation objective, reduces at least one failed metric, keeps tradeoffs bounded, and has acceptable uncertainty.
-
-All LLM apply requests are executor-gated by the same optimizer math:
-
-```text
-apply_allowed := optimizer_selected OR objective_delta < 0
-```
-
-Custom LLM edits cannot bypass `no_improving_combination`; they are recorded as skipped notes unless they correspond to an admissible optimizer candidate. Candidate actions also carry typed classes such as `compensation`, `operating_point_balance`, and `operating_point_headroom`, keeping OP/balance moves inside the constrained action optimizer instead of relying on postprocess repair.
-
-The evidence gate minimizes the weighted normalized violation objective:
-
-$$
-J(\mathbf{v}) = \sum_i w_i v_i^2,\qquad
-\mathbf{v}'_j = [\mathbf{v} + \mathbf{A}_{:,j}]_+
-$$
-
-where `v` is the normalized specification violation vector, `A_{:,j}` is the local intervention column for action `j`, and `[\cdot]_+` projects elementwise to nonnegative residual violation.
-
-The action strategy is coarse-to-fine. Large violations permit larger schema-safe coarse moves. Near-feasible states switch to smaller fine moves, and every proposed edit is checked by the hard physical gate before it can seed the next SPICE run.
-
-Full causal artifacts use typed causal edges with node types, relation type, polarity, and mechanism. ASIR symbolic dependency graphs also type dependency rules and edges by relation type and input/output quantity type.
-
-## Design State Contract
-
-AnalogRF-IR treats generated schemas as a concise, user-readable decision interface. Heavy evidence is written to JSON artifacts instead of being embedded into the YAML state.
-
-```text
-design_state.yaml        Concise state, measurements, summary diagnostics, and schema actions
-causal_diagnostics.json  Full causal graph, local intervention model, and evidence details
-agent_diagnostics.json   Agent-facing diagnostic report
-sim_log.json             Simulator and optimizer log view
-result.json              Concise pass/fail and metric summary
-```
-
-The agent write policy is intentionally narrow:
-
-- It may update existing design-variable initials and ranges.
-- It may update existing per-device or global constraint ranges.
-- It may update supported gm/ID and L strategies.
-- It may not rewrite topology, targets, simulator outputs, process data, device connections, or transistor operating-point measurements.
-
-This keeps user-authored inputs, generated diagnostics, optimization logic, and postprocess repair decoupled.
-
-## Physical Safety
-
-Before an action reaches SPICE, the flow applies hard checks for:
-
-- explicit symmetry labels and matched-pair consistency,
-- schema variable bounds and per-device constraints,
-- operating-region and headroom rules,
-- maximum W/L layout realizability,
-- folding, parallelization, or series segmentation for oversized devices,
-- write-policy compliance for all agent actions.
-
-Invalid physical states are rejected in validation instead of being silently simulated.
-
-## Postprocess Policy
-
-Postprocess is an optional repair layer, not the core diagnosis method. It can improve robustness for near-feasible designs or stuck operating points, but it is kept separate from:
-
-- global optimization,
-- causal graph diagnosis,
-- local intervention modeling,
-- LLM planning,
-- schema command execution.
-
-For method comparisons, postprocess can be ablated against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
-
-CLI policy:
-
-```text
---postprocess-policy fallback   run only when near-feasible or stagnated
---postprocess-policy always     legacy always-on repair behavior
---postprocess-policy off        disable postprocess for ablation
-```
-
-## Documentation
-
-Additional project notes are maintained in [docs](https://github.com/Yixin-Gong/AnalogRF-IR/tree/main/docs):
-
-- [Quick Start](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/quickstart.md)
-- [Architecture](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/architecture.md)
-- [Ablation Experiments](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/ablation_experiments.md)
-- [Schema Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/schema_guide.md)
-- [Development Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/development.md)
-
-The repository root `README.md` mirrors this document so GitHub displays the maintained project overview on the repository homepage.
-
-## Development
-
-Recommended workflow:
+Regenerate the README figures:
 
 ```bash
-. .venv/bin/activate
-python -m pytest -q
-python -m compileall asir core diagnostics flow frontends layout netlist optimizer outputs postprocess schemas simulator specs tests
+python scripts/plot_full_flow_results.py --out-dir docs/assets
+python scripts/plot_diagnosis_validation.py --out-dir docs/assets
 ```
 
-When adding a new circuit family:
+Run tests:
 
-1. Define or update the IR profile in `asir/profiles.py`.
-2. Add schema examples with explicit device roles, symmetry labels, variables, targets, and evaluations.
-3. Register profile-specific rules and validation behavior.
-4. Add surrogate estimators only where the analytical model is defensible.
-5. Add simulator measurements for final validation.
-6. Add optional postprocess repair only when it is physically justified and ablatable.
-7. Add regression tests for profile selection, constraints, diagnostics, artifacts, and physical validation.
+```bash
+python -m pytest -q
+```
 
-## Current Limitations
+## Repository Layout
 
-- Surrogate models are optimization guidance, not signoff results.
-- Output swing is extracted from OP/headroom limits; ICMR is intentionally outside the default OTA optimization and validation targets.
-- Comparator delay, offset, kickback, noise, energy, and metastability require dedicated transient, noise, and Monte Carlo testbenches.
-- RF-specific flows still need S-parameter, noise figure, compression, matching, linearity, and stability extensions.
-- LLM-guided diagnosis is experimental and should be treated as a planner/explainer layer over simulator-backed evidence.
+```text
+asir/          Semantic profile extraction and typed dependencies
+core/          Environment, design rules, validation, and regions
+diagnostics/   Causal diagnosis, intervention models, and action gating
+flow/          Main orchestration and LangGraph agent loop
+inputs/        Maintained circuit schemas
+layout/        Device folding and physical realization helpers
+netlist/       Schema-to-SPICE generation
+optimizer/     Surrogate evaluators and NSGA-II search
+postprocess/   Explicit repair and compensation tuning
+schemas/       Typed design-state dataclasses
+simulator/     ngspice execution and measurement extraction
+tests/         Regression tests
+docs/          Architecture, quickstart, schema, and experiment notes
+```
 
-## Roadmap
+## Artifact Contract
 
-- Expand constrained combo-action optimization with more topology-aware OP and balance moves.
-- Expand the project evaluation matrix across topology, method, seed, spec target, and postprocess policy.
-- More complete comparator and RF signoff testbenches.
-- Tighter reproducibility metadata for process, simulator, model, and planner configuration.
-- Additional physical-layout constraints beyond first-order W/L realization.
+Each run writes a compact schema plus structured evidence:
 
-## License
+```text
+design_state.yaml        Reviewable schema state and concise diagnostics
+causal_diagnostics.json  Full causal graph and local intervention model
+agent_diagnostics.json   Agent-facing failure summary
+sim_log.json             Optimizer, postprocess, and simulator log
+result.json              Final pass/fail and measured metrics
+```
 
-This project is provided under a proprietary, all-rights-reserved license. No permission is granted to use, copy, modify, distribute, sublicense, publish, host, or create derivative works except by explicit written permission from the copyright holder.
+## Limitations
 
-See [LICENSE](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/LICENSE) for the complete terms.
+- Surrogate estimates guide search but are not signoff measurements.
+- Current results are schematic-level TT ngspice runs without PVT, mismatch,
+  extracted parasitics, or layout verification.
+- ICMR is intentionally excluded from default OTA optimization targets.
+- Comparator and RF flows are extensible foundations, not mature signoff flows.
+- LLM planning is an optional diagnosis/selection interface over the evidence
+  gate, not an independent circuit-edit authority.

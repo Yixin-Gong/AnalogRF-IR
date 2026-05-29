@@ -1532,8 +1532,8 @@ def _global_tuning_action(state: DesignState, metric: str, node: str, score: flo
                 device="",
                 variable=name,
                 direction="set",
-                step_hint="set to the topology-aware bias preset, then validate with the local SPICE intervention model",
-                rationale="Bias voltage directly controls stack voltage allocation and can restore saturation headroom before gain tuning.",
+                step_hint="center a topology-guided bias search, then validate with the local SPICE intervention model",
+                rationale="Bias voltage directly controls stack voltage allocation; the target is a topology-guided search anchor, not a schema preset.",
                 expected_effect={
                     "dc_gain": "increase if saturation headroom improves",
                     "output_swing": "increase if stack headroom improves",
@@ -1573,7 +1573,7 @@ def _bias_voltage_tuning_actions(
                 device="",
                 variable=variable,
                 direction="set",
-                step_hint="set to the topology-aware bias preset, then let the constrained optimizer verify the local SPICE delta",
+                step_hint="center a topology-guided bias search, then let the constrained optimizer verify the local SPICE delta",
                 rationale="Explicit bias-voltage tuning brings OP/headroom repair into the constrained action optimizer instead of leaving it only to postprocess.",
                 expected_effect={
                     "dc_gain": "increase if saturation headroom improves",
@@ -1582,7 +1582,7 @@ def _bias_voltage_tuning_actions(
                     "output_swing": "increase if stack headroom improves",
                     "headroom": "improve",
                 },
-                tradeoffs=["Bias presets are topology dependent and may hurt another metric; local SPICE evidence is required for selection."],
+                tradeoffs=["Bias search anchors are topology dependent and may hurt another metric; local SPICE evidence is required for selection."],
                 priority=priority,
                 target_formula=_bias_voltage_target_formula(state, variable),
                 target_value=target,
@@ -1605,25 +1605,24 @@ def _stack_balance_tuning_actions(
     required = ("vbias_tail", "vbias_ncas", "vbias_pcas")
     if not all(_primary_design_variable(state, "", name) for name in required):
         return []
-    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
-    presets = [
-        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.78 * vdd, "vbias_pcas": 0.24 * vdd},
-        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.74 * vdd, "vbias_pcas": 0.24 * vdd},
-        {"vbias_tail": 0.25 * vdd, "vbias_ncas": 0.74 * vdd, "vbias_pcas": 0.36 * vdd},
-        {"vbias_tail": 0.30 * vdd, "vbias_ncas": 0.78 * vdd, "vbias_pcas": 0.40 * vdd},
-        {"vbias_tail": 0.34 * vdd, "vbias_ncas": 0.82 * vdd, "vbias_pcas": 0.42 * vdd},
-        {"vbias_tail": 0.40 * vdd, "vbias_ncas": 0.70 * vdd, "vbias_pcas": 0.44 * vdd},
-        {"vbias_tail": 0.46 * vdd, "vbias_ncas": 0.62 * vdd, "vbias_pcas": 0.48 * vdd},
+    candidate_quantiles = [
+        {"vbias_tail": 0.03, "vbias_ncas": 0.90, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.08, "vbias_ncas": 0.90, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.03, "vbias_ncas": 1.00, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.16, "vbias_ncas": 0.90, "vbias_pcas": 0.14},
+        {"vbias_tail": 0.08, "vbias_ncas": 0.82, "vbias_pcas": 0.14},
+        {"vbias_tail": 0.16, "vbias_ncas": 0.82, "vbias_pcas": 0.28},
+        {"vbias_tail": 0.32, "vbias_ncas": 0.70, "vbias_pcas": 0.28},
     ]
     actions: list[dict[str, Any]] = []
     current = {
         f"global.{name}": _current_variable_value(state, "", name)
         for name in required
     }
-    for index, preset in enumerate(presets, start=1):
+    for index, candidate in enumerate(candidate_quantiles, start=1):
         per_knob_values = {
-            f"global.{name}": round(_clip_to_bounds(value, _variable_range(state, "", name)), 4)
-            for name, value in preset.items()
+            f"global.{name}": round(_range_quantile(state, name, quantile), 4)
+            for name, quantile in candidate.items()
         }
         if all(
             current.get(knob) is not None and abs(float(current[knob]) - float(value)) < 0.005
@@ -1647,7 +1646,7 @@ def _stack_balance_tuning_actions(
                     f"global.{name}": _variable_range(state, "", name)
                     for name in required
                 },
-                "limit_status": "explicit_multi_knob_preset",
+                "limit_status": "topology_guided_bias_search",
                 "step_hint": "set the telescopic tail, NMOS cascode, and PMOS cascode biases as one stack-balance candidate",
                 "rationale": "The telescopic stack is strongly coupled; local evidence must evaluate the bias triple together instead of optimizing each bias port independently.",
                 "expected_effect": {
@@ -1659,12 +1658,12 @@ def _stack_balance_tuning_actions(
                     "headroom": "improve",
                 },
                 "tradeoffs": [
-                    "A stack-balance preset can move several operating-point voltages at once; accept it only with optimizer evidence.",
-                    "The best preset is topology and seed dependent, so ngspice remains the authority.",
+                    "A stack-balance candidate can move several operating-point voltages at once; accept it only with optimizer evidence.",
+                    "The best point is topology and seed dependent, so ngspice remains the authority.",
                 ],
                 "schema_variable_present": True,
                 "auto_range_expansion_allowed": False,
-                "target_formula": "telescopic_stack_balance_preset",
+                "target_formula": "telescopic_stack_balance_search",
             }
         )
     return actions
@@ -1688,38 +1687,47 @@ def _is_bias_voltage_variable(variable: str) -> bool:
 def _bias_voltage_target_formula(state: DesignState, variable: str) -> str:
     architecture = (state.topology.architecture or "").lower()
     if "telescopic" in architecture:
-        return "telescopic_stack_bias_preset"
+        return "telescopic_topology_guided_bias_search"
     if "folded" in architecture:
-        return "folded_cascode_bias_preset"
-    return "single_stage_tail_bias_preset"
+        return "folded_cascode_topology_guided_bias_search"
+    return "single_stage_topology_guided_bias_search"
 
 
 def _bias_voltage_target_value(state: DesignState, variable: str) -> float | None:
-    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
     architecture = (state.topology.architecture or "").lower()
     name = variable.lower()
     if "telescopic" in architecture:
-        ratios = {
-            "vbias_tail": 0.25,
-            "vbias_ncas": 0.78,
-            "vbias_pcas": 0.24,
+        quantiles = {
+            "vbias_tail": 0.03,
+            "vbias_ncas": 0.90,
+            "vbias_pcas": 0.05,
         }
     elif "folded" in architecture:
-        ratios = {
-            "vbias_ptail": 0.74,
-            "vbias_ncas": 0.50,
+        quantiles = {
+            "vbias_ptail": 0.56,
+            "vbias_ncas": 0.74,
         }
     else:
-        ratios = {
+        quantiles = {
             "vbias": 0.47,
             "vbias_tail": 0.46,
             "vbias_ncas": 0.55,
             "vbias_pcas": 0.48,
-            "vbias_ptail": 0.74,
+            "vbias_ptail": 0.56,
         }
-    if name not in ratios:
+    if name not in quantiles:
         return None
-    return round(_clip_to_bounds(ratios[name] * vdd, _variable_range(state, "", variable)), 4)
+    return round(_range_quantile(state, variable, quantiles[name]), 4)
+
+
+def _range_quantile(state: DesignState, variable: str, quantile: float) -> float:
+    bounds = _variable_range(state, "", variable)
+    if not bounds:
+        vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+        return float(quantile) * vdd
+    lo = float(bounds["min"])
+    hi = float(bounds["max"])
+    return _clip_to_bounds(lo + float(quantile) * (hi - lo), bounds)
 
 
 def _knob_action(

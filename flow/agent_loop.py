@@ -8,7 +8,7 @@ from typing import Any, Callable, TypedDict
 from langgraph.graph import END, StateGraph
 
 from core.environment import build_process_info, build_simulation_config, load_environment
-from diagnostics import execute_tuning_tool_commands
+from diagnostics import default_selected_actions_from_optimizer, execute_tuning_tool_commands, write_tuning_tool_command
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig, FlowResult
 from frontends.design_input import StateBuilder
@@ -16,6 +16,17 @@ from schemas.design_state import DesignState
 
 
 Emit = Callable[[str], None]
+
+_MEASUREMENT_BY_TARGET = {
+    "dc_gain": "dc_gain_db",
+    "unity_gain_bandwidth": "unity_gain_bandwidth",
+    "phase_margin": "phase_margin",
+    "slew_rate": "slew_rate",
+    "slew_rate_pos": "slew_rate_pos",
+    "slew_rate_neg": "slew_rate_neg",
+    "output_swing": "output_swing",
+    "power": "total_power",
+}
 
 
 @dataclass
@@ -191,6 +202,8 @@ class DiagnosticAgentLoop:
             stop_reason = "spec satisfied"
         elif int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
             stop_reason = "maximum iterations reached"
+        elif self._runtime_stagnation_detected(state.get("rounds", [])):
+            stop_reason = "runtime stagnation: measured violations stopped improving"
         return {
             "agent_model": agent_model,
             "last_spec_pass": bool(status.get("spec_pass", False)),
@@ -236,6 +249,18 @@ class DiagnosticAgentLoop:
         self.emit("       LangGraph node: llm_write_schema_command")
         design_state_path = Path(state["last_design_state"])
         schema_state = self._load_design_state(design_state_path)
+        fast_command = self._optimizer_evidence_fast_path(schema_state, int(state["round_index"]))
+        if fast_command is not None:
+            schema_state.to_yaml(design_state_path, include_runtime_context=False)
+            selected = fast_command.get("args", {}).get("selected_actions", []) or []
+            self.emit(
+                "       Skipped LLM request: constrained optimizer already selected "
+                f"{len(selected)} admissible action(s)"
+            )
+            return {
+                "last_tool_command": fast_command,
+                "llm_planner": fast_command.get("llm_planner", {}),
+            }
         planner = DeepSeekSchemaPlanner(self.llm_config)
         result = planner.write_command(
             schema_state,
@@ -257,6 +282,36 @@ class DiagnosticAgentLoop:
             "last_tool_command": command,
             "llm_planner": command.get("llm_planner", {}),
         }
+
+    def _optimizer_evidence_fast_path(self, schema_state: DesignState, round_index: int) -> dict[str, Any] | None:
+        causal = schema_state.diagnostics.get("causal_diagnostics", {}) if schema_state.diagnostics else {}
+        optimizer = causal.get("constrained_action_optimizer", {}) or {}
+        if optimizer.get("status") != "ok":
+            return None
+        selected = default_selected_actions_from_optimizer(schema_state, allowed_priorities=["primary"])
+        if not selected:
+            return None
+        command = write_tuning_tool_command(
+            schema_state,
+            round_index=round_index,
+            author="optimizer_evidence_fast_path",
+            max_primary_actions_per_failure=3,
+            allowed_priorities=["primary"],
+            selected_actions=selected,
+        )
+        command["llm_planner"] = {
+            "provider": self.llm_config.provider,
+            "model": self.llm_config.model,
+            "thinking": self.llm_config.thinking,
+            "reasoning_effort": self.llm_config.reasoning_effort,
+            "temperature": self.llm_config.temperature,
+            "max_tokens": self.llm_config.max_tokens,
+            "status": "skipped",
+            "reason": "Constrained optimizer selected admissible actions; LLM request was unnecessary for this round.",
+        }
+        command["llm_notes"] = "Evidence fast path: applied optimizer-selected admissible actions without an LLM request."
+        command["llm_rationale"] = "The formal action gate already had optimizer-selected actions."
+        return command
 
     def _round_flow_config(
         self,
@@ -357,6 +412,7 @@ class DiagnosticAgentLoop:
             "spec_pass": bool(status.get("spec_pass", False)),
             "failed_targets": list(status.get("failed_targets", [])),
             "best_loss": status.get("best_loss"),
+            "measured_violation_score": _measured_violation_score(result.state, result.sim_result.measurements or {}),
             "top_actions": [
                 action
                 for failure in failures
@@ -372,11 +428,37 @@ class DiagnosticAgentLoop:
             return True
         return _summary_rank(candidate) < _summary_rank(incumbent)
 
+    @staticmethod
+    def _runtime_stagnation_detected(rounds: list[dict[str, Any]]) -> bool:
+        if len(rounds) < 6:
+            return False
+        current_failed = set(rounds[-1].get("failed_targets", []) or [])
+        if not current_failed:
+            return False
+        recent = rounds[-4:]
+        if any(set(item.get("failed_targets", []) or []) != current_failed for item in recent):
+            return False
+        scores = []
+        for item in rounds:
+            try:
+                score = float(item.get("measured_violation_score"))
+            except (TypeError, ValueError):
+                return False
+            if not (score >= 0.0):
+                return False
+            scores.append(score)
+        older_best = min(scores[:-4])
+        recent_best = min(scores[-4:])
+        if older_best <= 1e-12:
+            return False
+        return (older_best - recent_best) <= max(1e-6, 0.02 * older_best)
+
     def _print_round_summary(self, summary: dict[str, Any]) -> None:
         self.emit("       Round summary:")
         self.emit(f"         artifacts: {summary['artifact_dir']}")
         self.emit(f"         spec_pass: {summary['spec_pass']}")
         self.emit(f"         failed_targets: {summary['failed_targets']}")
+        self.emit(f"         measured_violation_score: {summary.get('measured_violation_score')}")
         for action in summary["top_actions"][:5]:
             self.emit(
                 "         tuning candidate: "
@@ -417,9 +499,12 @@ class DiagnosticAgentLoop:
 
 def _summary_rank(summary: dict[str, Any]) -> tuple[float, float, float]:
     try:
-        best_loss = float(summary.get("best_loss"))
+        best_loss = float(summary.get("measured_violation_score"))
     except (TypeError, ValueError):
-        best_loss = float("inf")
+        try:
+            best_loss = float(summary.get("best_loss"))
+        except (TypeError, ValueError):
+            best_loss = float("inf")
     failed_count = len(summary.get("failed_targets", []) or [])
     return (
         0.0 if summary.get("spec_pass", False) else 1.0,
@@ -447,3 +532,28 @@ def _next_round_diagnostics(application: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
+
+
+def _measured_violation_score(state: DesignState, measurements: dict[str, Any]) -> float:
+    score = 0.0
+    for name, target in state.targets.items():
+        if int(target.priority or 1) > 2:
+            continue
+        metric = _MEASUREMENT_BY_TARGET.get(name)
+        if not metric:
+            continue
+        raw = measurements.get(metric)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            score += 1.0
+            continue
+        if target.min is not None:
+            denom = max(abs(float(target.min)), 1e-30)
+            violation = max(0.0, (float(target.min) - value) / denom)
+            score += violation * violation
+        if target.max is not None:
+            denom = max(abs(float(target.max)), 1e-30)
+            violation = max(0.0, (value - float(target.max)) / denom)
+            score += violation * violation
+    return round(score, 9)

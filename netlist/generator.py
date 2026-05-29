@@ -549,11 +549,11 @@ class NetlistGenerator:
                 gbw_target = float(target.min)
                 break
         if gbw_target and gbw_target > 0:
-            tstop = min(max(20.0 / gbw_target, 2.0e-8), 5.0e-6)
+            tstop = min(max(4.0 / gbw_target, 8.0e-8), 1.0e-6)
         else:
             tstop = 2.0e-7
-        tstep = max(tstop / 4000.0, 1.0e-12)
-        tmax = max(tstop / 8000.0, 1.0e-12)
+        tstep = max(tstop / 1200.0, 2.0e-11)
+        tmax = max(tstop / 2000.0, 2.0e-11)
         return tstep, tstop, tmax
 
     # Internal implementation note.

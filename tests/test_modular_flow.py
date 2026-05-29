@@ -320,9 +320,10 @@ def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):
 
         def run(self, _netlist, work_dir=None, include_transient=False):
             self.calls += 1
+            tail = state.global_parameters.get("vbias_tail", 0.0)
             ncas = state.global_parameters.get("vbias_ncas", 0.0)
             pcas = state.global_parameters.get("vbias_pcas", 0.0)
-            passing = 0.62 <= ncas <= 0.76 and 0.46 <= pcas <= 0.64
+            passing = tail <= 0.38 and ncas >= 0.80 and pcas <= 0.43
             measurements = {
                 "dc_gain_db": 70.0 if passing else 24.0,
                 "unity_gain_bandwidth": 1.2e8 if passing else 8.0e6,
@@ -342,9 +343,44 @@ def test_cascode_ota_postprocess_selects_bias_stack_candidate(tmp_path):
 
     assert result["spec_pass"] is True
     assert result["topology_family"] == "telescopic_cascode_ota"
-    assert result["new_bias_values"]["vbias_ncas"] >= 0.62
-    assert result["new_bias_values"]["vbias_pcas"] <= 0.64
+    assert result["new_bias_values"]["vbias_tail"] <= 0.38
+    assert result["new_bias_values"]["vbias_ncas"] >= 0.80
+    assert result["new_bias_values"]["vbias_pcas"] <= 0.43
     assert state.global_parameters["vbias_ncas"] == result["new_bias_values"]["vbias_ncas"]
+
+
+def test_cascode_bias_candidates_are_topology_guided_initial_searches():
+    folded = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    folded_points = _cascode_candidate_points(
+        folded,
+        {"vbias_ptail": 0.82, "vbias_ncas": 0.55},
+        1.2,
+    )
+    folded_guided = [item for item in folded_points if item.get("phase") == "folded_initial_search"]
+
+    assert folded_guided
+    assert all(0.55 <= item["vbias_ptail"] <= 1.05 for item in folded_guided)
+    assert all(0.35 <= item["vbias_ncas"] <= 0.80 for item in folded_guided)
+    assert any(item["vbias_ptail"] != 0.82 and item["vbias_ncas"] != 0.55 for item in folded_guided)
+
+    telescopic = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    telescopic_points = _cascode_candidate_points(
+        telescopic,
+        {"vbias_tail": 0.50, "vbias_ncas": 0.72, "vbias_pcas": 0.55},
+        1.2,
+    )
+    telescopic_guided = [item for item in telescopic_points if item.get("phase") == "telescopic_initial_search"]
+
+    assert telescopic_guided
+    assert all(0.30 <= item["vbias_tail"] <= 0.75 for item in telescopic_guided)
+    assert all(0.45 <= item["vbias_ncas"] <= 0.90 for item in telescopic_guided)
+    assert all(0.35 <= item["vbias_pcas"] <= 0.80 for item in telescopic_guided)
 
 
 def test_uncompensated_two_stage_does_not_trigger_rc_logic(tmp_path):
@@ -1015,7 +1051,7 @@ def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
     assert bias_actions
     assert all(action["direction"] == "set" for action in bias_actions)
     assert all(action["action_class"] == "operating_point_headroom" for action in bias_actions)
-    assert all(action["target_formula"] == "folded_cascode_bias_preset" for action in bias_actions)
+    assert all(action["target_formula"] == "folded_cascode_topology_guided_bias_search" for action in bias_actions)
 
 
 def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
@@ -1913,7 +1949,7 @@ def test_postprocess_fallback_runs_cascode_op_repair_before_ac_metrics():
     assert decision["reason"] == "cascode operating-point repair required before AC metrics are reliable"
 
 
-def test_cascode_op_repair_prioritizes_telescopic_stack_balance():
+def test_cascode_op_repair_prioritizes_telescopic_initial_search():
     state = build_design_state_from_yaml(
         load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
         load_yaml_mapping("environment_ihp_sg13g2.yaml"),
@@ -1925,13 +1961,13 @@ def test_cascode_op_repair_prioritizes_telescopic_stack_balance():
         1.2,
     )
 
-    assert any(
-        point["phase"] == "telescopic_stack_balance"
-        and point["vbias_tail"] == 0.3
-        and point["vbias_ncas"] >= 0.888
-        and point["vbias_pcas"] == 0.35
-        for point in points[:8]
-    )
+    guided = [point for point in points[:12] if point["phase"] == "telescopic_initial_search"]
+
+    assert guided
+    assert all(0.30 <= point["vbias_tail"] <= 0.75 for point in guided)
+    assert all(0.45 <= point["vbias_ncas"] <= 0.90 for point in guided)
+    assert all(0.35 <= point["vbias_pcas"] <= 0.80 for point in guided)
+    assert any(point["vbias_tail"] != 0.7281 for point in guided)
 
 
 def test_cascode_candidate_selection_avoids_collapsed_negative_gain_points():

@@ -246,7 +246,8 @@ class AnalogRFIRFlowRunner:
                 best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
             self._validate_or_raise(state, "postprocess")
 
-        sim_result = sim.run(netlist_str, work_dir=str(output_dir))
+        include_transient = _requires_transient_validation(state)
+        sim_result = sim.run(netlist_str, work_dir=str(output_dir), include_transient=include_transient)
         if "phase_margin" in sim_result.measurements and "phase_margin_from_curve" not in sim_result.measurements:
             sim_result.measurements["phase_margin"] = normalize_phase_margin(sim_result.measurements["phase_margin"])
         backfill_state_from_ngspice(state, sim_result)
@@ -303,12 +304,27 @@ class AnalogRFIRFlowRunner:
             }
             return
 
-        self.emit("\n[8b] Building local intervention model ...")
         perf_est = best_meta.get("performance", {}) or {}
         target_status = {
             name: spec_model.target_status(name, target, sim_result.measurements or {}, perf_est)
             for name, target in state.targets.items()
         }
+        failed_required = [
+            name
+            for name, status in target_status.items()
+            if status.get("status") in {"fail", "unverified"}
+            and bool(status.get("counts_for_pass", int(state.targets[name].priority or 1) <= 2))
+        ]
+        if not failed_required:
+            flow_meta["local_intervention_model"] = {
+                "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+                "method": "spice_small_perturbation",
+                "status": "skipped",
+                "reason": "All required ngspice targets passed; no next-round intervention model needed.",
+            }
+            return
+
+        self.emit("\n[8b] Building local intervention model ...")
         provisional = build_causal_diagnostics(
             state=state,
             best_meta=best_meta,
@@ -658,3 +674,10 @@ class AnalogRFIRFlowRunner:
         if abs(value) < 1e-2 or abs(value) >= 1e4:
             return f"{value:.4e}"
         return f"{value:.4f}"
+
+
+def _requires_transient_validation(state: DesignState) -> bool:
+    target = state.targets.get("slew_rate")
+    if target is not None and target.min is not None:
+        return float(target.min) > 0.0
+    return any(ev.type == "slew_rate" for ev in state.evaluations)

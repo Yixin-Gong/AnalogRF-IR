@@ -27,16 +27,16 @@ topology:
     - {id: M1, role: input_pair, stage: input, type: pmos, connections: {drain: nmir, gate: vinn, source: ptail, body: vdd}}
     - {id: M2, role: input_pair, stage: input, type: pmos, connections: {drain: vout, gate: vinp, source: ptail, body: vdd}}
     - {id: M5, role: tail_current_source, stage: bias, type: pmos, connections: {drain: ptail, gate: vbias_ptail, source: vdd, body: vdd}}
-    - {id: M3, role: current_mirror_load, stage: load, type: nmos, connections: {drain: nmir, gate: nmir, source: ncas_ref, body: gnd}}
-    - {id: M4, role: current_mirror_load, stage: load, type: nmos, connections: {drain: vout, gate: nmir, source: ncas_out, body: gnd}}
-    - {id: M6, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: ncas_ref, gate: vbias_ncas, source: gnd, body: gnd}}
-    - {id: M7, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: ncas_out, gate: vbias_ncas, source: gnd, body: gnd}}
+    - {id: M3, role: current_mirror_load, stage: load, type: nmos, connections: {drain: ncas_ref, gate: nmir, source: gnd, body: gnd}}
+    - {id: M4, role: current_mirror_load, stage: load, type: nmos, connections: {drain: ncas_out, gate: nmir, source: gnd, body: gnd}}
+    - {id: M6, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: nmir, gate: vbias_ncas, source: ncas_ref, body: gnd}}
+    - {id: M7, role: folded_cascode, stage: cascode, type: nmos, connections: {drain: vout, gate: vbias_ncas, source: ncas_out, body: gnd}}
 
 targets:
-  dc_gain:              {min: 42, unit: dB, priority: 1}
-  unity_gain_bandwidth: {min: 2.5e+07, unit: Hz, priority: 1}
+  dc_gain:              {min: 45, unit: dB, priority: 1}
+  unity_gain_bandwidth: {min: 2.0e+07, unit: Hz, priority: 1}
   phase_margin:         {min: 60, unit: deg, priority: 1}
-  slew_rate:            {min: 1.5e+07, unit: V/s, priority: 2}
+  slew_rate:            {min: 1.2e+07, unit: V/s, priority: 2}
   output_swing:         {min: 6.0e-01, unit: V, priority: 1}
   saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
   power:                {max: 6.0e-04, unit: W, priority: 2}

@@ -46,9 +46,9 @@ def tune_cascode_ota_operating_point(
     sim: NgspiceSimulator,
     work_dir: Path,
     *,
-    max_candidates: int = 72,
-    time_budget_sec: float = 90.0,
-    candidate_timeout_sec: float = 5.0,
+    max_candidates: int = 48,
+    time_budget_sec: float = 45.0,
+    candidate_timeout_sec: float = 2.5,
 ) -> dict[str, Any]:
     if not is_cascode_ota_state(state):
         return {}
@@ -104,7 +104,7 @@ def tune_cascode_ota_operating_point(
         original_globals,
         started=started,
         time_budget_sec=max(time_budget_sec, 180.0),
-        candidate_timeout_sec=max(candidate_timeout_sec, 12.0),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
     )
     best = _refine_widths_for_speed(
         state,
@@ -115,8 +115,8 @@ def tune_cascode_ota_operating_point(
         original_widths,
         original_lengths,
         started=started,
-        time_budget_sec=max(time_budget_sec, 240.0),
-        candidate_timeout_sec=max(candidate_timeout_sec, 12.0),
+        time_budget_sec=max(time_budget_sec, 90.0),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
     )
     _restore_globals(state, original_globals)
     _restore_widths(state, original_widths)
@@ -180,7 +180,10 @@ def _candidate_points(
     points: list[dict[str, Any]] = [{**original, "phase": "baseline"}]
     ports = list(original)
 
+    points.extend(_topology_guided_initial_points(state, original, vdd))
+
     heuristic: dict[str, list[float]] = {}
+    family = _topology_family(state)
     for name, value in original.items():
         low, high = _bias_range(state, name, vdd)
         candidates = [
@@ -192,36 +195,19 @@ def _candidate_points(
         ]
         name_low = name.lower()
         if "ptail" in name_low or ("tail" in name_low and "p" in name_low):
-            candidates.extend([0.62 * vdd, 0.68 * vdd, 0.74 * vdd, 0.82 * vdd])
+            candidates.extend(_bias_quantile_values(state, name, vdd, _single_bias_quantiles(family, name)))
         elif "pcas" in name_low:
-            candidates.extend([0.36 * vdd, 0.42 * vdd, 0.48 * vdd, 0.56 * vdd, 0.64 * vdd])
+            candidates.extend(_bias_quantile_values(state, name, vdd, _single_bias_quantiles(family, name)))
         elif "ncas" in name_low or "sink" in name_low:
-            candidates.extend([0.42 * vdd, 0.48 * vdd, 0.55 * vdd, 0.62 * vdd, 0.70 * vdd])
+            candidates.extend(_bias_quantile_values(state, name, vdd, _single_bias_quantiles(family, name)))
         elif "tail" in name_low:
-            candidates.extend([0.34 * vdd, 0.40 * vdd, 0.46 * vdd, 0.52 * vdd])
+            candidates.extend(_bias_quantile_values(state, name, vdd, _single_bias_quantiles(family, name)))
         else:
-            candidates.extend([0.40 * vdd, 0.50 * vdd, 0.60 * vdd])
+            candidates.extend(_bias_quantile_values(state, name, vdd, (0.35, 0.50, 0.65)))
         heuristic[name] = _unique_values(candidates, low, high)
 
-    # Named stack-balance presets are evaluated before one-at-a-time moves so
-    # telescopic/folded stacks get a physically meaningful OP repair budget.
-    for preset in _stack_balance_presets(original, vdd):
-        point = dict(original)
-        used = False
-        for name, value in preset.items():
-            if name == "phase":
-                continue
-            if name not in original:
-                continue
-            low, high = _bias_range(state, name, vdd)
-            point[name] = _snap_voltage(_clip(value, low, high))
-            used = True
-        if used:
-            point["phase"] = str(preset.get("phase", "stack_balance"))
-            points.append(point)
-
-    # One-at-a-time moves keep the repair trace interpretable when a preset is
-    # not enough or a topology exposes a non-standard bias port.
+    # One-at-a-time moves keep the repair trace interpretable when the topology
+    # exposes a non-standard bias port outside the coupled initial search.
     for name in ports:
         for value in heuristic[name]:
             point = dict(original)
@@ -229,115 +215,126 @@ def _candidate_points(
             point["phase"] = f"{name}_sweep"
             points.append(point)
 
-    return _dedupe(points)
+    return [
+        point
+        for point in _dedupe(points)
+        if _candidate_is_reasonable_for_topology(state, point, vdd)
+    ]
 
 
-def _stack_balance_presets(original: dict[str, float], vdd: float) -> list[dict[str, Any]]:
-    presets: list[dict[str, Any]] = []
-    if {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(original):
-        presets.extend(
-            [
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.25 * vdd,
-                    "vbias_ncas": 0.78 * vdd,
-                    "vbias_pcas": 0.24 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.25 * vdd,
-                    "vbias_ncas": 0.74 * vdd,
-                    "vbias_pcas": 0.24 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.25 * vdd,
-                    "vbias_ncas": 0.74 * vdd,
-                    "vbias_pcas": 0.36 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.25 * vdd,
-                    "vbias_ncas": 0.74 * vdd,
-                    "vbias_pcas": 0.40 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.30 * vdd,
-                    "vbias_ncas": 0.78 * vdd,
-                    "vbias_pcas": 0.40 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.34 * vdd,
-                    "vbias_ncas": 0.82 * vdd,
-                    "vbias_pcas": 0.42 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.40 * vdd,
-                    "vbias_ncas": 0.70 * vdd,
-                    "vbias_pcas": 0.44 * vdd,
-                },
-                {
-                    "phase": "telescopic_stack_balance",
-                    "vbias_tail": 0.46 * vdd,
-                    "vbias_ncas": 0.62 * vdd,
-                    "vbias_pcas": 0.48 * vdd,
-                },
-                {
-                    "phase": "telescopic_pcas_headroom",
-                    "vbias_tail": 0.34 * vdd,
-                    "vbias_ncas": 0.78 * vdd,
-                    "vbias_pcas": 0.54 * vdd,
-                },
-                {
-                    "phase": "telescopic_pcas_headroom",
-                    "vbias_tail": 0.38 * vdd,
-                    "vbias_ncas": 0.74 * vdd,
-                    "vbias_pcas": 0.58 * vdd,
-                },
-                {
-                    "phase": "telescopic_pcas_headroom",
-                    "vbias_tail": 0.42 * vdd,
-                    "vbias_ncas": 0.70 * vdd,
-                    "vbias_pcas": 0.62 * vdd,
-                },
-                {
-                    "phase": "telescopic_pcas_headroom",
-                    "vbias_tail": 0.46 * vdd,
-                    "vbias_ncas": 0.66 * vdd,
-                    "vbias_pcas": 0.66 * vdd,
-                },
-                {
-                    "phase": "telescopic_speed_bias",
-                    "vbias_tail": 0.54 * vdd,
-                    "vbias_ncas": 0.72 * vdd,
-                    "vbias_pcas": 0.48 * vdd,
-                },
-                {
-                    "phase": "telescopic_speed_bias",
-                    "vbias_tail": 0.58 * vdd,
-                    "vbias_ncas": 0.70 * vdd,
-                    "vbias_pcas": 0.52 * vdd,
-                },
-                {
-                    "phase": "telescopic_speed_bias",
-                    "vbias_tail": 0.62 * vdd,
-                    "vbias_ncas": 0.68 * vdd,
-                    "vbias_pcas": 0.56 * vdd,
-                },
-            ]
+def _candidate_is_reasonable_for_topology(state: DesignState, candidate: dict[str, Any], vdd: float) -> bool:
+    family = _topology_family(state)
+    if family != "telescopic_cascode_ota":
+        return True
+    if {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(candidate):
+        tail = float(candidate["vbias_tail"])
+        ncas = float(candidate["vbias_ncas"])
+        pcas = float(candidate["vbias_pcas"])
+        tail_low, tail_high = _bias_range(state, "vbias_tail", vdd)
+        ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+        pcas_low, pcas_high = _bias_range(state, "vbias_pcas", vdd)
+        tail_q = (tail - tail_low) / max(tail_high - tail_low, 1e-12)
+        ncas_q = (ncas - ncas_low) / max(ncas_high - ncas_low, 1e-12)
+        pcas_q = (pcas - pcas_low) / max(pcas_high - pcas_low, 1e-12)
+        return tail_q <= 0.38 and ncas_q >= 0.55 and pcas_q <= 0.45
+    return True
+
+
+def _topology_guided_initial_points(
+    state: DesignState,
+    original: dict[str, float],
+    vdd: float,
+) -> list[dict[str, Any]]:
+    family = _topology_family(state)
+    if family == "folded_cascode_ota" and {"vbias_ptail", "vbias_ncas"}.issubset(original):
+        return _guided_grid(
+            state,
+            original,
+            vdd,
+            "folded_initial_search",
+            {
+                # PMOS tail: upper-mid gate bias keeps current moderate enough
+                # for output resistance while still allowing tens-of-MHz UGBW.
+                "vbias_ptail": (0.44, 0.50, 0.56, 0.62),
+                # NMOS cascode: upper-mid bias splits voltage across mirror and
+                # common-gate devices under a 1.2 V stack.
+                "vbias_ncas": (0.66, 0.74, 0.82),
+            },
+            max_points=16,
         )
-    if {"vbias_ptail", "vbias_ncas"}.issubset(original):
-        presets.extend(
-            [
-                {"phase": "folded_stack_balance", "vbias_ptail": 0.68 * vdd, "vbias_ncas": 0.44 * vdd},
-                {"phase": "folded_stack_balance", "vbias_ptail": 0.74 * vdd, "vbias_ncas": 0.50 * vdd},
-                {"phase": "folded_stack_balance", "vbias_ptail": 0.82 * vdd, "vbias_ncas": 0.56 * vdd},
-            ]
+    if family == "telescopic_cascode_ota" and {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(original):
+        return _guided_grid(
+            state,
+            original,
+            vdd,
+            "telescopic_initial_search",
+            {
+                # Low-voltage telescopic stacks need tail bias near the low
+                # end, NMOS cascode bias near the high end, and PMOS cascode
+                # bias near the low end to allocate headroom before speed.
+                "vbias_tail": (0.00, 0.03, 0.08, 0.16),
+                "vbias_ncas": (0.78, 0.90, 1.00),
+                "vbias_pcas": (0.00, 0.05, 0.14),
+            },
+            max_points=24,
         )
-    return presets
+    return []
+
+
+def _guided_grid(
+    state: DesignState,
+    original: dict[str, float],
+    vdd: float,
+    phase: str,
+    quantiles_by_port: dict[str, tuple[float, ...]],
+    *,
+    max_points: int,
+) -> list[dict[str, Any]]:
+    ports = [name for name in quantiles_by_port if name in original]
+    if not ports:
+        return []
+    points: list[dict[str, Any]] = []
+
+    def visit(index: int, point: dict[str, float]) -> None:
+        if len(points) >= max_points:
+            return
+        if index >= len(ports):
+            points.append({**original, **point, "phase": phase})
+            return
+        name = ports[index]
+        for value in _bias_quantile_values(state, name, vdd, quantiles_by_port[name]):
+            visit(index + 1, {**point, name: value})
+
+    visit(0, {})
+    return points
+
+
+def _single_bias_quantiles(family: str, name: str) -> tuple[float, ...]:
+    name_low = name.lower()
+    if family == "folded_cascode_ota":
+        if "ptail" in name_low:
+            return (0.38, 0.44, 0.50, 0.56, 0.62, 0.70)
+        if "ncas" in name_low:
+            return (0.58, 0.66, 0.74, 0.82)
+    if family == "telescopic_cascode_ota":
+        if "tail" in name_low:
+            return (0.00, 0.03, 0.08, 0.16, 0.32)
+        if "ncas" in name_low:
+            return (0.70, 0.82, 0.92, 1.00)
+        if "pcas" in name_low:
+            return (0.00, 0.05, 0.14, 0.28)
+    return (0.30, 0.45, 0.60, 0.75)
+
+
+def _bias_quantile_values(
+    state: DesignState,
+    name: str,
+    vdd: float,
+    quantiles: tuple[float, ...],
+) -> list[float]:
+    low, high = _bias_range(state, name, vdd)
+    values = [low + _clip(float(q), 0.0, 1.0) * (high - low) for q in quantiles]
+    return _unique_values(values, low, high)
 
 
 def _bias_range(state: DesignState, name: str, vdd: float) -> tuple[float, float]:
@@ -486,6 +483,8 @@ def _refine_tail_current_for_speed(
     )
     if not speed_gap:
         return best
+    if not _tail_current_is_netlisted(state):
+        return best
     current_range = _global_variable_range(state, "I_tail")
     if not current_range:
         return best
@@ -603,22 +602,6 @@ def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
     family = _topology_family(state)
     if family == "telescopic_cascode_ota":
         return [
-            {
-                "__role_min_widths__": {
-                    "input_pair": 55.0e-6,
-                    "tail_current_source": 45.0e-6,
-                    "input_cascode": 18.0e-6,
-                    "current_mirror_load": 120.0e-6,
-                    "load_cascode": 90.0e-6,
-                },
-                "__role_min_lengths__": {
-                    "input_pair": 0.75e-6,
-                    "tail_current_source": 0.30e-6,
-                    "input_cascode": 1.10e-6,
-                    "current_mirror_load": 2.00e-6,
-                    "load_cascode": 1.60e-6,
-                },
-            },
             {
                 "__role_min_widths__": {
                     "input_pair": 22.0e-6,
@@ -785,6 +768,12 @@ def _global_variable_range(state: DesignState, name: str) -> tuple[float, float]
     return None
 
 
+def _tail_current_is_netlisted(state: DesignState) -> bool:
+    if any(dev.role == "tail_bias_mirror" for dev in state.topology.devices):
+        return True
+    return float(state.global_parameters.get("tail_current_mirror_bias", 0.0) or 0.0) > 0.5
+
+
 def _global_variable_value(state: DesignState, original_globals: dict[str, float], name: str) -> float:
     if name in original_globals:
         return float(original_globals[name])
@@ -820,10 +809,10 @@ def _candidate_priority(item: dict[str, Any]) -> tuple[float, ...]:
         missing_required,
         float(item.get("gain_deficit", 1.0)),
         float(item.get("swing_deficit", 1.0)),
+        float(item.get("bw_deficit", 1.0)),
         float(item.get("pm_deficit", 1.0)),
         float(item.get("pm_window_cost", 1.0)),
         float(item.get("sr_deficit", 1.0)),
-        float(item.get("bw_deficit", 1.0)),
         op_bucket,
         max(0.0, -op_required_margin),
         float(item.get("score", float("inf"))),

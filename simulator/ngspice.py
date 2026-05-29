@@ -605,8 +605,8 @@ class NgspiceSimulator:
         if re.search(r"^\s*\.tran\s+", netlist, flags=re.IGNORECASE | re.MULTILINE):
             return netlist
         tstop = 2.0e-7
-        tstep = 5.0e-11
-        tmax = 2.5e-11
+        tstep = 2.0e-10
+        tmax = 1.0e-10
         lines = netlist.splitlines()
         for idx in range(len(lines) - 1, -1, -1):
             if lines[idx].strip().lower() == ".end":
@@ -1013,17 +1013,19 @@ class NgspiceSimulator:
             }
 
         window = max(1, min(25, len(deduped) // 200))
-        pos = 0.0
-        neg = 0.0
+        pos_slopes: list[float] = []
+        neg_slopes: list[float] = []
         for i in range(0, len(deduped) - window):
             dt = times[i + window] - times[i]
             if dt <= 0:
                 continue
             slope = (volts[i + window] - volts[i]) / dt
-            if slope > pos:
-                pos = slope
-            if -slope > neg:
-                neg = -slope
+            if slope > 0.0:
+                pos_slopes.append(slope)
+            if slope < 0.0:
+                neg_slopes.append(-slope)
+        pos = self._robust_high_slope(pos_slopes)
+        neg = self._robust_high_slope(neg_slopes)
         metrics = {
             "slew_rate": min(pos, neg),
             "slew_rate_pos": pos,
@@ -1040,6 +1042,14 @@ class NgspiceSimulator:
             delay_metrics = self._extract_comparator_timing(times, volts, netlist)
             metrics.update(delay_metrics)
         return metrics
+
+    @staticmethod
+    def _robust_high_slope(values: list[float], quantile: float = 0.98) -> float:
+        clean = sorted(float(value) for value in values if math.isfinite(float(value)) and value > 0.0)
+        if not clean:
+            return 0.0
+        index = int(round((len(clean) - 1) * min(max(float(quantile), 0.0), 1.0)))
+        return clean[index]
 
     def _extract_comparator_timing(
         self,

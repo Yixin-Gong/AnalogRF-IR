@@ -14,8 +14,10 @@ import seaborn as sns
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOTS = [
-    ROOT / "runs" / "ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20",
-    ROOT / "runs" / "ablations_ihp130_llm_pro_telescopic_two_stage_seed10_maxiter30",
+    ROOT / "runs" / "llm_full_retarget_seed10_max30",
+    ROOT / "runs" / "folded_topology_guided_seed10_current",
+    ROOT / "runs" / "telescopic_topology_guided_seed10_fast_final",
+    ROOT / "runs" / "two_stage_gain57_ugbw20_seed10_current",
 ]
 DEFAULT_OUTPUT_DIRS = [
     ROOT / "docs" / "assets",
