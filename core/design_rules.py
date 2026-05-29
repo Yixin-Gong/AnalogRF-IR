@@ -497,7 +497,7 @@ def check_saturation_depth(state: DesignState) -> ValidationReport:
         if _is_dynamic_comparator_role(state, role):
             continue
         margin_v = p.vds - p.vdsat
-        required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
+        required = _required_saturation_depth(state, role)
         if required <= 0:
             continue
 
@@ -639,7 +639,7 @@ def diagnose_saturation_failure(state: DesignState) -> ValidationReport:
         margin = info["margin"]
 
         # Internal implementation note.
-        required = _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
+        required = _required_saturation_depth(state, role)
         if margin >= required:
             continue  # Internal implementation note.
 
@@ -1113,6 +1113,13 @@ def check_comparator_metric_coverage(state: DesignState) -> ValidationReport:
             details={"missing": missing},
         ))
     return report
+
+
+def _required_saturation_depth(state: DesignState, role: str) -> float:
+    target = state.targets.get("saturation_margin")
+    if target is not None and target.min is not None:
+        return max(0.0, float(target.min))
+    return _SATURATION_DEPTH_MARGIN.get(role, _DEFAULT_DEPTH_MARGIN)
 
 
 @register_rule(

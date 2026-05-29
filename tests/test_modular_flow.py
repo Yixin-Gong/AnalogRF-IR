@@ -557,6 +557,7 @@ def test_artifact_writer_emits_result_json(tmp_path):
             "phase_margin": 65.0,
             "slew_rate": 6.0e7,
             "output_swing": 0.85,
+            "saturation_margin": 0.12,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "total_power": 2e-4,
@@ -569,6 +570,7 @@ def test_artifact_writer_emits_result_json(tmp_path):
             "phase_margin": 64.0,
             "slew_rate": 5.5e7,
             "output_swing": 0.85,
+            "saturation_margin": 0.12,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "power": 2.1e-4,
@@ -596,11 +598,16 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert "verbose validation report" not in design_state_text
     payload = json.loads(artifacts.result_json.read_text(encoding="utf-8"))
     assert payload["status"]["spec_pass"] is True
+    assert payload["data_alignment"]["aligned"] is True
+    assert payload["data_alignment"]["missing_measurements"] == []
+    assert payload["data_alignment"]["missing_required_measurements"] == []
     state_payload = load_yaml_mapping(artifacts.design_state)
     assert "diagnostics" in state_payload
     assert "process" not in state_payload
     assert "simulation" not in state_payload
     assert state_payload["diagnostics"]["result"]["status"]["spec_pass"] is True
+    assert state_payload["diagnostics"]["result"]["measurements"]["saturation_margin"] == 0.12
+    assert state_payload["diagnostics"]["result"]["data_alignment"]["aligned"] is True
     assert state_payload["diagnostics"]["contract"]["schema_role"] == "compact decision view"
     assert "phase_at_unity_meas" not in state_payload["diagnostics"]["result"]["measurements"]
     assert "simulation_log" not in state_payload["diagnostics"]
@@ -615,6 +622,40 @@ def test_artifact_writer_emits_result_json(tmp_path):
     assert typed_edge["source_type"]
     assert typed_edge["target_type"]
     assert typed_edge["typing"]["relation_type"] == typed_edge["edge_type"]
+
+
+def test_priority_target_without_ngspice_measurement_is_unverified():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        default_environment(),
+    )
+    spec_model = SpecRegistry().select(state)
+    target = state.targets["dc_gain"]
+
+    missing = spec_model.target_status("dc_gain", target, {}, {})
+    estimate_only = spec_model.target_status(
+        "dc_gain",
+        target,
+        {},
+        {"dc_gain": 80.0},
+    )
+    diagnostic = spec_model.target_status(
+        "saturation_margin",
+        state.targets["saturation_margin"],
+        {"saturation_margin": 0.005},
+        {},
+    )
+
+    assert missing["status"] == "unverified"
+    assert missing["source"] == "missing"
+    assert missing["requires_ngspice"] is True
+    assert missing["counts_for_pass"] is True
+    assert estimate_only["status"] == "unverified"
+    assert estimate_only["model_status"] == "pass"
+    assert estimate_only["source"] == "optimizer_estimate"
+    assert diagnostic["status"] == "fail"
+    assert diagnostic["counts_for_pass"] is False
+    assert diagnostic["requires_ngspice"] is False
 
 
 def test_compact_telescopic_stack_balance_action_remains_executable():
@@ -694,6 +735,7 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
             "phase_margin": 18.0,
             "slew_rate": 5.0e7,
             "output_swing": 0.85,
+            "saturation_margin": 0.12,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "total_power": 2.0e-4,
@@ -706,6 +748,7 @@ def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
             "phase_margin": 18.0,
             "slew_rate": 5.0e7,
             "output_swing": 0.85,
+            "saturation_margin": 0.12,
             "icmr_min": 0.8,
             "icmr_max": 0.7,
             "power": 2.0e-4,
@@ -761,7 +804,9 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
             "dc_gain_db": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
+            "slew_rate": 5.0e7,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "total_power": 5.0e-5,
@@ -772,7 +817,9 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
             "dc_gain": 20.0,
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
+            "slew_rate": 5.0e7,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "power": 5.0e-5,
@@ -846,7 +893,9 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
             "dc_gain_db": 20.0,
             "unity_gain_bandwidth": 1.0e6,
             "phase_margin": 75.0,
+            "slew_rate": 5.0e7,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "total_power": 5.0e-5,
@@ -857,7 +906,9 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
             "dc_gain": 20.0,
                 "unity_gain_bandwidth": 1.0e6,
             "phase_margin": 75.0,
+            "slew_rate": 5.0e7,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "power": 5.0e-5,
@@ -913,6 +964,7 @@ def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
             "phase_margin": 70.0,
             "slew_rate": 2.0e7,
             "output_swing": 0.65,
+            "saturation_margin": 0.12,
             "total_power": 8.0e-6,
         },
     )
@@ -923,6 +975,7 @@ def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
             "phase_margin": 70.0,
             "slew_rate": 2.0e7,
             "output_swing": 0.65,
+            "saturation_margin": 0.12,
             "power": 8.0e-6,
         },
         "decoded": {"__global__": {}},
@@ -971,6 +1024,7 @@ def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
         "phase_margin": 60.0,
         "slew_rate": 3.0e7,
         "output_swing": 0.7,
+        "saturation_margin": 0.12,
         "total_power": 2.0e-4,
     }
     target_status = {
@@ -1015,6 +1069,7 @@ def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
                     "phase_margin": 54.0,
                     "slew_rate": 8.0e7,
                     "output_swing": 0.7,
+                    "saturation_margin": 0.12,
                     "total_power": 2.0e-4,
                 },
             )
@@ -1347,6 +1402,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "total_power": 5.0e-5,
@@ -1358,6 +1414,7 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
             "unity_gain_bandwidth": 2.0e8,
             "phase_margin": 75.0,
             "output_swing": 0.82,
+            "saturation_margin": 0.12,
             "icmr_min": 0.63,
             "icmr_max": 1.26,
             "power": 5.0e-5,
@@ -1804,15 +1861,16 @@ def test_postprocess_fallback_decision_uses_near_feasible_estimate():
         config=FlowConfig(postprocess_policy="fallback", postprocess_near_feasible_ratio=0.20)
     )
     spec_model = SpecRegistry().select(state)
+    gain_target = float(state.targets["dc_gain"].min or 1.0)
 
     near = runner._postprocess_decision(
         state,
-        {"performance": {"dc_gain": 39.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
+        {"performance": {"dc_gain": 0.92 * gain_target, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "saturation_margin": 0.06, "power": 5e-5}},
         spec_model,
     )
     far = runner._postprocess_decision(
         state,
-            {"performance": {"dc_gain": 10.0, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "power": 5e-5}},
+            {"performance": {"dc_gain": 0.40 * gain_target, "unity_gain_bandwidth": 1.5e8, "phase_margin": 70.0, "output_swing": 0.82, "saturation_margin": 0.06, "power": 5e-5}},
         spec_model,
     )
 
@@ -2358,6 +2416,7 @@ def test_compensation_tune_stops_after_passing_candidate(tmp_path):
                     "phase_margin": 63.0,
                     "slew_rate": 5.0e7,
                     "output_swing": 0.85,
+                    "saturation_margin": 0.12,
                     "icmr_min": 0.7,
                     "icmr_max": 0.9,
                     "total_power": 2e-4,

@@ -300,22 +300,26 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     gain = float(meas.get("dc_gain_db", -200.0))
     bw = float(meas.get("unity_gain_bandwidth", 0.0))
     pm = float(meas.get("phase_margin", 0.0))
+    sr = float(meas.get("slew_rate", 0.0))
     power = float(meas.get("total_power", 0.0))
     swing = float(meas.get("output_swing", 0.0))
     targets = state.targets
     gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
     bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
     pm_min = float(targets.get("phase_margin", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
     power_max = float(targets.get("power", Target()).max or float("inf"))
     swing_min = float(targets.get("output_swing", Target()).min or 0.0)
 
     op_margin, op_required_margin = _minimum_margins(state, result.operating_points or {})
     if not result.success:
         gain -= 200.0
+    op_ok = op_required_margin >= 0.0
     spec_pass = (
         gain >= gain_min
         and (bw_min <= 0.0 or bw >= bw_min)
         and (pm_min <= 0.0 or pm >= pm_min)
+        and (sr_min <= 0.0 or sr >= sr_min)
         and (power_max == float("inf") or power <= power_max)
         and (swing_min <= 0.0 or swing >= swing_min)
     )
@@ -323,14 +327,21 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     score += 80.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
     score += 55.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
     score += 40.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    score += 30.0 * max(0.0, sr_min - sr) / max(sr_min, 1.0)
     if power_max < float("inf"):
         score += 35.0 * max(0.0, power - power_max) / max(power_max, 1e-12)
         score += 0.15 * max(power, 0.0) / max(power_max, 1e-12)
     if swing_min > 0.0:
         score += 10.0 * max(0.0, swing_min - swing) / max(swing_min, 1.0)
     if op_required_margin < 0.0:
-        score += 180.0 * abs(op_required_margin)
-    if spec_pass and op_required_margin >= -0.02:
+        score += 60.0 * abs(op_required_margin)
+    if bw_min > 0.0 and "unity_gain_bandwidth" not in meas:
+        score += 100.0
+    if pm_min > 0.0 and "phase_margin" not in meas:
+        score += 100.0
+    if sr_min > 0.0 and "slew_rate" not in meas:
+        score += 70.0
+    if spec_pass:
         score -= 250.0
     score -= 0.8 * min(max(gain - gain_min, 0.0), 20.0)
     if bw_min > 0.0:
@@ -342,7 +353,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
             "measurements": meas,
             "success": bool(result.success),
             "spec_pass": spec_pass,
-            "op_ok": op_required_margin >= -0.02,
+            "op_ok": op_ok,
             "op_margin": op_margin,
             "op_required_margin": op_required_margin,
             "_result": result,
@@ -499,16 +510,15 @@ def _minimum_margins(state: DesignState, operating_points: dict[str, dict[str, f
             continue
         margin = abs(float(op.get("vds", 0.0))) - abs(float(op.get("vdsat", 0.0)))
         margins.append(margin)
-        required_margins.append(margin - _required_saturation_margin(dev.role))
+        required_margins.append(margin - _required_saturation_margin(state, dev.role))
     return (min(margins), min(required_margins)) if margins else (-1.0, -1.0)
 
 
-def _required_saturation_margin(role: str) -> float:
-    return {
-        "input_pair": 0.08,
-        "tail_current_source": 0.05,
-        "current_mirror_load": 0.03,
-    }.get(role, 0.05)
+def _required_saturation_margin(state: DesignState, role: str) -> float:
+    target = state.targets.get("saturation_margin")
+    if target is not None and target.min is not None:
+        return max(0.0, float(target.min))
+    return 0.05
 
 
 def _lookup_op(operating_points: dict[str, dict[str, float]], device_id: str) -> dict[str, float]:

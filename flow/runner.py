@@ -419,7 +419,7 @@ class AnalogRFIRFlowRunner:
     ) -> dict[str, Any]:
         perf_est = best_meta.get("performance", {}) or {}
         statuses = {
-            name: spec_model.target_status(name, target, {}, perf_est)
+            name: spec_model.target_status(name, target, {}, perf_est, require_ngspice=False)
             for name, target in state.targets.items()
         }
         violations = {
@@ -452,7 +452,7 @@ class AnalogRFIRFlowRunner:
             ref = max(abs(float(status["max"])), 1e-30)
             violation = max(violation, max(0.0, (float(value) - float(status["max"])) / ref))
         if status.get("status") == "unverified" and violation == 0.0:
-            return 0.0
+            return 1.0
         return violation
 
     def _validate_or_raise(self, state: DesignState, stage: str) -> None:
@@ -592,6 +592,8 @@ class AnalogRFIRFlowRunner:
                 "output_swing",
                 "output_swing_low",
                 "output_swing_high",
+                "saturation_margin",
+                "saturation_required_gap",
                 "icmr",
                 "icmr_min",
                 "icmr_max",

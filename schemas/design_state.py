@@ -328,6 +328,8 @@ class DesignState:
         L_grid = getattr(proc, "L_precision", 1e-9)
         W_min  = getattr(proc, "min_W", 150e-9)
         L_min  = getattr(proc, "min_L", 130e-9)
+        W_max = getattr(proc, "max_W", 200e-6)
+        min_area = getattr(proc, "min_area", 0.0)
         W_dec = max(0, int(-math.floor(math.log10(W_grid)))) if W_grid > 0 else 0
         L_dec = max(0, int(-math.floor(math.log10(L_grid)))) if L_grid > 0 else 0
         for dev_id, ts in self.transistors.items():
@@ -341,6 +343,12 @@ class DesignState:
                 L = max(L, L_min)
                 n = int(round(L / L_grid))
                 ts.parameters.L = round(n * L_grid, L_dec)
+            if min_area > 0 and ts.parameters.W > 0 and ts.parameters.L > 0:
+                area = ts.parameters.W * ts.parameters.L
+                if area < min_area:
+                    required_w = min_area / ts.parameters.L
+                    n = int(math.ceil(required_w / W_grid))
+                    ts.parameters.W = round(min(max(n * W_grid, W_min), W_max), W_dec)
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "DesignState":

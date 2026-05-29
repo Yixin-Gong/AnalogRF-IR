@@ -174,6 +174,7 @@ def _latest_result_summary(runs_dir: Path) -> dict[str, Any]:
         "result_json": str(result_path),
         "spec_pass": status.get("spec_pass"),
         "failed_targets": status.get("failed_targets", []),
+        "unverified_targets": status.get("unverified_targets", []),
         "best_loss": status.get("best_loss"),
         "measurements": payload.get("measurements", {}),
     }
@@ -186,11 +187,12 @@ def _result_rank(payload: dict[str, Any]) -> tuple[float, float, float, float]:
     except (TypeError, ValueError):
         best_loss = float("inf")
     failed_count = len(status.get("failed_targets", []) or [])
+    unverified_count = len(status.get("unverified_targets", []) or [])
     measurements = payload.get("measurements", {}) or {}
     gain = float(measurements.get("dc_gain_db", -200.0) or -200.0)
     return (
         0.0 if status.get("spec_pass", False) else 1.0,
-        float(failed_count),
+        float(failed_count + unverified_count),
         best_loss,
         -gain,
     )
@@ -201,7 +203,7 @@ def _write_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def _write_summary_table(output_dir: Path, manifest: dict[str, Any]) -> None:
-    lines = ["case,schema,seed,status,spec_pass,best_loss,failed_targets,runs_dir"]
+    lines = ["case,schema,seed,status,spec_pass,best_loss,failed_targets,unverified_targets,runs_dir"]
     for job in manifest.get("jobs", []):
         summary = job.get("summary", {}) or {}
         lines.append(
@@ -214,6 +216,7 @@ def _write_summary_table(output_dir: Path, manifest: dict[str, Any]) -> None:
                     str(summary.get("spec_pass", "")),
                     str(summary.get("best_loss", "")),
                     "|".join(str(item) for item in summary.get("failed_targets", []) or []),
+                    "|".join(str(item) for item in summary.get("unverified_targets", []) or []),
                     str(job.get("runs_dir", "")),
                 ]
             )

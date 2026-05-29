@@ -15,6 +15,11 @@ from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
 
 
+_SATURATION_MARGIN_V = 0.01
+_SATURATION_PENALTY_SCALE = 4.0e3
+_DYNAMIC_ROLE_TOKENS = ("reset", "precharge", "equalize", "switch")
+
+
 # Internal implementation note.
 
 @dataclass
@@ -119,6 +124,9 @@ class CircuitEvaluator:
 
         # Internal implementation note.
         performance = self._estimate_performance(transistor_params, decoded.get("__global__", {}))
+        sat_margin, sat_required_gap = self._estimated_saturation_margins(transistor_params)
+        performance.setdefault("saturation_margin", sat_margin)
+        performance.setdefault("saturation_required_gap", sat_required_gap)
 
         # Internal implementation note.
         total_loss, loss_breakdown = self._compute_loss(performance, transistor_params)
@@ -285,6 +293,13 @@ class CircuitEvaluator:
             if self.capabilities.has("miller_capacitive_compensation"):
                 return self._estimate_two_stage_performance(tp, global_vars or {})
             return self._estimate_uncompensated_two_stage_performance(tp, global_vars or {})
+        architecture = (self.schema.topology.architecture or "").lower()
+        if (
+            self.capabilities.has("cascode_ota")
+            or self.capabilities.has("telescopic_cascode")
+            or "cascode" in architecture
+        ):
+            return self._estimate_cascode_performance(tp)
         return self._estimate_five_transistor_performance(tp)
 
     def _is_comparator(self) -> bool:
@@ -623,6 +638,161 @@ class CircuitEvaluator:
             "icmr_min": icmr_min,
             "icmr_max": icmr_max,
             "power": power,
+        }
+
+    def _estimate_cascode_performance(self, tp: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+        """Topology-aware single-stage cascode OTA surrogate.
+
+        This keeps the fast gm/ID search aligned with ngspice for telescopic
+        and folded-cascode OTAs: gain is set by boosted output resistance, while
+        UGBW and slew remain load-capacitance/current limited.
+        """
+
+        def devices_matching(*tokens: str, dev_type: str | None = None) -> list[dict[str, float]]:
+            out = []
+            for dev in self.schema.topology.devices:
+                role = (dev.role or "").lower()
+                if tokens and not any(token in role for token in tokens):
+                    continue
+                if dev_type and dev.type != dev_type:
+                    continue
+                item = tp.get(dev.id)
+                if item:
+                    out.append(item)
+            return out
+
+        def avg(items: list[dict[str, float]], key: str, default: float = 0.0) -> float:
+            vals = [float(item.get(key, default) or default) for item in items if item.get(key, default) is not None]
+            return sum(vals) / len(vals) if vals else default
+
+        def avg_eff_gm(items: list[dict[str, float]]) -> float:
+            vals = []
+            for item in items:
+                gm = float(item.get("gm", 0.0) or 0.0)
+                ident = float(item.get("id", 0.0) or 0.0)
+                ieff = float(item.get("id_effective", ident) or ident)
+                scale = min(max(ieff / max(ident, 1e-30), 0.05), 1.0)
+                vals.append(gm * scale)
+            return sum(vals) / len(vals) if vals else 0.0
+
+        def avg_gds(items: list[dict[str, float]]) -> float:
+            vals = []
+            for item in items:
+                gds = float(item.get("gds", 0.0) or 0.0)
+                ident = float(item.get("id", 0.0) or 0.0)
+                ieff = float(item.get("id_effective", ident) or ident)
+                scale = min(max(ieff / max(ident, 1e-30), 0.05), 1.0)
+                vals.append(max(gds * scale, 1e-15))
+            return sum(vals) / len(vals) if vals else 1e-15
+
+        def boosted_ro(base_items: list[dict[str, float]], cas_items: list[dict[str, float]]) -> float:
+            ro_base = 1.0 / max(avg_gds(base_items), 1e-15)
+            if not cas_items:
+                return ro_base
+            gm_cas = max(avg_eff_gm(cas_items), 1e-15)
+            ro_cas = 1.0 / max(avg_gds(cas_items), 1e-15)
+            return ro_base + ro_cas + gm_cas * ro_base * ro_cas
+
+        def parallel(a: float, b: float) -> float:
+            return 1.0 / max(1.0 / max(a, 1e-30) + 1.0 / max(b, 1e-30), 1e-30)
+
+        input_devs = devices_matching("input_pair")
+        load_devs = devices_matching("current_mirror", "active_load")
+        tail_devs = devices_matching("tail")
+        n_cas = devices_matching("input_cascode", "folded_cascode", dev_type="nmos")
+        p_cas = devices_matching("load_cascode", dev_type="pmos")
+        n_base = [item for item in input_devs if item.get("type") == "nmos"] or [
+            item for item in load_devs if item.get("type") == "nmos"
+        ]
+        p_base = [item for item in input_devs if item.get("type") == "pmos"] or [
+            item for item in load_devs if item.get("type") == "pmos"
+        ]
+        if not input_devs or not load_devs:
+            return self._estimate_five_transistor_performance(tp)
+
+        corr = self.schema.corrections
+        gm_corr = corr.gm_factor
+        gds_corr = corr.gds_factor
+        c_corr = corr.c_factor
+
+        gm_in = avg_eff_gm(input_devs) * gm_corr
+        rout_n = boosted_ro(n_base or input_devs, n_cas) / max(gds_corr, 1e-9)
+        rout_p = boosted_ro(p_base or load_devs, p_cas) / max(gds_corr, 1e-9)
+        rout = parallel(rout_n, rout_p)
+
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        span = max(vdd - vss, 1e-9)
+        n_required = self._stack_required_voltage(tp, "nmos")
+        p_required = self._stack_required_voltage(tp, "pmos")
+        low = vss + n_required
+        high = vdd - p_required
+        output_swing = max(0.0, high - low)
+        stack_need = n_required + p_required
+        stack_required_gap = span - stack_need
+        headroom_factor = min(1.0, span / max(stack_need, 1e-9))
+
+        dc_gain = gm_in * rout * headroom_factor * headroom_factor
+        dc_gain_db = 20.0 * math.log10(max(dc_gain, 1e-15))
+
+        cload = self.schema.simulation.cload or 1e-12
+        cap_items = input_devs + load_devs + n_cas + p_cas + tail_devs
+        c_dev = sum(
+            abs(item.get("cgd", 0.0) or 0.0)
+            + 0.35 * abs(item.get("cgs", 0.0) or 0.0)
+            + abs(item.get("W", 0.0) or 0.0) * 1e6 * 0.35e-15
+            for item in cap_items
+        ) * c_corr
+        c_out = max(cload + c_dev, 1e-18)
+        gbw_rad = gm_in / c_out if c_out > 0 else 0.0
+        ugbw = gbw_rad / (2.0 * math.pi)
+
+        internal_cap = max(c_dev - cload * 0.1, 1e-18)
+        cas_gm = max(avg_eff_gm(n_cas + p_cas), 1e-12)
+        p_internal = cas_gm / internal_cap
+        pm_rad = math.pi / 2.0 - math.atan(gbw_rad / max(p_internal, 1e-12))
+        phase_margin = max(0.0, min(120.0, pm_rad * 180.0 / math.pi))
+
+        current_candidates = [
+            float(item.get("id_effective", item.get("id", 0.0)) or 0.0)
+            for item in tail_devs + input_devs + load_devs
+        ]
+        branch_current = max(current_candidates or [0.0])
+        slew_rate = branch_current / c_out
+        power = span * max(
+            sum(
+                float(item.get("id_effective", item.get("id", 0.0)) or 0.0)
+                for item in load_devs
+                if item.get("type") == "pmos"
+            ),
+            branch_current,
+        )
+        if power <= 0.0:
+            power = span * branch_current
+
+        input_ref = input_devs[0]
+        load_ref = load_devs[0]
+        tail_ref = tail_devs[0] if tail_devs else {}
+        icmr_min, icmr_max = self._estimate_input_icmr(input_ref, load_ref, tail_ref)
+
+        return {
+            "dc_gain": dc_gain_db,
+            "unity_gain_bandwidth": ugbw,
+            "phase_margin": phase_margin,
+            "slew_rate": slew_rate,
+            "slew_rate_pos": slew_rate,
+            "slew_rate_neg": slew_rate,
+            "output_swing": output_swing,
+            "output_swing_low": low,
+            "output_swing_high": high,
+            "icmr": max(0.0, icmr_max - icmr_min),
+            "icmr_min": icmr_min,
+            "icmr_max": icmr_max,
+            "power": power,
+            "cascode_headroom_factor": headroom_factor,
+            "cascode_saturation_required_gap": stack_required_gap,
+            "cascode_output_resistance": rout,
+            "cascode_internal_pole_rad_s": p_internal,
         }
 
     def _estimate_uncompensated_two_stage_performance(
@@ -1010,6 +1180,74 @@ class CircuitEvaluator:
         icmr_max = vdd - vsg_in - vdsat_tail * factor
         icmr_min = vss + vdsat_load * factor + vdsat_in * factor
         return min(icmr_min, icmr_max), max(icmr_min, icmr_max)
+
+    def _estimated_saturation_margins(
+        self,
+        tp: Dict[str, Dict[str, float]],
+    ) -> Tuple[float, float]:
+        margins: list[float] = []
+        required_gaps: list[float] = []
+        for p in tp.values():
+            role = str(p.get("role", "") or "")
+            if _optimizer_saturation_exempt(role):
+                continue
+            vds = abs(float(p.get("vds", 0.0) or 0.0))
+            vdsat = abs(float(p.get("vdsat", 0.0) or 0.0))
+            if vds <= 0.0 or vdsat <= 0.0:
+                continue
+            margin = vds - vdsat
+            required = _optimizer_required_saturation_margin(role)
+            margins.append(margin)
+            required_gaps.append(margin - required)
+
+        stack_gap = self._stack_saturation_required_gap(tp)
+        if stack_gap is not None:
+            required_gaps.append(stack_gap)
+
+        if not margins and not required_gaps:
+            return 1.0, 1.0
+        min_margin = min(margins) if margins else min(required_gaps) + _SATURATION_MARGIN_V
+        min_required_gap = min(required_gaps) if required_gaps else min_margin - _SATURATION_MARGIN_V
+        return float(min_margin), float(min_required_gap)
+
+    def _stack_saturation_required_gap(
+        self,
+        tp: Dict[str, Dict[str, float]],
+    ) -> Optional[float]:
+        architecture = (self.schema.topology.architecture or "").lower()
+        if "cascode" not in architecture:
+            return None
+        vdd = self.schema.simulation.supply.get("vdd", 1.2)
+        vss = self.schema.simulation.supply.get("vss", 0.0)
+        span = max(float(vdd) - float(vss), 1e-9)
+        n_required = self._stack_required_voltage(tp, "nmos")
+        p_required = self._stack_required_voltage(tp, "pmos")
+        if n_required <= 0.0 and p_required <= 0.0:
+            return None
+        return span - n_required - p_required
+
+    def _stack_required_voltage(
+        self,
+        tp: Dict[str, Dict[str, float]],
+        dev_type: str,
+    ) -> float:
+        by_role: dict[str, list[dict[str, float]]] = {}
+        for dev in self.schema.topology.devices:
+            role = dev.role or ""
+            if _optimizer_saturation_exempt(role):
+                continue
+            p = tp.get(dev.id)
+            if not p or p.get("type") != dev_type:
+                continue
+            by_role.setdefault(role, []).append(p)
+        required = 0.0
+        for role, items in by_role.items():
+            vdsats = [abs(float(item.get("vdsat", 0.0) or 0.0)) for item in items]
+            if not vdsats:
+                continue
+            required += sum(vdsats) / len(vdsats) + _optimizer_required_saturation_margin(role)
+        return required
+
     def _compute_loss(self, perf: Dict[str, float],
                        tp: Dict[str, Dict[str, float]]) -> Tuple[float, Dict[str, float]]:
         """AnalogRF-IR internal documentation."""
@@ -1028,6 +1266,11 @@ class CircuitEvaluator:
         PENALTY_BIG = 1e6
         PENALTY_WARN = 1e3
         roles_present = {p.get("role", "") for p in tp.values()}
+        sat_required_gap = float(perf.get("saturation_required_gap", 1.0) or 1.0)
+        if sat_required_gap < 0.0:
+            penalty = _SATURATION_PENALTY_SCALE * abs(sat_required_gap)
+            total += penalty
+            breakdown["hard:saturation_margin_vds_vdsat"] = penalty
 
         def _is_mirrored_copy(role: str) -> bool:
             return (
@@ -1059,19 +1302,16 @@ class CircuitEvaluator:
                 breakdown[f"soft:L_max_{did}"] = PENALTY_WARN * (L_val - proc.max_L)
 
             # Internal implementation note.
-            switch_like = any(token in role_l for token in ("reset", "precharge", "equalize"))
-            if (
-                not switch_like
-                and role not in ("current_mirror_load", "tail_bias_mirror", "output_bias_mirror")
-                and vds > 0
-                and "vdsat" in p
-            ):
-                vdsat = p.get("vdsat", 0)
-                if vdsat > 0 and vds < vdsat * proc.VDSAT_headroom_factor:
-                    shortage = vdsat * proc.VDSAT_headroom_factor - vds
-                    penalty_scale = PENALTY_WARN * (0.1 if _is_mirrored_copy(role) else 1.0)
-                    total += penalty_scale * shortage
-                    breakdown[f"soft:saturation_{did}"] = penalty_scale * shortage
+            if not _optimizer_saturation_exempt(role) and vds > 0 and "vdsat" in p:
+                vdsat = abs(float(p.get("vdsat", 0.0) or 0.0))
+                margin = abs(float(vds)) - vdsat
+                required = _optimizer_required_saturation_margin(role)
+                if vdsat > 0 and margin < required:
+                    shortage = required - margin
+                    penalty_scale = _SATURATION_PENALTY_SCALE * (0.2 if _is_mirrored_copy(role) else 1.0)
+                    penalty = penalty_scale * shortage
+                    total += penalty
+                    breakdown[f"hard:saturation_margin_{did}"] = penalty
 
             # Internal implementation note.
             VTH = proc.VTH_n if dev_type == "nmos" else proc.VTH_p
@@ -1166,6 +1406,15 @@ def _format_dv_key(dv: DesignVariable) -> str:
 
 def _format_knob(dv: DesignVariable) -> str:
     return f"{dv.device}.{dv.variable}" if dv.device else f"global.{dv.variable}"
+
+
+def _optimizer_saturation_exempt(role: str) -> bool:
+    role_l = (role or "").lower()
+    return any(token in role_l for token in _DYNAMIC_ROLE_TOKENS)
+
+
+def _optimizer_required_saturation_margin(role: str) -> float:
+    return _SATURATION_MARGIN_V
 
 
 def _safe_eval_loss_formula(formula: str, perf: Dict[str, float],
@@ -1609,6 +1858,7 @@ def round_transistor_params(
     W_min  = getattr(proc, "min_W", 150e-9)
     L_min  = getattr(proc, "min_L", 130e-9)
     W_max  = getattr(proc, "max_W", 200e-6)
+    min_area = getattr(proc, "min_area", 0.0)
     W_dec = max(0, int(-math.floor(math.log10(W_grid)))) if W_grid > 0 else 0
     L_dec = max(0, int(-math.floor(math.log10(L_grid)))) if L_grid > 0 else 0
 
@@ -1629,6 +1879,13 @@ def round_transistor_params(
             L = max(L, L_min)
             n = int(round(L / L_grid))
             rp["L"] = round(n * L_grid, L_dec)
+
+        if min_area > 0 and rp.get("W", 0) > 0 and rp.get("L", 0) > 0:
+            area = rp["W"] * rp["L"]
+            if area < min_area:
+                required_w = min_area / rp["L"]
+                n = int(math.ceil(required_w / W_grid))
+                rp["W"] = round(min(max(n * W_grid, W_min), W_max), W_dec)
 
         rp["W_rounded"] = True
         rounded[dev_id] = rp

@@ -29,7 +29,13 @@ def tune_current_mirror_ota_operating_point(
     sim: NgspiceSimulator,
     work_dir: Path,
 ) -> dict[str, Any]:
-    event = tune_single_stage_ota_operating_point(state, sim, work_dir)
+    event = tune_single_stage_ota_operating_point(
+        state,
+        sim,
+        work_dir,
+        max_candidates=120,
+        time_budget_sec=150.0,
+    )
     if not event:
         return {}
     return {"topology_family": "current_mirror_ota", **event}
@@ -53,6 +59,8 @@ def tune_cascode_ota_operating_point(
 
     vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
     original_globals = dict(state.global_parameters or {})
+    original_widths = _capture_widths(state)
+    original_lengths = _capture_lengths(state)
     original_values = {name: _initial_bias_value(state, name, vdd) for name in bias_ports}
     candidates = _candidate_points(state, original_values, vdd)
     if not candidates:
@@ -82,9 +90,37 @@ def tune_cascode_ota_operating_point(
             sim.timeout_sec = original_timeout
 
     _restore_globals(state, original_globals)
+    _restore_widths(state, original_widths)
+    _restore_lengths(state, original_lengths)
     best = _select_candidate(records)
     if not best:
         return {}
+    _apply_candidate(state, best)
+    best = _refine_tail_current_for_speed(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        started=started,
+        time_budget_sec=max(time_budget_sec, 180.0),
+        candidate_timeout_sec=max(candidate_timeout_sec, 12.0),
+    )
+    best = _refine_widths_for_speed(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        original_widths,
+        original_lengths,
+        started=started,
+        time_budget_sec=max(time_budget_sec, 240.0),
+        candidate_timeout_sec=max(candidate_timeout_sec, 12.0),
+    )
+    _restore_globals(state, original_globals)
+    _restore_widths(state, original_widths)
+    _restore_lengths(state, original_lengths)
     _apply_candidate(state, best)
     final_result = best.get("_result")
     if final_result is not None and getattr(final_result, "operating_points", None):
@@ -101,6 +137,14 @@ def tune_cascode_ota_operating_point(
         "op_margin": float(best.get("op_margin", 0.0)),
         "op_required_margin": float(best.get("op_required_margin", 0.0)),
         "candidate_count": evaluated,
+        "current_refinement_count": int(best.get("current_refinement_count", 0)),
+        "width_refinement_count": int(best.get("width_refinement_count", 0)),
+        "new_current_values": {
+            name: float(best[name])
+            for name in ("I_tail",)
+            if name in best
+        },
+        "width_scales": dict(best.get("width_scales", {}) or {}),
         "measurements": dict(best.get("measurements", {}) or {}),
         "elapsed_sec": time.time() - started,
     }
@@ -241,6 +285,30 @@ def _stack_balance_presets(original: dict[str, float], vdd: float) -> list[dict[
                     "vbias_ncas": 0.62 * vdd,
                     "vbias_pcas": 0.48 * vdd,
                 },
+                {
+                    "phase": "telescopic_pcas_headroom",
+                    "vbias_tail": 0.34 * vdd,
+                    "vbias_ncas": 0.78 * vdd,
+                    "vbias_pcas": 0.54 * vdd,
+                },
+                {
+                    "phase": "telescopic_pcas_headroom",
+                    "vbias_tail": 0.38 * vdd,
+                    "vbias_ncas": 0.74 * vdd,
+                    "vbias_pcas": 0.58 * vdd,
+                },
+                {
+                    "phase": "telescopic_pcas_headroom",
+                    "vbias_tail": 0.42 * vdd,
+                    "vbias_ncas": 0.70 * vdd,
+                    "vbias_pcas": 0.62 * vdd,
+                },
+                {
+                    "phase": "telescopic_pcas_headroom",
+                    "vbias_tail": 0.46 * vdd,
+                    "vbias_ncas": 0.66 * vdd,
+                    "vbias_pcas": 0.66 * vdd,
+                },
             ]
         )
     if {"vbias_ptail", "vbias_ncas"}.issubset(original):
@@ -268,6 +336,20 @@ def _apply_candidate(state: DesignState, candidate: dict[str, Any]) -> None:
     for name in _bias_ports(state):
         if name in candidate:
             state.global_parameters[name] = _snap_voltage(float(candidate[name]))
+    for name in ("I_tail",):
+        if name in candidate:
+            state.global_parameters[name] = float(candidate[name])
+    widths = candidate.get("_widths")
+    if isinstance(widths, dict):
+        for dev_id, width in widths.items():
+            if dev_id in state.transistors:
+                state.transistors[dev_id].parameters.W = float(width)
+    lengths = candidate.get("_lengths")
+    if isinstance(lengths, dict):
+        for dev_id, length in lengths.items():
+            if dev_id in state.transistors:
+                state.transistors[dev_id].parameters.L = float(length)
+                state.transistors[dev_id].L_strategy = float(length)
 
 
 def _restore_globals(state: DesignState, original_globals: dict[str, float]) -> None:
@@ -280,6 +362,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     gain = float(meas.get("dc_gain_db", -200.0) or -200.0)
     bw = float(meas.get("unity_gain_bandwidth", 0.0) or 0.0)
     pm = float(meas.get("phase_margin", 0.0) or 0.0)
+    sr = float(meas.get("slew_rate", 0.0) or 0.0)
     power = float(meas.get("total_power", 0.0) or 0.0)
     swing = float(meas.get("output_swing", 0.0) or 0.0)
 
@@ -287,16 +370,19 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
     bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
     pm_min = float(targets.get("phase_margin", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
     power_max = float(targets.get("power", Target()).max or float("inf"))
     swing_min = float(targets.get("output_swing", Target()).min or 0.0)
 
     if not result.success:
         gain -= 200.0
     op_margin, op_required_margin = _minimum_margins(state, result.operating_points or {})
+    op_ok = op_required_margin >= 0.0
     spec_pass = (
         gain >= gain_min
         and (bw_min <= 0.0 or bw >= bw_min)
         and (pm_min <= 0.0 or pm >= pm_min)
+        and (sr_min <= 0.0 or sr >= sr_min)
         and (power_max == float("inf") or power <= power_max)
         and (swing_min <= 0.0 or swing >= swing_min)
     )
@@ -304,31 +390,340 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     score += 90.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
     score += 45.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
     score += 45.0 * max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    score += 35.0 * max(0.0, sr_min - sr) / max(sr_min, 1.0)
     score += 35.0 * max(0.0, swing_min - swing) / max(swing_min, 1.0)
     if power_max < float("inf"):
         score += 25.0 * max(0.0, power - power_max) / max(power_max, 1e-12)
     if op_required_margin < 0.0:
-        score += 220.0 * abs(op_required_margin)
-    if op_required_margin < -0.12:
-        score += 180.0 * abs(op_required_margin + 0.12)
+        score += 80.0 * abs(op_required_margin)
+    if op_required_margin < -0.05:
+        score += 40.0 * abs(op_required_margin + 0.05)
     if gain <= 0.0:
+        score += 300.0
+    if bw_min > 0.0 and "unity_gain_bandwidth" not in meas:
         score += 120.0
-    if spec_pass and op_required_margin >= -0.02:
+    if pm_min > 0.0 and "phase_margin" not in meas:
+        score += 120.0
+    if sr_min > 0.0 and "slew_rate" not in meas:
+        score += 80.0
+    if spec_pass:
         score -= 250.0
+    gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
+    bw_deficit = max(0.0, bw_min - bw) / max(bw_min, 1.0)
+    pm_deficit = max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    sr_deficit = max(0.0, sr_min - sr) / max(sr_min, 1.0)
+    swing_deficit = max(0.0, swing_min - swing) / max(swing_min, 1.0)
+    op_deficit = max(0.0, -op_required_margin) / max(_target_saturation_margin(state), 1e-3)
+    measured_deficit = gain_deficit + bw_deficit + pm_deficit + sr_deficit + swing_deficit
+    measured_fail_count = sum(
+        1
+        for value in (gain_deficit, bw_deficit, pm_deficit, sr_deficit, swing_deficit)
+        if value > 0.0
+    )
     item = dict(candidate)
     item.update(
         {
             "score": score,
+            "measured_deficit": measured_deficit,
+            "measured_fail_count": measured_fail_count,
+            "gain_deficit": gain_deficit,
+            "bw_deficit": bw_deficit,
+            "pm_deficit": pm_deficit,
+            "sr_deficit": sr_deficit,
+            "swing_deficit": swing_deficit,
             "measurements": meas,
             "success": bool(result.success),
             "spec_pass": spec_pass,
-            "op_ok": op_required_margin >= -0.02,
+            "op_ok": op_ok,
             "op_margin": op_margin,
             "op_required_margin": op_required_margin,
             "_result": result,
         }
     )
     return item
+
+
+def _refine_tail_current_for_speed(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    targets = state.targets
+    bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
+    if bw_min <= 0.0 and sr_min <= 0.0:
+        return best
+    meas = best.get("measurements", {}) or {}
+    speed_gap = (
+        (bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min)
+        or (sr_min > 0.0 and float(meas.get("slew_rate", 0.0) or 0.0) < sr_min)
+    )
+    if not speed_gap:
+        return best
+    current_range = _global_variable_range(state, "I_tail")
+    if not current_range:
+        return best
+    low, high = current_range
+    base_current = _global_variable_value(state, original_globals, "I_tail")
+    if base_current <= 0.0 or high <= low:
+        return best
+
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        for scale in (1.15, 1.35, 1.6, 2.0, 2.6, 3.4, 4.5, 6.0, 8.0, 11.0, 15.0, 22.0, 32.0):
+            if time.time() - started > time_budget_sec:
+                break
+            current = min(max(base_current * scale, low), high)
+            key = f"{current:.12e}"
+            if key in seen:
+                continue
+            seen.add(key)
+            _restore_globals(state, original_globals)
+            _apply_candidate(state, best)
+            state.global_parameters["I_tail"] = current
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            candidate = dict(best)
+            candidate["phase"] = f"{best.get('phase', '')}+tail_current_speed_refine"
+            candidate["I_tail"] = current
+            item = _score_candidate(state, trial, candidate)
+            item["current_refinement_count"] = len(seen)
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["current_refinement_count"] = len(records)
+    return selected
+
+
+def _refine_widths_for_speed(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    base_widths: dict[str, float],
+    base_lengths: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    targets = state.targets
+    bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
+    meas = best.get("measurements", {}) or {}
+    speed_gap = (
+        (bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min)
+        or (sr_min > 0.0 and float(meas.get("slew_rate", 0.0) or 0.0) < sr_min)
+    )
+    if not speed_gap:
+        return best
+
+    templates = _width_speed_templates(state)
+    if not templates:
+        return best
+    records: list[dict[str, Any]] = []
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        for idx, template in enumerate(templates, start=1):
+            if time.time() - started > time_budget_sec:
+                break
+            _restore_globals(state, original_globals)
+            _restore_widths(state, base_widths)
+            _restore_lengths(state, base_lengths)
+            _apply_candidate(state, best)
+            applied = _apply_role_geometry_template(state, base_widths, base_lengths, template)
+            if not applied:
+                continue
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            candidate = dict(best)
+            candidate["phase"] = f"{best.get('phase', '')}+role_width_speed_refine"
+            candidate["_widths"] = _capture_widths(state)
+            candidate["_lengths"] = _capture_lengths(state)
+            candidate["width_scales"] = template
+            item = _score_candidate(state, trial, candidate)
+            item["width_refinement_count"] = idx
+            item["width_scales"] = template
+            item["_widths"] = candidate["_widths"]
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["width_refinement_count"] = len(records)
+    return selected
+
+
+def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
+    family = _topology_family(state)
+    if family == "telescopic_cascode_ota":
+        return [
+            {
+                "__role_min_widths__": {
+                    "input_pair": 22.0e-6,
+                    "tail_current_source": 11.0e-6,
+                    "input_cascode": 7.5e-6,
+                    "current_mirror_load": 110.0e-6,
+                    "load_cascode": 70.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.95e-6,
+                    "tail_current_source": 0.33e-6,
+                    "input_cascode": 1.93e-6,
+                    "current_mirror_load": 2.42e-6,
+                    "load_cascode": 1.98e-6,
+                },
+            },
+            {
+                "input_pair": 2.0,
+                "tail_current_source": 3.0,
+                "current_mirror_load": 2.0,
+                "load_cascode": 5.0,
+            },
+            {
+                "input_pair": 2.0,
+                "tail_current_source": 3.0,
+                "current_mirror_load": 2.0,
+                "load_cascode": 8.0,
+            },
+            {
+                "input_pair": 2.4,
+                "tail_current_source": 3.0,
+                "input_cascode": 1.1,
+                "current_mirror_load": 2.25,
+                "load_cascode": 8.2,
+            },
+            {
+                "tail_current_source": 3.0,
+                "current_mirror_load": 2.0,
+                "load_cascode": 8.0,
+            },
+        ]
+    return [
+        {
+            "input_pair": 1.5,
+            "tail_current_source": 2.0,
+            "current_mirror_load": 1.5,
+            "load_cascode": 2.0,
+            "input_cascode": 1.3,
+        },
+        {
+            "input_pair": 2.0,
+            "tail_current_source": 2.5,
+            "current_mirror_load": 2.0,
+            "load_cascode": 3.0,
+            "input_cascode": 1.5,
+        },
+    ]
+
+
+def _apply_role_geometry_template(
+    state: DesignState,
+    base_widths: dict[str, float],
+    base_lengths: dict[str, float],
+    role_scales: dict[str, Any],
+) -> bool:
+    proc = state.process
+    min_w = float(getattr(proc, "min_W", 150e-9) or 150e-9)
+    max_w = float(getattr(proc, "max_W", 200e-6) or 200e-6)
+    min_l = float(getattr(proc, "min_L", 130e-9) or 130e-9)
+    max_l = float(getattr(proc, "max_L", 3e-6) or 3e-6)
+    min_widths = role_scales.get("__role_min_widths__", {})
+    min_lengths = role_scales.get("__role_min_lengths__", {})
+    any_applied = False
+    for dev in state.topology.devices:
+        ts = state.transistors.get(dev.id)
+        base_w = base_widths.get(dev.id, 0.0)
+        if ts is None or base_w <= 0.0:
+            continue
+        scale = role_scales.get(dev.role)
+        min_role_w = min_widths.get(dev.role)
+        if scale is not None or min_role_w is not None:
+            next_w = base_w * float(scale) if scale is not None else base_w
+            if min_role_w is not None:
+                next_w = max(next_w, float(min_role_w))
+            ts.parameters.W = min(max(next_w, min_w), max_w)
+            any_applied = True
+        min_role_l = min_lengths.get(dev.role)
+        if min_role_l is not None:
+            base_l = base_lengths.get(dev.id, ts.parameters.L)
+            ts.parameters.L = min(max(max(base_l, float(min_role_l)), min_l), max_l)
+            ts.L_strategy = ts.parameters.L
+            any_applied = True
+    if any_applied:
+        state._ensure_wl_on_grid()
+    return any_applied
+
+
+def _capture_widths(state: DesignState) -> dict[str, float]:
+    return {
+        dev_id: float(ts.parameters.W)
+        for dev_id, ts in state.transistors.items()
+        if ts.parameters.W > 0.0
+    }
+
+
+def _restore_widths(state: DesignState, widths: dict[str, float]) -> None:
+    for dev_id, width in widths.items():
+        if dev_id in state.transistors:
+            state.transistors[dev_id].parameters.W = float(width)
+
+
+def _capture_lengths(state: DesignState) -> dict[str, float]:
+    return {
+        dev_id: float(ts.parameters.L)
+        for dev_id, ts in state.transistors.items()
+        if ts.parameters.L > 0.0
+    }
+
+
+def _restore_lengths(state: DesignState, lengths: dict[str, float]) -> None:
+    for dev_id, length in lengths.items():
+        if dev_id in state.transistors:
+            state.transistors[dev_id].parameters.L = float(length)
+            state.transistors[dev_id].L_strategy = float(length)
+
+
+def _global_variable_range(state: DesignState, name: str) -> tuple[float, float] | None:
+    for dv in state.design_variables:
+        if not dv.device and dv.variable == name:
+            return float(dv.range.min), float(dv.range.max)
+    return None
+
+
+def _global_variable_value(state: DesignState, original_globals: dict[str, float], name: str) -> float:
+    if name in original_globals:
+        return float(original_globals[name])
+    value = state.global_parameters.get(name)
+    if value is not None:
+        return float(value)
+    for dv in state.design_variables:
+        if not dv.device and dv.variable == name and dv.initial is not None:
+            return float(dv.initial)
+    return 0.0
 
 
 def _select_candidate(records: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -344,11 +739,21 @@ def _candidate_priority(item: dict[str, Any]) -> tuple[float, ...]:
     bw = float(meas.get("unity_gain_bandwidth", 0.0) or 0.0)
     swing = float(meas.get("output_swing", 0.0) or 0.0)
     op_required_margin = float(item.get("op_required_margin", -1.0) or -1.0)
-    op_bucket = 0.0 if op_required_margin >= -0.02 else 1.0 if op_required_margin >= -0.12 else 2.0
+    op_bucket = 0.0 if op_required_margin >= 0.0 else 1.0 if op_required_margin >= -0.05 else 2.0
+    missing_required = 0.0 if {"unity_gain_bandwidth", "phase_margin"}.issubset(meas) else 1.0
     return (
         0.0 if item.get("spec_pass", False) else 1.0,
+        float(item.get("measured_fail_count", 99.0)),
+        float(item.get("measured_deficit", float("inf"))),
         0.0 if gain > 0.0 else 1.0,
+        missing_required,
+        float(item.get("gain_deficit", 1.0)),
+        float(item.get("swing_deficit", 1.0)),
+        float(item.get("pm_deficit", 1.0)),
+        float(item.get("sr_deficit", 1.0)),
+        float(item.get("bw_deficit", 1.0)),
         op_bucket,
+        max(0.0, -op_required_margin),
         float(item.get("score", float("inf"))),
         -gain,
         -bw,
@@ -365,19 +770,19 @@ def _minimum_margins(state: DesignState, operating_points: dict[str, dict[str, f
             continue
         margin = abs(float(op.get("vds", 0.0))) - abs(float(op.get("vdsat", 0.0)))
         margins.append(margin)
-        required_margins.append(margin - _required_saturation_margin(dev.role))
+        required_margins.append(margin - _required_saturation_margin(state, dev.role))
     return (min(margins), min(required_margins)) if margins else (-1.0, -1.0)
 
 
-def _required_saturation_margin(role: str) -> float:
-    role_l = (role or "").lower()
-    if "cascode" in role_l or "folded" in role_l:
-        return 0.06
-    if role_l == "input_pair":
-        return 0.06
-    if "tail" in role_l:
-        return 0.05
-    return 0.04
+def _required_saturation_margin(state: DesignState, role: str) -> float:
+    return _target_saturation_margin(state)
+
+
+def _target_saturation_margin(state: DesignState) -> float:
+    target = state.targets.get("saturation_margin")
+    if target is not None and target.min is not None:
+        return max(0.0, float(target.min))
+    return 0.05
 
 
 def _lookup_op(operating_points: dict[str, dict[str, float]], device_id: str) -> dict[str, float]:

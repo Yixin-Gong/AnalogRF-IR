@@ -46,12 +46,18 @@ class CircuitSpecModel:
         target: Target,
         measurements: dict[str, float],
         estimates: dict[str, float],
+        *,
+        require_ngspice: bool = True,
     ) -> dict[str, Any]:
         source, value = self.measured_value(target_name, measurements, estimates)
         status = "unknown"
         model_status = "unknown"
         margin_abs = None
         margin_rel = None
+        counts_for_pass = int(target.priority or 1) <= 2
+        requires_ngspice = require_ngspice and counts_for_pass
+        if value is None and requires_ngspice:
+            status = "unverified"
         if value is not None:
             status = "pass"
             if target.min is not None:
@@ -68,13 +74,14 @@ class CircuitSpecModel:
                 if max_margin < 0:
                     status = "fail"
             model_status = status
-            if int(target.priority or 1) <= 1 and source != "ngspice":
+            if requires_ngspice and source != "ngspice":
                 status = "unverified"
         return {
             "status": status,
             "model_status": model_status,
             "source": source,
-            "requires_ngspice": int(target.priority or 1) <= 1,
+            "requires_ngspice": requires_ngspice,
+            "counts_for_pass": counts_for_pass,
             "measurement_key": self.measurement_key(target_name),
             "value": value,
             "min": target.min,

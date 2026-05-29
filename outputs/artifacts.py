@@ -80,12 +80,13 @@ class ArtifactWriter:
             "iteration": iteration,
             "status": diagnostics["status"],
             "measurements": sim_result.measurements,
+            "data_alignment": diagnostics["data_alignment"],
             "artifacts": diagnostics["artifacts"],
             "causal_summary": {
                 "failed_symptoms": [
                     item["metric"]
                     for item in diagnostics["causal_diagnostics"]["failure_symptom_analysis"]
-                    if item["status"] == "fail"
+                    if item["status"] in {"fail", "unverified"}
                 ],
                 "top_root_cause": (
                     diagnostics["causal_diagnostics"]["root_cause_attribution"][0]
@@ -127,6 +128,10 @@ _SCHEMA_MEASUREMENT_KEYS = (
     "slew_rate_pos",
     "slew_rate_neg",
     "output_swing",
+    "output_swing_low",
+    "output_swing_high",
+    "saturation_margin",
+    "saturation_required_gap",
     "icmr",
     "icmr_min",
     "icmr_max",
@@ -185,6 +190,7 @@ def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
         "iteration": result.get("iteration"),
         "status": result.get("status", {}),
         "measurements": _compact_measurements(result.get("measurements", {}) or {}),
+        "data_alignment": _compact_data_alignment(result.get("data_alignment", {}) or {}),
         "causal_summary": _compact_causal_summary(result.get("causal_summary", {}) or {}),
     }
 
@@ -194,6 +200,22 @@ def _compact_measurements(measurements: dict[str, Any]) -> dict[str, Any]:
         key: measurements[key]
         for key in _SCHEMA_MEASUREMENT_KEYS
         if key in measurements
+    }
+
+
+def _compact_data_alignment(alignment: dict[str, Any]) -> dict[str, Any]:
+    if not alignment:
+        return {}
+    return {
+        "schema_version": alignment.get("schema_version", "analogrf_ir.data_alignment.v0_1"),
+        "aligned": alignment.get("aligned", False),
+        "target_count": alignment.get("target_count", 0),
+        "measurement_count": alignment.get("measurement_count", 0),
+        "evaluation_count": alignment.get("evaluation_count", 0),
+        "missing_evaluations": alignment.get("missing_evaluations", []),
+        "missing_measurements": alignment.get("missing_measurements", []),
+        "missing_required_measurements": alignment.get("missing_required_measurements", []),
+        "unverified_targets": alignment.get("unverified_targets", []),
     }
 
 
@@ -408,6 +430,99 @@ def _compact_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:
     return {key: gate[key] for key in keep if key in gate}
 
 
+def _build_data_alignment_audit(
+    state: DesignState,
+    best_meta: dict[str, Any],
+    sim_result: SimulationResult,
+    spec_model: CircuitSpecModel,
+    *,
+    target_status: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    measurements = sim_result.measurements or {}
+    perf_est = best_meta.get("performance", {}) or {}
+    evaluation_refs = {
+        ev.target_ref or ev.name
+        for ev in state.evaluations
+        if (ev.target_ref or ev.name)
+    }
+    target_status = target_status or {
+        name: spec_model.target_status(name, target, measurements, perf_est)
+        for name, target in state.targets.items()
+    }
+
+    targets: dict[str, dict[str, Any]] = {}
+    missing_evaluations: list[str] = []
+    missing_measurements: list[str] = []
+    missing_required_measurements: list[str] = []
+    unverified_targets: list[str] = []
+    expected_measurements: set[str] = set()
+    for name, target in state.targets.items():
+        measurement_key = spec_model.measurement_key(name)
+        expected_measurements.add(measurement_key)
+        status = target_status.get(name, {})
+        has_measurement = measurement_key in measurements
+        has_estimate = name in perf_est
+        has_evaluation = name in evaluation_refs
+        requires_ngspice = bool(status.get("requires_ngspice", int(target.priority or 1) <= 2))
+        counts_for_pass = bool(status.get("counts_for_pass", int(target.priority or 1) <= 2))
+        if not has_evaluation:
+            missing_evaluations.append(name)
+        if not has_measurement:
+            missing_measurements.append(name)
+        if requires_ngspice and not has_measurement:
+            missing_required_measurements.append(name)
+        if status.get("status") == "unverified":
+            unverified_targets.append(name)
+        targets[name] = {
+            "measurement_key": measurement_key,
+            "status": status.get("status", "unknown"),
+            "source": status.get("source", "missing"),
+            "requires_ngspice": requires_ngspice,
+            "counts_for_pass": counts_for_pass,
+            "has_evaluation": has_evaluation,
+            "has_optimizer_estimate": has_estimate,
+            "has_ngspice_measurement": has_measurement,
+            "optimizer_value": perf_est.get(name),
+            "ngspice_value": measurements.get(measurement_key),
+            "margin_abs": status.get("margin_abs"),
+            "margin_rel": status.get("margin_rel"),
+        }
+
+    auxiliary_prefixes = ("m", "tran_", "phase_", "stack")
+    auxiliary_keys = {
+        "i_vdd",
+        "ac_curve_points",
+        "unity_gain_crossings",
+        "phase_margin_from_curve",
+        "phase_at_unity_meas",
+        "phase_at_unity_unwrapped",
+        "phase_lag_at_unity",
+        "tran_curve_points",
+        "tran_output_span",
+        "tran_t_start",
+        "tran_t_stop",
+    }
+    extra_measurements = sorted(
+        key for key in measurements
+        if key not in expected_measurements
+        and key not in auxiliary_keys
+        and not key.startswith(auxiliary_prefixes)
+    )
+    return {
+        "schema_version": "analogrf_ir.data_alignment.v0_1",
+        "aligned": not missing_evaluations and not missing_measurements,
+        "target_count": len(state.targets),
+        "measurement_count": len(measurements),
+        "evaluation_count": len(state.evaluations),
+        "missing_evaluations": sorted(missing_evaluations),
+        "missing_measurements": sorted(missing_measurements),
+        "missing_required_measurements": sorted(missing_required_measurements),
+        "unverified_targets": sorted(unverified_targets),
+        "extra_measurements": extra_measurements,
+        "targets": targets,
+    }
+
+
 def build_simulation_log(
     state: DesignState,
     best_meta: dict[str, Any],
@@ -498,13 +613,16 @@ def build_simulation_log(
         },
         "comparison": {},
     }
-    for key, est_val in perf_est.items():
+    for key in sorted(set(perf_est) | set(state.targets)):
+        est_val = perf_est.get(key)
         ng_key = spec_model.measurement_key(key)
         ng_val = sim_result.measurements.get(ng_key)
         log["comparison"][key] = {
-            "optimizer_estimated": _sig(est_val),
+            "optimizer_estimated": _sig(est_val) if est_val is not None else None,
             "ngspice_measured": _sig(ng_val) if ng_val is not None else None,
+            "measurement_key": ng_key,
         }
+    log["data_alignment"] = _build_data_alignment_audit(state, best_meta, sim_result, spec_model)
     return log
 
 
@@ -524,6 +642,13 @@ def build_agent_diagnostics(
         name: spec_model.target_status(name, target, measurements, perf_est)
         for name, target in state.targets.items()
     }
+    data_alignment = _build_data_alignment_audit(
+        state,
+        best_meta,
+        sim_result,
+        spec_model,
+        target_status=target_status,
+    )
     causal_diagnostics = build_causal_diagnostics(
         state=state,
         best_meta=best_meta,
@@ -532,8 +657,16 @@ def build_agent_diagnostics(
         spec_model=spec_model,
         flow_meta=flow_meta,
     )
-    failed_targets = [name for name, item in target_status.items() if item["status"] == "fail"]
-    unverified_targets = [name for name, item in target_status.items() if item["status"] == "unverified"]
+    failed_targets = [
+        name for name, item in target_status.items()
+        if item["status"] == "fail" and item.get("counts_for_pass", True)
+    ]
+    unverified_targets = [
+        name for name, item in target_status.items()
+        if item["status"] == "unverified" and item.get("counts_for_pass", True)
+    ]
+    diagnostic_failed_targets = [name for name, item in target_status.items() if item["status"] == "fail"]
+    diagnostic_unverified_targets = [name for name, item in target_status.items() if item["status"] == "unverified"]
     top_losses = _top_items(loss_breakdown, limit=8)
     mismatches = _comparison_mismatch(comparison)
     devices = _device_status(state)
@@ -558,9 +691,12 @@ def build_agent_diagnostics(
             "spec_pass": bool(target_status) and not failed_targets and not unverified_targets,
             "failed_targets": failed_targets,
             "unverified_targets": unverified_targets,
+            "diagnostic_failed_targets": diagnostic_failed_targets,
+            "diagnostic_unverified_targets": diagnostic_unverified_targets,
             "best_loss": best_meta.get("total_loss", 0.0),
         },
         "targets": target_status,
+        "data_alignment": data_alignment,
         "optimizer": {
             "estimated_performance": perf_est,
             "top_loss_terms": top_losses,

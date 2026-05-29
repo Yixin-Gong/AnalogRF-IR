@@ -1168,7 +1168,30 @@ class NgspiceSimulator:
             perf.update(output)
         icmr = self._icmr_from_op(devices, op, vdd, vss, factor)
         perf.update(icmr)
+        perf.update(self._saturation_margin_from_op(devices, op, required_margin=0.01))
         return perf
+
+    def _saturation_margin_from_op(
+        self,
+        devices: List[Dict[str, str]],
+        op: Dict[str, Dict[str, float]],
+        *,
+        required_margin: float,
+    ) -> Dict[str, float]:
+        margins: List[float] = []
+        for dev in devices:
+            vds = self._op_abs(op, dev["id"], "vds")
+            vdsat = self._op_abs(op, dev["id"], "vdsat")
+            if vds <= 0.0 or vdsat <= 0.0:
+                continue
+            margins.append(vds - vdsat)
+        if not margins:
+            return {}
+        margin = min(margins)
+        return {
+            "saturation_margin": margin,
+            "saturation_required_gap": margin - required_margin,
+        }
 
     def _parse_mos_devices(self, netlist: str) -> List[Dict[str, str]]:
         devices: List[Dict[str, str]] = []

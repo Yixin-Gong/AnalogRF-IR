@@ -295,11 +295,14 @@ def _minimum_margins(state: DesignState, operating_points: dict[str, dict[str, f
             continue
         margin = float(op.get("vds", 0.0)) - float(op.get("vdsat", 0.0))
         margins.append(margin)
-        required_margins.append(margin - _required_saturation_margin(dev.role))
+        required_margins.append(margin - _required_saturation_margin(state, dev.role))
     return (min(margins), min(required_margins)) if margins else (-1.0, -1.0)
 
 
-def _required_saturation_margin(role: str) -> float:
+def _required_saturation_margin(state: DesignState, role: str) -> float:
+    target = state.targets.get("saturation_margin")
+    if target is not None and target.min is not None:
+        return max(0.0, float(target.min))
     return {
         "input_pair": 0.08,
         "cascode": 0.20,

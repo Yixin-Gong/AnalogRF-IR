@@ -861,6 +861,8 @@ def _expected_metric_direction(metric: str, variable: str, direction: str, expec
         "phase_margin": ("phase_margin", "pm", "stability"),
         "slew_rate": ("slew_rate", "slew"),
         "output_swing": ("output_swing", "swing", "headroom"),
+        "saturation_margin": ("saturation_margin", "saturation_required_gap", "headroom"),
+        "saturation_required_gap": ("saturation_required_gap", "saturation_margin", "headroom"),
         "power": ("power", "total_power"),
     }
     for key in aliases.get(metric, (metric,)):

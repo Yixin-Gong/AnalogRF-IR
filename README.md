@@ -217,11 +217,16 @@ two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
 deterministic diagnosis, and full LLM diagnosis methods.
 
 The default OTA schemas use calibrated IHP 130 nm regression targets for method
-comparison under `simulation.cload = 1 pF`: 24.5 dB / 2.3 MHz for the 5T OTA,
-26 dB / 1 MHz for the current-mirror OTA, 42 dB / 0.2 MHz for the telescopic
-OTA, 32 dB / 50 MHz for the folded-cascode OTA, and 46 dB / 12 MHz for the
-two-stage Miller OTA. These are high-impedance capacitive-load targets; they
-are not low-resistance, pad, cable, or 50 ohm load targets.
+comparison under `simulation.cload = 1 pF` and a high-impedance output node:
+5T OTA at 25 dB / 15 MHz / 70 deg / 10 V/us, current-mirror OTA at
+28 dB / 15 MHz / 60 deg / 10 V/us, telescopic OTA at
+45 dB / 5 MHz / 60 deg / 5 V/us, folded-cascode OTA at
+37 dB / 20 MHz / 55 deg / 15 V/us, and two-stage Miller OTA at
+59 dB / 10 MHz / 60 deg / 5 V/us. Output-swing targets are topology-specific,
+and the `saturation_margin` target records a diagnostic 10 mV
+`Vds - Vdsat` headroom check without counting it as a full-spec pass criterion.
+These are high-impedance capacitive-load targets; they are not low-resistance,
+pad, cable, or 50 ohm load targets.
 For the IHP two-stage Miller OTA, the feedback compensation value `Cc` is
 realized in generated ngspice netlists with the IHP SG13G2 `cap_cmim` MIM
 capacitor model and `cornerCAP.lib` `cap_typ` corner.
@@ -243,16 +248,26 @@ python scripts/plot_diagnosis_validation.py
 
 Latest IHP130 OTA evaluation snapshots:
 
-These figures keep the project view aligned with the evaluation narrative:
-diagnosis claims are checked by local SPICE probes and executable actions are
-reported through explicit flow components. The underlying ablation manifest
-uses a single reporting convention: each topology, method, and seed cell
-contributes its best ngspice-verified candidate under the high-impedance
-`CL = 1 pF` setup.
+The latest full-flow check uses `LLM + fallback postprocess`, seed `10`,
+`maxiter = 30`, IHP SG13G2, and a high-impedance `CL = 1 pF` output load. The
+same fixed schema targets above are used for all five OTA examples, and
+`saturation_margin` remains a diagnostic headroom check rather than a
+full-spec pass criterion.
+
+| Topology | Pass iter | Gain | UGBW | PM | SR | Swing | Power |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5T OTA | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
+| Current-mirror OTA | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
+| Telescopic OTA | 1 | 49.26 dB | 5.89 MHz | 63.8 deg | 7.36 V/us | 0.838 V | 13.61 uW |
+| Folded-cascode OTA | 7 | 38.02 dB | 32.97 MHz | 59.2 deg | 21.96 V/us | 0.650 V | 48.15 uW |
+| Two-stage Miller OTA | 6 | 59.04 dB | 15.87 MHz | 65.4 deg | 14.70 V/us | 0.624 V | 155.84 uW |
+
+![Full-flow OTA target achievement](docs/assets/full_flow_ota_results.png)
+
+Diagnosis claims are also checked by local SPICE probes, and executable
+actions are reported through explicit objective-gated apply/skip records.
 
 ![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
-
-![Method traceability across LLM, postprocess, and ngspice](docs/assets/ablation_method_traceability.png)
 
 If the API key is not configured, the flow records an LLM fallback status and continues with deterministic schema commands so local tests and non-LLM experiments remain reproducible.
 

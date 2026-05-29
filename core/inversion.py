@@ -41,7 +41,7 @@ def compute_I0(device_type: str, L: float, proc) -> float:
 def compute_IC_from_gm_id(gm_id: float, n: float = 1.4,
                           ut: float = UT_300K) -> float:
     """AnalogRF-IR internal documentation."""
-    if gm_id <= 0:
+    if gm_id <= 0 or not math.isfinite(gm_id):
         return 0.0
 
     # Internal implementation note.
@@ -51,9 +51,10 @@ def compute_IC_from_gm_id(gm_id: float, n: float = 1.4,
     x = n * ut * gm_id
 
     # Internal implementation note.
-    if x >= 0.999:
-        # Internal implementation note.
-        return 1.0 / (math.exp(1.0 / (1.0 - x)) - 1.0) if x < 0.9999 else 0.01
+    if x >= 0.995:
+        # The EKV back-solve becomes numerically singular as gm/ID approaches
+        # 1/(n*UT). Treat this as deep weak inversion instead of failing a run.
+        return 0.01
 
     # Internal implementation note.
     lo, hi = 1e-4, 1e6

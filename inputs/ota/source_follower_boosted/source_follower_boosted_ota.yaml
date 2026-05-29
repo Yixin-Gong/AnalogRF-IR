@@ -37,6 +37,7 @@ targets:
   phase_margin:         {min: 55, unit: deg, priority: 1}
   slew_rate:            {min: 2.5e+07, unit: V/s, priority: 1}
   output_swing:         {min: 3.0e-01, unit: V, priority: 1}
+  saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
   power:                {max: 5.0e-04, unit: W, priority: 2}
 
 design_variables:
@@ -81,6 +82,7 @@ loss_terms:
   - {id: pm_deficit, formula: "relu(targets.phase_margin.min - realized.phase_margin)/max(targets.phase_margin.min, 1)", weight: 10.0}
   - {id: sr_deficit, formula: "relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min, 1)", weight: 1.0}
   - {id: swing_deficit, formula: "relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min, 1)", weight: 2.0}
+  - {id: saturation_margin_deficit, formula: "relu(targets.saturation_margin.min - realized.saturation_margin)/max(targets.saturation_margin.min, 1e-3)", weight: 40.0}
   - {id: power_ratio, formula: "realized.power/max(targets.power.max, 1e-9)", weight: 0.2}
 
 evaluations:
@@ -89,4 +91,5 @@ evaluations:
   - {name: phase_margin, type: phase_margin, probe: vout, target_ref: phase_margin}
   - {name: slew_rate, type: slew_rate, probe: vout, target_ref: slew_rate}
   - {name: output_swing, type: output_swing, probe: vout, target_ref: output_swing}
+  - {name: saturation_margin, type: operating_point_margin, target_ref: saturation_margin}
   - {name: total_power, type: dc_power, target_ref: power}

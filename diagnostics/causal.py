@@ -20,7 +20,20 @@ STANDARD_PERFORMANCE_METRICS = (
     "phase_margin",
     "slew_rate",
     "output_swing",
+    "saturation_margin",
 )
+
+HEADROOM_METRICS = {
+    "output_swing",
+    "swing",
+    "icmr",
+    "icmr_min",
+    "icmr_max",
+    "input_common_mode_min",
+    "input_common_mode_max",
+    "saturation_margin",
+    "saturation_required_gap",
+}
 
 CAUSE_SCORE_WEIGHTS = {
     "structural": 0.40,
@@ -368,6 +381,7 @@ def _metric_edges(capabilities) -> list[dict[str, Any]]:
         _edge("block.bias_network", "behavior.large_signal_charge", "medium", "Available bias current limits large-signal charging current."),
         _edge("behavior.large_signal_charge", "metric.slew_rate", "high", "Slew rate is available current over effective capacitance."),
         _edge("constraint.headroom", "metric.output_swing", "high", "Headroom loss clips the output range."),
+        _edge("constraint.headroom", "metric.saturation_margin", "high", "Saturation margin is the measured VDS-VDSAT headroom of the limiting device."),
         _edge("constraint.headroom", "metric.dc_gain", "medium", "Devices leaving saturation reduce effective ro and gain."),
         _edge("constraint.stability_margin", "metric.phase_margin", "high", "Pole-zero separation directly determines phase margin."),
         _edge("constraint.linearity", "metric.output_swing", "medium", "Linearity range limits usable output excursion."),
@@ -585,7 +599,7 @@ def _candidate_relevant_to_metric(node: str, metric: str) -> bool:
         return node.endswith((".capacitance", ".gm", ".ro")) or node in {"global.Cc", "global.Rz", "global.CL", "global.Cload", "block.compensation_network"}
     if metric in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
         return node.endswith((".bias_current", ".capacitance")) or node in {"global.Cc", "global.CL", "global.Cload"}
-    if metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max", "input_common_mode_min", "input_common_mode_max"}:
+    if metric in HEADROOM_METRICS:
         return node.endswith((".headroom", ".Vov", ".bias_current"))
     if metric in {"delay", "decision_time", "propagation_delay", "regeneration_time"}:
         return node.endswith((".gm", ".capacitance", ".bias_current"))
@@ -674,7 +688,7 @@ def _intervention_impact_score(
             base = _bias_current_impact(state, dev_id)
         elif param == "capacitance":
             base = _capacitance_impact(state, dev_id)
-    elif metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max", "input_common_mode_min", "input_common_mode_max"}:
+    elif metric in HEADROOM_METRICS:
         if param in {"headroom", "Vov", "bias_current"}:
             base = max(_headroom_impact(state, dev_id), 0.35 * _bias_current_impact(state, dev_id))
     elif metric in {"power", "energy", "energy_per_comparison", "pdp", "edp"}:
@@ -980,7 +994,7 @@ def _legacy_sensitivity_ranking(state: DesignState, symptoms: list[dict[str, Any
                 add("global.Cc", metric, 0.75, "Legacy sensitivity proxy: larger Cc reduces slew rate for fixed current.", f"Cc={state.global_parameters['Cc']:.4e}")
             if largest_cap:
                 add(f"device.{largest_cap}.capacitance", metric, 0.55, "Legacy sensitivity proxy: large capacitance increases charge demand.", _device_support(state, largest_cap))
-        elif metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max", "input_common_mode_min", "input_common_mode_max"}:
+        elif metric in HEADROOM_METRICS:
             if weakest_headroom:
                 add(f"device.{weakest_headroom}.headroom", metric, 0.90, "Legacy sensitivity proxy: swing/common-mode range is limited by stack headroom.", _device_support(state, weakest_headroom))
         elif metric in {"delay", "decision_time", "propagation_delay", "regeneration_time"}:
@@ -1774,7 +1788,7 @@ def _action_class(metric: str, cause_node: str, variable: str) -> str:
         return "operating_point_headroom"
     if variable in {"I_tail", "I_stage2", "I_latch"}:
         return "operating_point_balance"
-    if "headroom" in cause_node or "Vov" in cause_node or metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
+    if "headroom" in cause_node or "Vov" in cause_node or metric in HEADROOM_METRICS:
         return "operating_point_headroom"
     if variable == "gm_id":
         return "transconductance_bias"
@@ -2116,6 +2130,9 @@ def _device_capacitance(p) -> float:
 
 
 def _required_margin(state: DesignState, dev_id: str) -> float:
+    target = state.targets.get("saturation_margin")
+    if target is not None and target.min is not None:
+        return max(0.0, float(target.min))
     dev = state.get_device_def(dev_id)
     role = dev.role if dev else ""
     return {
@@ -2286,7 +2303,7 @@ def _tuning_strategy_text(metric: str) -> str:
         return "Increase input/stage gm and reduce avoidable dominant capacitance, with phase margin as the guardrail."
     if metric in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
         return "Increase available charging current or reduce compensation/load capacitance, with power and PM as guardrails."
-    if metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
+    if metric in HEADROOM_METRICS:
         return "Reduce VDSAT/Vov of the limiting stack and rebalance bias currents to recover voltage headroom."
     if metric in {"delay", "decision_time", "propagation_delay", "regeneration_time"}:
         return "Increase latch/input gm and reduce switched capacitance to shorten regeneration time."
@@ -2479,7 +2496,7 @@ def _path_chain_for_metric(state: DesignState, metric: str, cause_node: str, cap
         if "source_follower" in role or "regulated_source" in role:
             return [cause_node, "block.source_follower_regulation", "behavior.output_resistance", f"metric.{metric}"]
         return [cause_node, _signal_block_for_role(role), "behavior.output_resistance", f"metric.{metric}"]
-    if metric in {"output_swing", "swing", "icmr", "icmr_min", "icmr_max"}:
+    if metric in HEADROOM_METRICS:
         return [cause_node, "behavior.bias_headroom", "constraint.headroom", f"metric.{metric}"]
     if metric in {"slew_rate", "slew_rate_pos", "slew_rate_neg"}:
         return [cause_node, "behavior.large_signal_charge", f"metric.{metric}"]

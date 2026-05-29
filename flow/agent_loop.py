@@ -223,10 +223,12 @@ class DiagnosticAgentLoop:
         schema_state.diagnostics = _next_round_diagnostics(application)
         schema_state.to_yaml(tuned_schema, include_runtime_context=False)
         self.emit(f"       Next schema: {tuned_schema}")
+        self.emit("       Adaptive policy: enabling one postprocess fallback after the applied schema edit")
         return {
             "current_schema": str(tuned_schema),
             "round_index": round_index + 1,
             "last_tuning_application": application,
+            "force_postprocess_once": True,
             "stop_reason": "",
         }
 

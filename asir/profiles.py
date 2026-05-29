@@ -80,6 +80,8 @@ OTA_PROFILE = CircuitProfile(
         "slew_rate_neg": "slew_rate_neg",
         "output_swing": "output_swing",
         "swing": "output_swing",
+        "saturation_margin": "saturation_margin",
+        "saturation_required_gap": "saturation_required_gap",
         "icmr": "icmr",
         "icmr_range": "icmr",
         "icmr_min": "icmr_min",

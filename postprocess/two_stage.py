@@ -277,8 +277,9 @@ def tune_two_stage_compensation(
     max_refine_candidates: int = 8,
     max_load_candidates: int = 8,
     max_current_candidates: int = 16,
-    time_budget_sec: float = 45.0,
-    candidate_timeout_sec: float = 5.0,
+    max_gain_candidates: int = 8,
+    time_budget_sec: float = 160.0,
+    candidate_timeout_sec: float = 12.0,
 ) -> dict:
     if not is_two_stage_state(state) or not has_miller_rc_compensation(state):
         return {}
@@ -302,6 +303,7 @@ def tune_two_stage_compensation(
     bw_min = bw_target.min or 0.0
     bw_max = bw_target.max or float("inf")
     pm_min = targets.get("phase_margin", Target()).min or 0.0
+    sr_min = targets.get("slew_rate", Target()).min or 0.0
     power_max = targets.get("power", Target()).max or float("inf")
     swing_min = targets.get("output_swing", Target()).min or 0.0
     icmr_min_max = targets.get("icmr_min", Target()).max
@@ -315,6 +317,16 @@ def tune_two_stage_compensation(
             state.transistors[dev_id].L_strategy,
         )
         for dev_id in load_ids
+        if dev_id in state.transistors
+    }
+    input_pair_ids = [dev.id for dev in state.topology.devices if dev.role == "input_pair"]
+    input_pair_dims = {
+        dev_id: (
+            state.transistors[dev_id].parameters.W,
+            state.transistors[dev_id].parameters.L,
+            state.transistors[dev_id].L_strategy,
+        )
+        for dev_id in input_pair_ids
         if dev_id in state.transistors
     }
     base_currents = {
@@ -339,6 +351,14 @@ def tune_two_stage_compensation(
             ts = state.transistors[dev_id]
             ts.parameters.W = min(max(_snap_to_grid(base_w * scale, w_grid), min_w), max_w)
             scaled_l = min(max(_snap_to_grid(base_l * scale, l_grid), min_l), max_l)
+            ts.parameters.L = scaled_l
+            ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
+
+    def apply_input_pair_geometry(width_scale: float, length_scale: float) -> None:
+        for dev_id, (base_w, base_l, base_strategy_l) in input_pair_dims.items():
+            ts = state.transistors[dev_id]
+            ts.parameters.W = min(max(_snap_to_grid(base_w * width_scale, w_grid), min_w), max_w)
+            scaled_l = min(max(_snap_to_grid(base_l * length_scale, l_grid), min_l), max_l)
             ts.parameters.L = scaled_l
             ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
 
@@ -487,11 +507,13 @@ def tune_two_stage_compensation(
             + max_refine_candidates
             + max_load_candidates
             + max_current_candidates
+            + max_gain_candidates
         ),
         "early_stop": False,
         "early_stop_reason": "",
         "rejected_unsafe_candidates": 0,
         "unsafe_examples": [],
+        "gain_refine_candidates": 0,
     }
     started = time.time()
     evaluated: set[tuple[str, str, str, str, str]] = set()
@@ -742,13 +764,80 @@ def tune_two_stage_compensation(
         if original_timeout is not None:
             sim.timeout_sec = original_timeout
 
+    def run_gain_refine(best: dict) -> dict:
+        if not input_pair_dims or max_gain_candidates <= 0:
+            return best
+        meas = best.get("measurements", {}) or {}
+        gain = float(meas.get("dc_gain_db", 0.0) or 0.0)
+        if gain >= gain_min:
+            return best
+        if gain < max(0.0, gain_min - 8.0):
+            return best
+        if bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < 0.85 * bw_min:
+            return best
+        if pm_min > 0.0 and float(meas.get("phase_margin", 0.0) or 0.0) < pm_min:
+            return best
+        if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
+            return best
+        candidates = (
+            (1.20, 1.80),
+            (1.50, 2.30),
+            (2.00, 3.00),
+            (1.20, 2.00),
+            (1.50, 2.60),
+            (2.00, 2.60),
+            (1.00, 2.00),
+            (1.00, 2.60),
+        )
+        selected = best
+        original_timeout = getattr(sim, "timeout_sec", None)
+        if original_timeout is not None:
+            sim.timeout_sec = min(float(original_timeout), max(float(candidate_timeout_sec), 12.0))
+        try:
+            for width_scale, length_scale in candidates[:max_gain_candidates]:
+                if time.time() - started >= time_budget_sec:
+                    break
+                apply_load_scale(best.get("load_scale", 1.0))
+                apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
+                apply_input_pair_geometry(width_scale, length_scale)
+                state.global_parameters["Cc"] = best["Cc"]
+                state.global_parameters["Rz"] = best["Rz"]
+                trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=True)
+                hard_errors = hard_reliability_errors(state, trial)
+                stats["gain_refine_candidates"] += 1
+                if hard_errors:
+                    stats["rejected_unsafe_candidates"] += 1
+                    continue
+                meas = dict(trial.measurements)
+                score = score_measurements(meas)
+                if score < selected["score"] or spec_pass(meas):
+                    selected = {
+                        **best,
+                        "score": score,
+                        "input_pair_width_scale": width_scale,
+                        "input_pair_length_scale": length_scale,
+                        "measurements": meas,
+                        "_has_operating_points": bool(trial.operating_points),
+                    }
+                if spec_pass(meas):
+                    break
+        finally:
+            if original_timeout is not None:
+                sim.timeout_sec = original_timeout
+        return selected
+
+    best = run_gain_refine(best)
     apply_load_scale(best.get("load_scale", 1.0))
     apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
+    apply_input_pair_geometry(
+        best.get("input_pair_width_scale", 1.0),
+        best.get("input_pair_length_scale", 1.0),
+    )
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
     final_hard_errors = []
     if best.get("_has_operating_points"):
-        final_trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False)
+        final_trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=sr_min > 0.0)
         if final_trial.operating_points:
             backfill_state_from_ngspice(state, final_trial)
         final_hard_errors = hard_reliability_errors(state, final_trial)
@@ -786,7 +875,13 @@ class TwoStagePostProcessor:
                 if rebalance:
                     self.events.append({"type": "stage2_rebalance", **rebalance})
         if not self.skip_comp_tune and has_miller_rc_compensation(state):
-            comp = tune_two_stage_compensation(state, sim, work_dir)
+            comp = tune_two_stage_compensation(
+                state,
+                sim,
+                work_dir,
+                time_budget_sec=160.0,
+                candidate_timeout_sec=12.0,
+            )
             if comp:
                 self.events.append({"type": "compensation_tune", **comp})
         return self.events
