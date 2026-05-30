@@ -18,7 +18,7 @@ The current development focus is OTA-class analog design in IHP 130 nm, includin
 - LangGraph-based multi-round agent loop for diagnosis-guided schema tuning.
 - DeepSeek-compatible LLM planner with deterministic fallback behavior.
 - Structure-aware causal diagnosis with typed causal edges, typed ASIR dependencies, local intervention modeling, and evidence-gated guarded actions.
-- Ablation tooling for topology, method, seed, postprocess, LLM, and per-spec comparisons, including clean plotting outputs.
+- Comparison tooling for topology, method, seed, postprocess, LLM, and per-spec checks, including clean plotting outputs.
 - Compact schema artifacts plus full JSON evidence artifacts for reproducibility and debugging.
 
 ## Repository Layout
@@ -156,7 +156,7 @@ line:
 python main.py --config configs/default.yaml --generations 20 --agent-rounds 1
 ```
 
-The current IHP 130 nm OTA ablation matrix is defined in
+The current IHP 130 nm OTA method-comparison matrix is defined in
 `configs/ablation_ihp130_ota.yaml`. It compares five canonical OTA examples:
 five-transistor, current-mirror, telescopic-cascode, folded-cascode, and
 two-stage Miller OTAs across optimizer-only, optimizer-plus-postprocess,
@@ -186,16 +186,16 @@ python scripts/plot_full_flow_results.py --out-dir docs/assets
 python scripts/plot_diagnosis_validation.py
 ```
 
-Latest IHP130 OTA evaluation snapshots:
+Latest IHP130 OTA run snapshots:
 
-The full-flow snapshot is re-scored against the current fixed targets above.
+The full-flow snapshot is checked against the current fixed targets above.
 Folded-cascode, telescopic, and two-stage Miller use the updated
 topology-guided repair flow and pass the current high-impedance CL=1 pF
 targets.
 
-| Target achievement | Reference metrics |
+| Target achievement | Measured metrics |
 | --- | --- |
-| ![Full-flow OTA target achievement](assets/full_flow_ota_achievement.png) | ![Full-flow OTA reference metrics](assets/full_flow_ota_summary.png) |
+| ![Full-flow OTA target achievement](assets/full_flow_ota_achievement.png) | ![Full-flow OTA measured metrics](assets/full_flow_ota_summary.png) |
 
 Diagnosis claims are checked by local SPICE probes, and executable actions are
 reported through explicit objective-gated apply/skip records.
@@ -304,14 +304,14 @@ Postprocess is an optional repair layer, not the core diagnosis method. It can i
 - LLM planning,
 - schema command execution.
 
-For method comparisons, postprocess can be ablated against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
+For method comparisons, postprocess can be disabled against `optimizer + diagnosis` and `LLM + optimizer + diagnosis` flows to measure success rate, total SPICE calls, wall time, final loss, and metric quality.
 
 CLI policy:
 
 ```text
 --postprocess-policy fallback   run only when near-feasible or stagnated
 --postprocess-policy always     legacy always-on repair behavior
---postprocess-policy off        disable postprocess for ablation
+--postprocess-policy off        disable postprocess for comparison runs
 ```
 
 ## Documentation
@@ -320,7 +320,7 @@ Additional project notes are maintained in [docs](https://github.com/Yixin-Gong/
 
 - [Quick Start](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/quickstart.md)
 - [Architecture](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/architecture.md)
-- [Ablation Experiments](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/ablation_experiments.md)
+- [Method Comparisons](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/ablation_experiments.md)
 - [Schema Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/schema_guide.md)
 - [Development Guide](https://github.com/Yixin-Gong/AnalogRF-IR/blob/main/docs/development.md)
 

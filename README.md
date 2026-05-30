@@ -92,10 +92,10 @@ counting it as a full-spec pass target.
 For the IHP two-stage Miller OTA, `Cc` is emitted as the SG13G2 `cap_cmim` MIM
 capacitor and `Rz` as the SG13G2 `rhigh` PDK resistor.
 
-## Current Reference Results
+## Verified OTA Runs
 
-The following seed-10 full-flow reference points were measured with ngspice and
-scored against the targets above.
+The following seed-10 full-flow runs were measured with ngspice and checked
+against the targets above.
 
 | Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -105,13 +105,13 @@ scored against the targets above.
 | Telescopic OTA | pass | 6 | 51.96 dB | 9.33 MHz | 60.6 deg | 6.09 V/us | 0.836 V | 20.31 uW |
 | Two-stage Miller OTA | pass | 7 | 57.75 dB | 26.46 MHz | 62.7 deg | 13.02 V/us | 0.592 V | 140.37 uW |
 
-| Target achievement | Reference metrics |
+| Target achievement | Measured metrics |
 | --- | --- |
-| ![Full-flow OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![Full-flow OTA reference metrics](docs/assets/full_flow_ota_summary.png) |
+| ![Full-flow OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![Full-flow OTA measured metrics](docs/assets/full_flow_ota_summary.png) |
 
-Diagnosis quality is evaluated from artifacts rather than pass rate alone:
-local SPICE probes test whether proposed actions reduce failed violations, and
-the evidence gate records which actions are admitted.
+Diagnosis artifacts provide more detail than pass/fail status alone: local
+SPICE probes record whether proposed actions reduce failed violations, and the
+evidence gate records which actions are admitted.
 
 ![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
 
@@ -170,9 +170,9 @@ python main.py \
   --seed 10
 ```
 
-## Experiments And Figures
+## Regression And Figures
 
-Run the OTA ablation matrix:
+Run the OTA method-comparison matrix:
 
 ```bash
 python scripts/run_ablation.py \
