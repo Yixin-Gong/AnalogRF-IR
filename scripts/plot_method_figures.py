@@ -75,7 +75,7 @@ def draw_schema_state() -> plt.Figure:
     items = [
         (2.60, 2.60, "Topology", r"$G$"),
         (6.10, 2.60, "Variables", r"$\theta$"),
-        (2.60, 1.47, "Targets", r"$\tau,J$"),
+        (2.60, 1.47, "Targets", r"$\tau,J_{\rm spec}$"),
         (6.10, 1.47, "Dependencies", r"$\mathcal{D}$"),
         (4.28, 0.36, "Evidence", r"$\mathcal{E}$"),
     ]
@@ -120,7 +120,7 @@ def draw_optimization_loop() -> plt.Figure:
         1.88,
         1.02,
         "Objective",
-        [r"$\sum w_kv_k^2$", r"$+\,P_{\rm phys}$", "SPICE gate"],
+        [r"$J_{\rm spec}=\sum w_kv_k^2$", "physical checks", "remain hard gates"],
     )
     return fig
 
@@ -148,18 +148,18 @@ def draw_diagnosis_loop() -> plt.Figure:
     cards = [
         (
             0.58,
-            "causal edge",
+            "diagnostic edge",
             [r"$e=(u,v,t,\rho,\omega,\epsilon)$", "gain  bias  pole", "symmetry  headroom"],
         ),
         (
             3.72,
             "local evidence",
-            [r"$A_{k,j}=\hat v_k(\theta+a_j)-v_k(\theta)$", r"$\Delta J < 0$ supports repair"],
+            [r"$A_{k,j}=v_k(s\oplus\delta a_j)-v_k(s)$", r"$E(s,a)$ requires SPICE support"],
         ),
         (
             6.86,
             "admission rule",
-            [r"$g_{\rm phys}(a)=1$", r"$s_{\rm opt}(a)=1$ or $\Delta J(a)<0$"],
+            [r"$g_{\rm phys}(s,a)=1$", r"$a\in C^\star$ or $\Delta J_{\rm act}<0$", r"guarded $\Rightarrow E(s,a)=1$"],
         ),
     ]
     for x, heading, lines in cards:

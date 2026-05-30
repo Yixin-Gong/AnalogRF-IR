@@ -50,22 +50,31 @@ as skipped notes rather than executable changes.
 
 ## Evidence Gate
 
-For normalized violation vector \(\mathbf{v}\), action response column
-\(\mathbf{A}_{:,j}\), and weights \(w_i\), the action objective is
+For normalized violation vector \(\mathbf{v}\), local SPICE action response
+column \(\mathbf{A}_{:,j}\), and weights \(w_i\), the specification objective
+is
 
-```text
-J(v) = sum_i w_i v_i^2
-v'_j = [v + A_:,j]_+
-```
+$$
+\begin{aligned}
+\Phi(\mathbf{v}) &= \sum_i w_i v_i^2,\\
+J_{\mathrm{spec}}(s) &= \Phi(\mathbf{v}(s)).
+\end{aligned}
+$$
 
 An action can be applied only if it passes the physical gate and is either
-selected by the constrained optimizer or reduces the weighted violation
-objective:
+part of the constrained optimizer's compatible action set or independently
+reduces the action objective. Guarded actions also require a passing local
+evidence gate:
 
-```text
-admissible(a) := physical_gate(a) AND
-                 (optimizer_selected(a) OR delta_J(a) < 0)
-```
+$$
+\begin{aligned}
+a\in\mathcal{A}_{\mathrm{adm}}(s)
+\Longleftrightarrow\;&
+g_{\mathrm{phys}}(s,a)=1 \\
+&\land\left(a\in C^\star \lor \Delta J_{\mathrm{act}}(s,a)<0\right)\\
+&\land\left(a\notin\mathcal{A}_{\mathrm{guard}} \lor E(s,a)=1\right).
+\end{aligned}
+$$
 
 This rule is the boundary between diagnosis and authority: the LLM can explain
 and select, but it cannot bypass simulator-backed optimizer evidence.
