@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
 import seaborn as sns
 import yaml
@@ -80,6 +81,14 @@ METRICS = (
     ("power", "total_power", "Power", "uW"),
 )
 
+BLUE_CMAP = LinearSegmentedColormap.from_list(
+    "analogdiag_blue",
+    ["#f7fbff", "#d6e9f8", "#93c4df", "#3f8fc3", "#0b4f9c"],
+)
+HEADER_BLUE = "#123a70"
+ACCENT_BLUE = "#d7e9fb"
+GRID_BLUE = "#b7c9dc"
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot latest full-flow OTA reference results")
@@ -98,16 +107,25 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         raise SystemExit("No full-flow result.json files found.")
     records = pd.DataFrame(rows)
-    fig = plot_records(records)
+    figures = {
+        "full_flow_ota_results": plot_records(records),
+        "full_flow_ota_achievement": plot_achievement_heatmap(records),
+        "full_flow_ota_summary": plot_summary_table(records),
+    }
     for out_dir in out_dirs:
         out_dir = _resolve(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         if args.write_csv:
             records.to_csv(out_dir / "full_flow_ota_results.csv", index=False)
         for fmt in formats:
-            fig.savefig(out_dir / f"full_flow_ota_results.{fmt}", dpi=args.dpi, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Wrote full-flow OTA figure for {len(records)} topologies.")
+            for name, fig in figures.items():
+                if name == "full_flow_ota_results":
+                    fig.savefig(out_dir / f"{name}.{fmt}", dpi=args.dpi, bbox_inches="tight")
+                else:
+                    fig.savefig(out_dir / f"{name}.{fmt}", dpi=args.dpi)
+    for fig in figures.values():
+        plt.close(fig)
+    print(f"Wrote full-flow OTA figures for {len(records)} topologies.")
     return 0
 
 
@@ -154,59 +172,94 @@ def collect_rows() -> list[dict[str, Any]]:
 
 def plot_records(records: pd.DataFrame) -> plt.Figure:
     sns.set_theme(style="whitegrid", context="paper")
-    labels = [metric[2] for metric in METRICS]
-    heatmap = records.set_index("topology")[[f"ratio_{label}" for label in labels]]
-    heatmap.columns = labels
-    heatmap = heatmap.clip(upper=1.5)
 
     fig = plt.figure(figsize=(10.8, 4.8), constrained_layout=True)
     grid = fig.add_gridspec(1, 2, width_ratios=[1.35, 0.9])
     ax0 = fig.add_subplot(grid[0, 0])
     ax1 = fig.add_subplot(grid[0, 1])
 
+    _draw_achievement_heatmap(ax0, records)
+    _draw_summary_table(ax1, records)
+    return fig
+
+
+def plot_achievement_heatmap(records: pd.DataFrame) -> plt.Figure:
+    sns.set_theme(style="whitegrid", context="paper")
+    fig, ax = plt.subplots(figsize=(5.25, 3.85), constrained_layout=True)
+    _draw_achievement_heatmap(ax, records)
+    return fig
+
+
+def plot_summary_table(records: pd.DataFrame) -> plt.Figure:
+    sns.set_theme(style="whitegrid", context="paper")
+    fig, ax = plt.subplots(figsize=(5.25, 3.85), constrained_layout=True)
+    _draw_summary_table(ax, records)
+    return fig
+
+
+def _achievement_frame(records: pd.DataFrame) -> pd.DataFrame:
+    labels = [metric[2] for metric in METRICS]
+    heatmap = records.set_index("topology")[[f"ratio_{label}" for label in labels]]
+    heatmap.columns = labels
+    return heatmap.clip(upper=1.5)
+
+
+def _draw_achievement_heatmap(ax: plt.Axes, records: pd.DataFrame) -> None:
     sns.heatmap(
-        heatmap,
+        _achievement_frame(records),
         annot=True,
         fmt=".2f",
-        cmap="viridis",
+        cmap=BLUE_CMAP,
         vmin=0,
         vmax=1.5,
         linewidths=0.6,
         linecolor="white",
-        cbar_kws={"label": "measured / target"},
-        ax=ax0,
+        annot_kws={"fontsize": 7.4, "color": "#0f172a"},
+        cbar_kws={"label": "achievement ratio", "shrink": 0.82},
+        ax=ax,
     )
-    ax0.set_xlabel("")
-    ax0.set_ylabel("")
-    ax0.tick_params(axis="x", rotation=0)
-    ax0.tick_params(axis="y", rotation=0)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.tick_params(axis="x", rotation=0, labelsize=8)
+    ax.tick_params(axis="y", rotation=0, labelsize=8)
+    ax.collections[0].colorbar.ax.tick_params(labelsize=7)
+    ax.collections[0].colorbar.ax.yaxis.label.set_size(8)
 
-    display = records[["topology", "iteration", "status", "Gain", "UGBW", "PM", "SR"]].copy()
-    display["row"] = list(range(len(display)))
-    ax1.axis("off")
-    table = ax1.table(
-        cellText=display[["topology", "iteration", "status", "Gain", "UGBW", "PM", "SR"]].values,
-        colLabels=["Topology", "Iter", "Status", "Gain", "UGBW", "PM", "SR"],
+
+def _draw_summary_table(ax: plt.Axes, records: pd.DataFrame) -> None:
+    display = records[["topology", "iteration", "Gain", "UGBW", "PM", "SR"]].copy()
+    display["topology"] = display["topology"].replace(
+        {
+            "Current mirror": "Current\nmirror",
+            "Folded cascode": "Folded\ncascode",
+        }
+    )
+    ax.axis("off")
+    table = ax.table(
+        cellText=display[["topology", "iteration", "Gain", "UGBW", "PM", "SR"]].values,
+        colLabels=["Topology", "Iter", "Gain\n(dB)", "UGBW\n(MHz)", "PM\n(deg)", "SR\n(V/us)"],
         loc="center",
         cellLoc="center",
         colLoc="center",
-        colWidths=[0.23, 0.09, 0.16, 0.13, 0.14, 0.11, 0.14],
+        colWidths=[0.26, 0.09, 0.14, 0.17, 0.13, 0.15],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(7.2)
-    table.scale(1.0, 1.55)
+    table.set_fontsize(7.5)
+    table.scale(1.0, 1.62)
     for (row, col), cell in table.get_celld().items():
-        cell.set_edgecolor("#d6dbe3")
+        cell.set_edgecolor(GRID_BLUE)
+        cell.set_linewidth(0.55)
         if row == 0:
-            cell.set_facecolor("#1f2937")
+            cell.set_facecolor(HEADER_BLUE)
             cell.get_text().set_color("white")
             cell.get_text().set_weight("bold")
-        elif col == 2 and cell.get_text().get_text() == "pass":
-            cell.set_facecolor("#d8f3dc")
-        elif col == 2:
-            cell.set_facecolor("#ffe3e3")
-
-    return fig
+        elif row % 2 == 0:
+            cell.set_facecolor("#f4f8fc")
+        else:
+            cell.set_facecolor("white")
+        if row > 0 and col == 0:
+            cell.set_facecolor(ACCENT_BLUE)
+            cell.get_text().set_weight("bold")
 
 
 def _candidate_results(patterns: tuple[str, ...]) -> list[Path]:
