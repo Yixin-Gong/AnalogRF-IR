@@ -193,7 +193,9 @@ Folded-cascode, telescopic, and two-stage Miller use the updated
 topology-guided repair flow and pass the current high-impedance CL=1 pF
 targets.
 
-![Full-flow OTA target achievement](assets/full_flow_ota_results.png)
+| Target achievement | Reference metrics |
+| --- | --- |
+| ![Full-flow OTA target achievement](assets/full_flow_ota_achievement.png) | ![Full-flow OTA reference metrics](assets/full_flow_ota_summary.png) |
 
 Diagnosis claims are checked by local SPICE probes, and executable actions are
 reported through explicit objective-gated apply/skip records.

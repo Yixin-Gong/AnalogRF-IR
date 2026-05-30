@@ -108,7 +108,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("No full-flow result.json files found.")
     records = pd.DataFrame(rows)
     figures = {
-        "full_flow_ota_results": plot_records(records),
         "full_flow_ota_achievement": plot_achievement_heatmap(records),
         "full_flow_ota_summary": plot_summary_table(records),
     }
@@ -119,10 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             records.to_csv(out_dir / "full_flow_ota_results.csv", index=False)
         for fmt in formats:
             for name, fig in figures.items():
-                if name == "full_flow_ota_results":
-                    fig.savefig(out_dir / f"{name}.{fmt}", dpi=args.dpi, bbox_inches="tight")
-                else:
-                    fig.savefig(out_dir / f"{name}.{fmt}", dpi=args.dpi)
+                fig.savefig(out_dir / f"{name}.{fmt}", dpi=args.dpi)
     for fig in figures.values():
         plt.close(fig)
     print(f"Wrote full-flow OTA figures for {len(records)} topologies.")

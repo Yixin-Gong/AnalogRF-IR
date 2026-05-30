@@ -1,10 +1,11 @@
 # AnalogRF-IR
 
-AnalogRF-IR is a simulator-backed analog circuit optimization framework with
-explicit causal diagnosis and evidence-gated agent actions. The current
+AnalogRF-IR is a simulator-backed analog circuit optimization framework built
+around explicit causal diagnosis and evidence-gated agent actions. The current
 implementation focuses on OTA sizing in IHP SG13G2 130 nm under high-impedance
-capacitive loading, while keeping the schema, optimizer, simulator, diagnosis,
-and postprocess layers separated for reproducible ablation.
+capacitive loading. Its main design objective is not unrestricted automatic
+sizing, but a traceable diagnostic loop from failed metrics to typed causes,
+local SPICE probes, optimizer-approved actions, and audited schema edits.
 
 The central design contract is simple: optimizer, human review, deterministic
 diagnosis, and LLM planning all operate through the same typed YAML schema, and
@@ -34,29 +35,18 @@ evidence and physical validation.
 
 ![Diagnosis-centered analog optimization architecture](docs/assets/analogdiag_architecture.png)
 
-The flow uses a shared schema state as the executable interface between human
-review, agent diagnosis, surrogate search, ngspice validation, and repair.
-Planner suggestions are not applied directly. They must map to admissible
-schema commands.
-
-![Schema as the shared executable state](docs/assets/analogdiag_schema_state.png)
-
-The schema records topology \(G\), editable variables \(\theta\), targets and
-losses, typed dependencies, and simulator evidence. Large artifacts remain in
-JSON logs, keeping YAML inputs reviewable.
-
-![Optimization and validation execution loop](docs/assets/analogdiag_optimization_loop.png)
-
-The execution loop combines gm/ID estimation, bounded NSGA-II search, SPICE
-validation, candidate archiving, objective gating, and optional repair.
-Middlebrook-style loop-gain reasoning motivates the UGBW/phase-margin
-measurements and Miller-compensation tuning.
+The flow uses a typed schema as the executable interface between human review,
+agent diagnosis, surrogate search, ngspice validation, and repair. The schema
+records topology roles, editable variables, targets, dependencies, and compact
+simulator evidence. Planner suggestions are never applied directly; they must
+map to admissible schema commands.
 
 ![Causal diagnosis and evidence-gated action selection](docs/assets/analogdiag_diagnosis_loop.png)
 
-The diagnosis layer turns failed specifications into typed causal edges, ranked
-causes, local SPICE probes, and optimizer-approved actions. Unsupported LLM
-edits are recorded as skipped notes.
+The diagnosis loop is the core of the project. Failed metrics are mapped to
+typed causes, tested through local SPICE probes, converted into candidate
+actions, and filtered by the evidence gate. Unsupported LLM edits are recorded
+as skipped notes rather than executable changes.
 
 ## Evidence Gate
 
@@ -115,7 +105,9 @@ scored against the targets above.
 | Telescopic OTA | pass | 6 | 51.96 dB | 9.33 MHz | 60.6 deg | 6.09 V/us | 0.836 V | 20.31 uW |
 | Two-stage Miller OTA | pass | 7 | 57.75 dB | 26.46 MHz | 62.7 deg | 13.02 V/us | 0.592 V | 140.37 uW |
 
-![Full-flow OTA target achievement](docs/assets/full_flow_ota_results.png)
+| Target achievement | Reference metrics |
+| --- | --- |
+| ![Full-flow OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![Full-flow OTA reference metrics](docs/assets/full_flow_ota_summary.png) |
 
 Diagnosis quality is evaluated from artifacts rather than pass rate alone:
 local SPICE probes test whether proposed actions reduce failed violations, and

@@ -126,46 +126,44 @@ def draw_optimization_loop() -> plt.Figure:
 
 
 def draw_diagnosis_loop() -> plt.Figure:
-    fig, ax = base_fig(10.2, 3.85)
+    fig, ax = base_fig(10.2, 3.65)
 
-    stages = [
-        (0.35, "failed\nspecs"),
-        (1.95, "typed\nedges"),
-        (3.55, "cause\nrank"),
-        (5.18, "SPICE\nprobe"),
-        (6.98, "action\noptimizer"),
-        (8.35, "apply /\nskip note"),
+    stage_w = 1.18
+    stage_h = 0.62
+    y = 2.55
+    xs = [0.42, 2.02, 3.62, 5.22, 6.82, 8.42]
+    labels = [
+        "failed\nmetrics",
+        "typed\ncauses",
+        "local\nprobes",
+        "candidate\nactions",
+        "evidence\ngate",
+        "schema\nedit",
     ]
-    for i, (x, label) in enumerate(stages):
-        node(ax, x, 2.62, 1.05, 0.58, label)
-        if i < len(stages) - 1:
-            arrow(ax, x + 1.08, 2.91, stages[i + 1][0] - 0.05, 2.91)
+    for i, (x, label) in enumerate(zip(xs, labels)):
+        flow_node(ax, x, y, stage_w, stage_h, label)
+        if i < len(xs) - 1:
+            arrow(ax, x + stage_w + 0.08, y + stage_h / 2, xs[i + 1] - 0.08, y + stage_h / 2)
 
-    panel(
-        ax,
-        0.66,
-        0.82,
-        4.18,
-        1.16,
-        "Diagnosis",
-        [
-            r"$e=(u,v,t,\rho,\omega,\epsilon)$",
-            "gain | bias | poles\nsymmetry | headroom",
-        ],
-    )
-    panel(
-        ax,
-        5.34,
-        0.82,
-        4.18,
-        1.16,
-        "Admissibility",
-        [
-            r"$a\in\mathcal{A}_{adm}$ only if",
-            r"$g_{\rm phys}(a)=1$ and",
-            r"$selected(a)$ or $\Delta J(a)<0$",
-        ],
-    )
+    cards = [
+        (
+            0.58,
+            "causal edge",
+            [r"$e=(u,v,t,\rho,\omega,\epsilon)$", "gain  bias  pole", "symmetry  headroom"],
+        ),
+        (
+            3.72,
+            "local evidence",
+            [r"$A_{k,j}=\hat v_k(\theta+a_j)-v_k(\theta)$", r"$\Delta J < 0$ supports repair"],
+        ),
+        (
+            6.86,
+            "admission rule",
+            [r"$g_{\rm phys}(a)=1$", r"$s_{\rm opt}(a)=1$ or $\Delta J(a)<0$"],
+        ),
+    ]
+    for x, heading, lines in cards:
+        evidence_card(ax, x, 0.68, 2.72, 1.10, heading, lines)
     return fig
 
 
@@ -193,6 +191,35 @@ def node(ax: plt.Axes, x: float, y: float, w: float, h: float, text: str) -> Non
     )
     ax.add_patch(patch)
     ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=7.4, color=INK, linespacing=1.05)
+
+
+def flow_node(ax: plt.Axes, x: float, y: float, w: float, h: float, text: str) -> None:
+    patch = FancyBboxPatch(
+        (x, y),
+        w,
+        h,
+        boxstyle="round,pad=0.020,rounding_size=0.045",
+        linewidth=1.05,
+        edgecolor=ACCENT,
+        facecolor=WHITE,
+    )
+    ax.add_patch(patch)
+    ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=7.15, color=INK, linespacing=1.03)
+
+
+def evidence_card(ax: plt.Axes, x: float, y: float, w: float, h: float, heading: str, lines: list[str]) -> None:
+    patch = FancyBboxPatch(
+        (x, y),
+        w,
+        h,
+        boxstyle="round,pad=0.035,rounding_size=0.045",
+        linewidth=0.9,
+        edgecolor="#9fb6cf",
+        facecolor="#f5f8fc",
+    )
+    ax.add_patch(patch)
+    ax.text(x + w / 2, y + h - 0.23, heading, ha="center", va="top", fontsize=7.8, weight="bold", color=ACCENT)
+    ax.text(x + w / 2, y + 0.46, "\n".join(lines), ha="center", va="center", fontsize=6.85, color=INK, linespacing=1.17)
 
 
 def circle_node(ax: plt.Axes, x: float, y: float, r: float, text: str) -> None:
