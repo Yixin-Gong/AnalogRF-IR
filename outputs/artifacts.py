@@ -311,10 +311,12 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "per_knob_values",
         "agent_step_fraction",
         "tuning_mode",
+        "min_step_fraction",
         "max_step_fraction",
         "range",
         "range_update",
         "multi_objective_guardrail",
+        "gain_only_ro_policy",
         "hard_physical_gate",
         "optimizer_selected",
         "action_admissibility",
@@ -603,6 +605,7 @@ def build_simulation_log(
             "return_code": sim_result.return_code,
             "elapsed_sec": round(sim_result.elapsed_sec, 3),
             "measurements": {k: round(v, 8) for k, v in sim_result.measurements.items()},
+            "passes": getattr(sim_result, "pass_status", {}) or {},
             "operating_points": {
                 did: {
                     k: round(v, 6) if abs(v) < 1e-3 else round(v, 4)

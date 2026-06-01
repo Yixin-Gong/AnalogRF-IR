@@ -255,12 +255,12 @@ def _topology_guided_initial_points(
             {
                 # PMOS tail: upper-mid gate bias keeps current moderate enough
                 # for output resistance while still allowing tens-of-MHz UGBW.
-                "vbias_ptail": (0.44, 0.50, 0.56, 0.62),
+                "vbias_ptail": (0.44, 0.50, 0.56, 0.62, 0.68),
                 # NMOS cascode: upper-mid bias splits voltage across mirror and
                 # common-gate devices under a 1.2 V stack.
-                "vbias_ncas": (0.66, 0.74, 0.82),
+                "vbias_ncas": (0.58, 0.62, 0.66, 0.70, 0.74),
             },
-            max_points=16,
+            max_points=25,
         )
     if family == "telescopic_cascode_ota" and {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(original):
         return _guided_grid(
@@ -313,9 +313,9 @@ def _single_bias_quantiles(family: str, name: str) -> tuple[float, ...]:
     name_low = name.lower()
     if family == "folded_cascode_ota":
         if "ptail" in name_low:
-            return (0.38, 0.44, 0.50, 0.56, 0.62, 0.70)
+            return (0.38, 0.44, 0.50, 0.56, 0.62, 0.68, 0.70)
         if "ncas" in name_low:
-            return (0.58, 0.66, 0.74, 0.82)
+            return (0.56, 0.58, 0.62, 0.66, 0.70, 0.74, 0.82)
     if family == "telescopic_cascode_ota":
         if "tail" in name_low:
             return (0.00, 0.03, 0.08, 0.16, 0.32)

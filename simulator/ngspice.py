@@ -30,6 +30,11 @@ class SimulationResult:
     raw_stdout: str = ""
     raw_stderr: str = ""
 
+    # Per-analysis execution summary. This is intentionally compact so
+    # downstream artifacts can distinguish an AC/DC success from a missing
+    # transient export.
+    pass_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
 
 class NgspiceSimulator:
     """AnalogRF-IR internal documentation."""
@@ -96,21 +101,64 @@ class NgspiceSimulator:
             + result_tran.raw_stderr
         )
 
-        pass_codes = [
-            code for code in (
-                result_ac.return_code,
-                result_dc.return_code,
-                result_icmr.return_code,
-                result_tran.return_code,
-            )
-            if code is not None and code >= 0
+        executed_passes = [
+            ("ac", result_ac, ("dc_gain_db", "unity_gain_bandwidth", "phase_margin"), False),
+            ("dc", result_dc, ("total_power", "output_swing", "saturation_margin"), False),
+            ("icmr", result_icmr, (), False),
         ]
-        if pass_codes:
-            merged.return_code = 0 if all(code == 0 for code in pass_codes) else max(pass_codes)
+        if include_transient:
+            executed_passes.append(("tran", result_tran, ("slew_rate",), True))
+        merged.pass_status = {
+            name: self._summarize_pass(
+                result,
+                expected_measurements=expected,
+                required_for_run=required_for_run,
+            )
+            for name, result, expected, required_for_run in executed_passes
+        }
 
-        merged.success = bool(merged.measurements)  # Internal implementation note.
+        pass_codes = [
+            result.return_code
+            for _name, result, _expected, _required_for_run in executed_passes
+            if result.return_code is not None
+        ]
+        missing_required = any(
+            bool(summary.get("missing_measurements"))
+            for summary in merged.pass_status.values()
+            if summary.get("required_for_run")
+        )
+        if pass_codes:
+            merged.return_code = 0 if all(code == 0 for code in pass_codes) and not missing_required else 1
+
+        executed_ok = all(
+            bool(result.success) and result.return_code == 0
+            for _name, result, _expected, _required_for_run in executed_passes
+        )
+        merged.success = bool(merged.measurements) and executed_ok and not missing_required
 
         return merged
+
+    def _summarize_pass(
+        self,
+        result: SimulationResult,
+        *,
+        expected_measurements: tuple[str, ...] = (),
+        required_for_run: bool = False,
+    ) -> Dict[str, Any]:
+        measurements = result.measurements or {}
+        missing = [key for key in expected_measurements if key not in measurements]
+        summary: Dict[str, Any] = {
+            "success": bool(result.success),
+            "return_code": result.return_code,
+            "elapsed_sec": round(float(result.elapsed_sec or 0.0), 6),
+            "measurement_count": len(measurements),
+            "measurements": sorted(measurements),
+            "missing_measurements": missing,
+            "required_for_run": bool(required_for_run),
+        }
+        if result.raw_stderr:
+            summary["stderr_tail"] = result.raw_stderr[-500:]
+        return summary
 
     def _has_tran_request(self, netlist: str) -> bool:
         low = netlist.lower()

@@ -1153,7 +1153,7 @@ def _attribution_guided_tuning(
             continue
         metric = symptom["metric"]
         actions = []
-        for cause in [item for item in causes if metric in item.metrics][:3]:
+        for cause in _select_tuning_causes(causes, metric):
             actions.extend(_tuning_actions_for_cause(state, metric, cause))
         actions = [_apply_multi_objective_guardrail(action, failed_metrics) for action in actions]
         actions = _dedupe_actions(actions)
@@ -1186,6 +1186,55 @@ def _attribution_guided_tuning(
     }
 
 
+def _select_tuning_causes(
+    causes: list[CandidateCause],
+    metric: str,
+    *,
+    max_causes: int = 6,
+) -> list[CandidateCause]:
+    matching = [item for item in causes if metric in item.metrics]
+    if not matching:
+        return []
+
+    selected: list[CandidateCause] = []
+    seen_nodes: set[str] = set()
+    seen_components: set[str] = set()
+
+    def add(cause: CandidateCause, *, allow_component_repeat: bool = False) -> None:
+        if len(selected) >= max_causes or cause.node in seen_nodes:
+            return
+        component = cause.component or _component_for_node(cause.node)
+        if component in seen_components and not allow_component_repeat:
+            return
+        selected.append(cause)
+        seen_nodes.add(cause.node)
+        if component:
+            seen_components.add(component)
+
+    for cause in matching:
+        add(cause)
+
+    if metric in {"dc_gain", "gain"}:
+        required_classes = (
+            lambda c: c.node.endswith(".ro"),
+            lambda c: c.node.endswith(".gm"),
+            lambda c: "gain_propagation_dependency" in c.edge_types,
+            lambda c: "bias_dependency" in c.edge_types,
+        )
+        for predicate in required_classes:
+            if any(predicate(item) for item in selected):
+                continue
+            candidate = next((item for item in matching if predicate(item)), None)
+            if candidate is not None:
+                add(candidate, allow_component_repeat=True)
+
+    for cause in matching:
+        add(cause, allow_component_repeat=True)
+        if len(selected) >= max_causes:
+            break
+    return selected
+
+
 def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateCause) -> list[dict[str, Any]]:
     node = cause.node
     if node == "block.compensation_network":
@@ -1203,7 +1252,7 @@ def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateC
 
     if param == "ro":
         if _is_gain_path_ro_cause(state, dev_id, role):
-            return [
+            actions = [
                 _knob_action(
                     state,
                     metric=metric,
@@ -1218,7 +1267,9 @@ def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateC
                     tradeoffs=["Higher L can add capacitance and lower bandwidth.", "Keep mirrored load devices symmetric."],
                     priority="primary",
                 )
-            ] + _bias_voltage_tuning_actions(
+            ]
+            actions.extend(_companion_gain_ro_actions(state, metric, node, dev_id, cause.score))
+            return actions + _bias_voltage_tuning_actions(
                 state,
                 metric=metric,
                 cause_node=node,
@@ -1242,12 +1293,82 @@ def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateC
     return []
 
 
+def _companion_gain_ro_actions(
+    state: DesignState,
+    metric: str,
+    cause_node: str,
+    primary_device: str,
+    score: float,
+) -> list[dict[str, Any]]:
+    if metric not in {"dc_gain", "gain"}:
+        return []
+    actions: list[dict[str, Any]] = []
+    seen = set(_symmetry_peer_devices(state, primary_device, "L"))
+    ranked_devices: list[tuple[float, str, str]] = []
+    for dev in state.topology.devices:
+        role = (dev.role or "").lower()
+        if dev.id in seen or not _primary_design_variable(state, dev.id, "L"):
+            continue
+        if not _is_direct_gain_ro_role(role) and "cascode" not in role and "input_pair" not in role:
+            continue
+        role_score = 0.45
+        if "second_stage_gain" in role:
+            role_score = 0.92
+        elif "current_mirror_load" in role or "active_load" in role:
+            role_score = 0.86
+        elif "cascode" in role:
+            role_score = 0.82
+        elif "output_current_source" in role or "second_stage_load" in role:
+            role_score = 0.74
+        elif "input_pair" in role:
+            role_score = 0.56
+        ranked_devices.append((role_score, dev.id, role))
+    for role_score, dev_id, role in sorted(ranked_devices, reverse=True)[:4]:
+        actions.append(
+            _knob_action(
+                state,
+                metric=metric,
+                cause_node=f"{cause_node}|companion_ro:{dev_id}",
+                score=score * role_score,
+                device=dev_id,
+                variable="L",
+                direction="increase",
+                step_hint="probe a companion signal-path L increase because gain is a product of multiple Rout terms",
+                rationale=(
+                    f"Companion Rout probe: {dev_id} role={role} can limit the same gain path, "
+                    "so local SPICE evidence should compare this L move with the originally ranked device."
+                ),
+                expected_effect={"dc_gain": "increase", "unity_gain_bandwidth": "may decrease", "output_swing": "verify"},
+                tradeoffs=["Higher L can lower speed or output swing; action remains evidence-gated."],
+                priority="primary",
+            )
+        )
+    return actions
+
+
 def _apply_multi_objective_guardrail(action: dict[str, Any], failed_metrics: set[str]) -> dict[str, Any]:
     metric = str(action.get("metric", ""))
     variable = str(action.get("knob", "")).split(".")[-1]
     direction = str(action.get("direction", ""))
     gain_failed = bool({"dc_gain", "gain"} & failed_metrics)
     bandwidth_failed = bool({"unity_gain_bandwidth", "ugbw", "bandwidth"} & failed_metrics)
+    speed_failed = bool({"unity_gain_bandwidth", "ugbw", "bandwidth", "slew_rate", "slew_rate_pos", "slew_rate_neg"} & failed_metrics)
+    if gain_failed and not speed_failed and metric in {"dc_gain", "gain"} and variable == "L" and direction == "increase":
+        focused = dict(action)
+        focused["priority"] = "primary"
+        focused["min_step_fraction"] = max(float(focused.get("min_step_fraction", 0.0) or 0.0), 0.14)
+        focused["max_step_fraction"] = max(float(focused.get("max_step_fraction", 0.0) or 0.0), 0.30)
+        focused["auto_range_expansion_allowed"] = True
+        focused["step_hint"] = "increase by 14-30% because gain is the isolated failing speed-independent metric; expand L range only after schema validation"
+        focused["rationale"] = (
+            str(focused.get("rationale", ""))
+            + " Gain-only policy: speed and slew targets are not failing, so signal-path ro improvement should be a primary move."
+        ).strip()
+        focused["gain_only_ro_policy"] = {
+            "reason": "dc_gain fails while bandwidth and slew-rate are not failing",
+            "policy": "prioritize signal-path L/Rout increase under the physical gate",
+        }
+        return focused
     if not (gain_failed and bandwidth_failed and variable == "L"):
         return action
 
@@ -1705,7 +1826,7 @@ def _bias_voltage_target_value(state: DesignState, variable: str) -> float | Non
     elif "folded" in architecture:
         quantiles = {
             "vbias_ptail": 0.56,
-            "vbias_ncas": 0.74,
+            "vbias_ncas": 0.66,
         }
     else:
         quantiles = {
@@ -1854,6 +1975,8 @@ def _apply_agent_step(action: dict[str, Any], symptom: dict[str, Any], planning_
     )
     if action.get("max_step_fraction") is not None:
         step = min(step, float(action["max_step_fraction"]))
+    if action.get("min_step_fraction") is not None:
+        step = max(step, float(action["min_step_fraction"]))
     current_f = float(current)
     sign = 1.0 if direction == "increase" else -1.0
     raw_next = current_f * (1.0 + sign * step)
@@ -2235,6 +2358,7 @@ def _is_direct_gain_ro_role(role: str) -> bool:
         for token in (
             "current_mirror_load",
             "load",
+            "cascode",
             "second_stage_gain",
             "second_stage_load",
             "output_current_source",

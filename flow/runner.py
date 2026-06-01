@@ -86,17 +86,22 @@ class AnalogRFIRFlowRunner:
 
     def run(self) -> FlowResult:
         cfg = self.config
+        run_started = time.perf_counter()
+        timing: list[dict[str, Any]] = []
         env_path = resolve_project_path(cfg.env)
         schema_path = resolve_project_path(cfg.schema)
         self._header(env_path, schema_path)
 
         self.emit("\n[0/8] Loading environment.yaml ...")
+        stage_started = time.perf_counter()
         env = load_environment(env_path)
         self.emit(f"       Process:  {env.get('process', {}).get('process_name', 'unknown')}")
         self.emit(f"       Simulator: {env.get('simulation', {}).get('simulator', 'unknown')}")
         self.emit(f"       Vdd:       {env.get('simulation', {}).get('supply', {}).get('vdd', 'unknown')}V")
+        self._record_timing(timing, "load_environment", stage_started)
 
         self.emit("\n[1/8] Loading input and building DesignState ...")
+        stage_started = time.perf_counter()
         design_input = load_design_input(
             env=env,
             schema_path=schema_path,
@@ -110,16 +115,22 @@ class AnalogRFIRFlowRunner:
         problem = OptimizationProblem.from_state(state)
         spec_model = self.spec_registry.select(state)
         self._print_state_summary(problem, spec_model.name)
+        self._record_timing(timing, "load_schema_state", stage_started)
 
         self.emit("\n[2/8] Validating Schema ...")
+        stage_started = time.perf_counter()
         self._validate_or_raise(state, "input")
+        self._record_timing(timing, "validate_input_schema", stage_started)
 
         self.emit("\n[3/8] Initializing gm/ID plugin ...")
+        stage_started = time.perf_counter()
         gmid_plugin = GmIdPlugin.from_environment(env)
         pygmid = gmid_plugin.load(env)
         self.emit(pygmid.summary())
+        self._record_timing(timing, "load_gmid_plugin", stage_started)
 
         self.emit("\n[4/8] Creating optimizer/evaluator ...")
+        stage_started = time.perf_counter()
         opt_config = OptimizerConfig(
             algorithm=cfg.optimizer,
             pop_size=cfg.pop_size,
@@ -135,11 +146,13 @@ class AnalogRFIRFlowRunner:
         else:
             self.emit(f"       Variables: {evaluator.n_vars}")
         self.emit(f"       Load cap:  {state.simulation.cload * 1e12:.1f}pF")
+        self._record_timing(timing, "create_optimizer", stage_started)
 
         self.emit("\n[5/8] Running optimizer ...")
-        t0 = time.time()
+        t0 = time.perf_counter()
         _best_x, best_meta = optimizer.optimize()
-        opt_elapsed = time.time() - t0
+        opt_elapsed = time.perf_counter() - t0
+        self._record_timing(timing, "optimizer_search", t0, emit=False)
         formal_tail_current_mirror = bool(problem.capabilities.has("tail_current_mirror"))
         flow_options = {
             "skip_dc_repair": bool(cfg.skip_dc_repair),
@@ -158,6 +171,7 @@ class AnalogRFIRFlowRunner:
         self._print_optimizer_summary(state, best_meta, opt_elapsed)
 
         self.emit("\n[6/8] Updating schema state from optimizer ...")
+        stage_started = time.perf_counter()
         apply_optimizer_meta_to_state(state, best_meta)
         if cfg.tail_current_mirror and not formal_tail_current_mirror:
             state.global_parameters["tail_current_mirror_bias"] = 1.0
@@ -168,13 +182,16 @@ class AnalogRFIRFlowRunner:
                 self.emit(f"       {did}: W={p.W * 1e6:.3f}um, L={p.L * 1e9:.0f}nm")
         for name, val in state.global_parameters.items():
             self.emit(f"       {name}: {val:.4e}")
+        self._record_timing(timing, "apply_optimizer_state", stage_started)
 
         self.emit("\n[7/8] Generating SPICE netlist ...")
+        stage_started = time.perf_counter()
         iteration_id = next_iteration(self.artifact_writer.runs_dir)
         output_dir = self.artifact_writer.runs_dir / f"iter_{iteration_id:03d}"
         output_dir.mkdir(parents=True, exist_ok=True)
         netlist_str = generate_netlist(state)
         self.emit(f"       Netlist length: {len(netlist_str)} chars")
+        self._record_timing(timing, "generate_netlist", stage_started)
 
         self.emit("\n[8/8] Running ngspice simulation ...")
         ngspice_bin = cfg.ngspice_bin or (env.get("tools", {}) or {}).get("ngspice_bin", "ngspice")
@@ -197,8 +214,11 @@ class AnalogRFIRFlowRunner:
                 "symmetry_reduced": evaluator.symmetry_reduced,
                 "encoded_variable_groups": evaluator.encoded_variable_groups,
             },
+            "timing": {"stages": timing},
         }
+        stage_started = time.perf_counter()
         if not sim.check_available():
+            self._record_timing(timing, "ngspice_availability_check", stage_started)
             self.emit("       ngspice not available; writing structured outputs without simulation.")
             sim_result = SimulationResult(
                 success=False,
@@ -214,12 +234,16 @@ class AnalogRFIRFlowRunner:
                 flow_meta=flow_meta,
             )
             return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
+        self._record_timing(timing, "ngspice_availability_check", stage_started)
 
+        stage_started = time.perf_counter()
         post_decision = self._postprocess_decision(state, best_meta, spec_model)
         flow_meta["postprocess_decision"] = post_decision
+        self._record_timing(timing, "postprocess_decision", stage_started)
         post_events = []
         if post_decision["run"]:
             self.emit(f"       Postprocess fallback: {post_decision['reason']}")
+            stage_started = time.perf_counter()
             post_context = PostprocessContext(
                 state=state,
                 sim=sim,
@@ -232,12 +256,19 @@ class AnalogRFIRFlowRunner:
                 capabilities=problem.capabilities,
             )
             post_events = PostprocessRegistry().run(post_context)
+            self._record_timing(
+                timing,
+                "postprocess_run",
+                stage_started,
+                event_count=len(post_events),
+            )
         else:
             self.emit(f"       Postprocess skipped: {post_decision['reason']}")
         flow_meta["postprocess"] = post_events
         for event in post_events:
             self._print_postprocess_event(event)
         if post_events:
+            stage_started = time.perf_counter()
             netlist_str = generate_netlist(state)
             best_meta.setdefault("decoded", {})["__global__"] = dict(state.global_parameters)
             if has_miller_capacitive_compensation(state):
@@ -245,13 +276,24 @@ class AnalogRFIRFlowRunner:
             if has_miller_rc_compensation(state):
                 best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
             self._validate_or_raise(state, "postprocess")
+            self._record_timing(timing, "postprocess_validate_and_regen", stage_started)
 
         include_transient = _requires_transient_validation(state)
+        stage_started = time.perf_counter()
         sim_result = sim.run(netlist_str, work_dir=str(output_dir), include_transient=include_transient)
+        self._record_timing(
+            timing,
+            "ngspice_validation",
+            stage_started,
+            include_transient=include_transient,
+            simulator_elapsed_sec=getattr(sim_result, "elapsed_sec", None),
+        )
         if "phase_margin" in sim_result.measurements and "phase_margin_from_curve" not in sim_result.measurements:
             sim_result.measurements["phase_margin"] = normalize_phase_margin(sim_result.measurements["phase_margin"])
+        stage_started = time.perf_counter()
         backfill_state_from_ngspice(state, sim_result)
         self._validate_or_raise(state, "post_ngspice")
+        self._record_timing(timing, "backfill_and_validate_ngspice", stage_started)
         self._print_simulation_summary(sim_result)
         self._maybe_build_local_intervention_model(
             state=state,
@@ -261,8 +303,14 @@ class AnalogRFIRFlowRunner:
             output_dir=output_dir,
             spec_model=spec_model,
             flow_meta=flow_meta,
+            timing=timing,
         )
 
+        flow_meta["timing"] = {
+            "stages": timing,
+            "total_elapsed_sec": round(time.perf_counter() - run_started, 6),
+        }
+        stage_started = time.perf_counter()
         artifacts = self.artifact_writer.write(
             state=state,
             best_meta=best_meta,
@@ -271,8 +319,15 @@ class AnalogRFIRFlowRunner:
             netlist_str=netlist_str,
             flow_meta=flow_meta,
         )
+        self._record_timing(timing, "write_artifacts", stage_started)
+        flow_meta["timing"] = {
+            "stages": timing,
+            "total_elapsed_sec": round(time.perf_counter() - run_started, 6),
+            "slowest_stage": _slowest_timing_stage(timing),
+        }
         self._print_artifacts(artifacts)
         self._print_comparison(state, best_meta, sim_result, spec_model)
+        self._print_timing_summary(timing, time.perf_counter() - run_started)
         return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
 
     def _maybe_build_local_intervention_model(
@@ -285,6 +340,7 @@ class AnalogRFIRFlowRunner:
         output_dir: Path,
         spec_model,
         flow_meta: dict[str, Any],
+        timing: list[dict[str, Any]] | None = None,
     ) -> None:
         cfg = self.config
         if not cfg.enable_intervention_model:
@@ -295,7 +351,7 @@ class AnalogRFIRFlowRunner:
                 "reason": "FlowConfig.enable_intervention_model is false.",
             }
             return
-        if not sim_result.success:
+        if not sim_result.success and not (sim_result.measurements or {}):
             flow_meta["local_intervention_model"] = {
                 "schema_version": "analogrf_ir.local_intervention_model.v0_1",
                 "method": "spice_small_perturbation",
@@ -325,6 +381,7 @@ class AnalogRFIRFlowRunner:
             return
 
         self.emit("\n[8b] Building local intervention model ...")
+        stage_started = time.perf_counter()
         provisional = build_causal_diagnostics(
             state=state,
             best_meta=best_meta,
@@ -333,6 +390,9 @@ class AnalogRFIRFlowRunner:
             spec_model=spec_model,
             flow_meta={**flow_meta, "local_intervention_model": None},
         )
+        if timing is not None:
+            self._record_timing(timing, "causal_diagnostics", stage_started)
+        stage_started = time.perf_counter()
         model = build_spice_intervention_model(
             state=state,
             sim=sim,
@@ -343,13 +403,22 @@ class AnalogRFIRFlowRunner:
             max_actions=max(0, int(cfg.intervention_max_actions)),
             perturbation_fraction=float(cfg.intervention_perturbation_fraction),
         )
+        if timing is not None:
+            self._record_timing(
+                timing,
+                "local_spice_intervention_model",
+                stage_started,
+                action_count=len(model.get("action_effects", []) or []),
+                ok_action_count=sum(1 for item in model.get("action_effects", []) or [] if item.get("status") == "ok"),
+            )
         flow_meta["local_intervention_model"] = model
         effects = model.get("action_effects", []) or []
         ok_effects = [item for item in effects if item.get("status") == "ok"]
         self.emit(
             "       Local model: "
             f"{model.get('method')} status={model.get('status')} "
-            f"actions={len(ok_effects)}/{len(effects)}"
+            f"actions={len(ok_effects)}/{len(effects)} "
+            f"elapsed={float(model.get('elapsed_sec', 0.0) or 0.0):.1f}s"
         )
         for effect in ok_effects[:3]:
             self.emit(
@@ -525,23 +594,24 @@ class AnalogRFIRFlowRunner:
 
     def _print_postprocess_event(self, event: dict[str, Any]) -> None:
         etype = event.get("type")
+        elapsed = _elapsed_suffix(event)
         if etype == "initial_operating_point":
             regions = event.get("region_counts", {}) or {}
             region_text = ", ".join(f"{name}={count}" for name, count in sorted(regions.items()))
             self.emit(
                 f"       Initial OP check: devices={event.get('operating_point_count', 0)}, "
-                f"regions=({region_text or 'none'})"
+                f"regions=({region_text or 'none'}){elapsed}"
             )
         elif etype in {"stage2_balance", "stage2_rebalance"}:
             label = "Stage-2 re-balance" if etype == "stage2_rebalance" else "Stage-2 DC balance"
             self.emit(
                 f"       {label}: M6_W scale={event.get('scale', 1.0):.3f}, "
-                f"M7_W scale={event.get('sink_scale', 1.0):.3f}, vout~{event.get('vout', 0.0):.3f}V"
+                f"M7_W scale={event.get('sink_scale', 1.0):.3f}, vout~{event.get('vout', 0.0):.3f}V{elapsed}"
             )
         elif etype == "tail_headroom":
             self.emit(
                 f"       Tail headroom repair: M1/M2_W scale={event.get('scale', 1.0):.3f}, "
-                f"M5 VDS-VDSAT~{event.get('margin', 0.0):.3f}V"
+                f"M5 VDS-VDSAT~{event.get('margin', 0.0):.3f}V{elapsed}"
             )
         elif etype == "compensation_tune":
             meas = event.get("measurements", {}) or {}
@@ -559,7 +629,7 @@ class AnalogRFIRFlowRunner:
                 f"PM~{meas.get('phase_margin', 0.0):.1f}deg, "
                 f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
                 f"evals={event.get('evaluated_candidates', 0)}"
-                f"{stop}"
+                f"{stop}{elapsed}"
             )
         elif etype == "source_follower_op_tune":
             scale = float(event.get("width_scale", 1.0) or 1.0)
@@ -574,7 +644,7 @@ class AnalogRFIRFlowRunner:
                 f"margin~{event.get('op_margin', 0.0):.3f}V, "
                 f"req_margin~{event.get('op_required_margin', 0.0):.3f}V, "
                 f"evals={event.get('candidate_count', 0)}"
-                f"{scale_text}"
+                f"{scale_text}{elapsed}"
             )
         elif etype == "single_stage_ota_op_tune":
             meas = event.get("measurements", {}) or {}
@@ -591,10 +661,17 @@ class AnalogRFIRFlowRunner:
                 f"UGBW~{meas.get('unity_gain_bandwidth', 0.0):.3e}Hz, "
                 f"PM~{meas.get('phase_margin', 0.0):.1f}deg, "
                 f"power~{meas.get('total_power', 0.0):.3e}W, "
-                f"evals={event.get('candidate_count', 0)}"
+                f"evals={event.get('candidate_count', 0)}{elapsed}"
             )
 
     def _print_simulation_summary(self, result: SimulationResult) -> None:
+        if result.pass_status:
+            timing_text = ", ".join(
+                f"{name}={float(summary.get('elapsed_sec', 0.0) or 0.0):.2f}s"
+                for name, summary in result.pass_status.items()
+            )
+            if timing_text:
+                self.emit(f"       ngspice pass timing: {timing_text}")
         if result.success:
             self.emit(f"       Simulation completed in {result.elapsed_sec:.1f}s")
             self.emit("       Measurements:")
@@ -675,9 +752,52 @@ class AnalogRFIRFlowRunner:
             return f"{value:.4e}"
         return f"{value:.4f}"
 
+    def _record_timing(
+        self,
+        timing: list[dict[str, Any]],
+        stage: str,
+        started: float,
+        *,
+        emit: bool = True,
+        **extra: Any,
+    ) -> float:
+        elapsed = time.perf_counter() - started
+        row = {"stage": stage, "elapsed_sec": round(float(elapsed), 6)}
+        for key, value in extra.items():
+            if value is not None:
+                row[key] = value
+        timing.append(row)
+        if emit:
+            suffix = ""
+            if extra:
+                details = ", ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
+                suffix = f" ({details})" if details else ""
+            self.emit(f"       [timing] {stage}: {elapsed:.2f}s{suffix}")
+        return elapsed
+
+    def _print_timing_summary(self, timing: list[dict[str, Any]], total_elapsed: float) -> None:
+        self.emit("\n  Timing summary:")
+        self.emit(f"       total: {total_elapsed:.2f}s")
+        for row in sorted(timing, key=lambda item: float(item.get("elapsed_sec", 0.0)), reverse=True)[:8]:
+            self.emit(f"       {row.get('stage', ''):>34s}: {float(row.get('elapsed_sec', 0.0)):.2f}s")
+
 
 def _requires_transient_validation(state: DesignState) -> bool:
     target = state.targets.get("slew_rate")
     if target is not None and target.min is not None:
         return float(target.min) > 0.0
     return any(ev.type == "slew_rate" for ev in state.evaluations)
+
+
+def _elapsed_suffix(event: dict[str, Any]) -> str:
+    try:
+        elapsed = float(event.get("elapsed_sec"))
+    except (TypeError, ValueError):
+        return ""
+    return f", elapsed={elapsed:.1f}s"
+
+
+def _slowest_timing_stage(timing: list[dict[str, Any]]) -> dict[str, Any]:
+    if not timing:
+        return {}
+    return dict(max(timing, key=lambda item: float(item.get("elapsed_sec", 0.0) or 0.0)))

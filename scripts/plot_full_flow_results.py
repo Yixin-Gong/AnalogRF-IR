@@ -5,7 +5,6 @@ import argparse
 import json
 import math
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,58 +17,6 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-
-@dataclass(frozen=True)
-class TopologyRef:
-    key: str
-    label: str
-    schema: str
-    result_globs: tuple[str, ...]
-
-
-TOPOLOGIES = (
-    TopologyRef(
-        key="five_transistor",
-        label="5T",
-        schema="inputs/ota/five_transistor/five_transistor_ota.yaml",
-        result_globs=("runs/llm_full_final_seed10_max30_final5/five_transistor_ota/iter_*/result.json",),
-    ),
-    TopologyRef(
-        key="current_mirror",
-        label="Current mirror",
-        schema="inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml",
-        result_globs=("runs/llm_full_final_seed10_max30_final5/current_mirror_ota_ihp130/iter_*/result.json",),
-    ),
-    TopologyRef(
-        key="folded_cascode",
-        label="Folded cascode",
-        schema="inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml",
-        result_globs=(
-            "runs/folded_topology_guided_seed10_current/**/iter_*/result.json",
-            "runs/folded_topology_guided_seed10_fast/**/iter_*/result.json",
-        ),
-    ),
-    TopologyRef(
-        key="telescopic",
-        label="Telescopic",
-        schema="inputs/ota/telescopic/telescopic_ota_ihp130.yaml",
-        result_globs=(
-            "runs/telescopic_topology_guided_seed10_fast_final/**/iter_*/result.json",
-            "runs/llm_full_retarget_seed10_max30/**/telescopic_ota_ihp130__seed_10/iter_*/result.json",
-        ),
-    ),
-    TopologyRef(
-        key="two_stage",
-        label="Two-stage",
-        schema="inputs/ota/two_stage_miller/two_stage_miller_ota.yaml",
-        result_globs=(
-            "runs/two_stage_gain57_ugbw20_seed10_current/**/iter_*/result.json",
-            "runs/llm_full_final_seed10_max30_final5/two_stage_miller_ota/iter_*/result.json",
-            "runs/llm_full_retarget_seed10_max30/**/two_stage_miller_ota__seed_10/iter_*/result.json",
-        ),
-    ),
-)
 
 
 METRICS = (
@@ -91,7 +38,17 @@ GRID_BLUE = "#b7c9dc"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot latest full-flow OTA reference results")
+    parser = argparse.ArgumentParser(description="Plot full-flow OTA results from one ablation manifest")
+    parser.add_argument(
+        "--manifest",
+        default="runs/ablations_ihp130_ota_unified_seed1_10/manifest.json",
+        help="Unified ablation manifest JSON",
+    )
+    parser.add_argument(
+        "--case",
+        default="llm_diagnosis_postprocess_fallback",
+        help="Case name to summarize from the manifest",
+    )
     parser.add_argument("--out-dir", action="append", default=[], help="Output directory; may repeat")
     parser.add_argument("--format", action="append", default=[], choices=("png", "pdf", "svg"))
     parser.add_argument("--write-csv", action="store_true")
@@ -103,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     out_dirs = [Path(p) for p in args.out_dir] or [ROOT / "docs" / "assets"]
     formats = args.format or ["png"]
-    rows = collect_rows()
+    rows = collect_rows(_resolve(args.manifest), args.case)
     if not rows:
-        raise SystemExit("No full-flow result.json files found.")
+        raise SystemExit("No full-flow result.json files found in the requested manifest/case.")
     records = pd.DataFrame(rows)
     figures = {
         "full_flow_ota_achievement": plot_achievement_heatmap(records),
@@ -125,43 +82,56 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def collect_rows() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for ref in TOPOLOGIES:
-        schema = _load_yaml(_resolve(ref.schema))
+def collect_rows(manifest_path: Path, case_name: str) -> list[dict[str, Any]]:
+    manifest = _load_json(manifest_path)
+    jobs = [job for job in manifest.get("jobs", []) or [] if str(job.get("case", "")) == case_name]
+    per_run: list[dict[str, Any]] = []
+    schema_cache: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        schema_path = str(job.get("schema", ""))
+        schema = schema_cache.setdefault(schema_path, _load_yaml(_resolve(schema_path)))
         targets = schema.get("targets", {}) or {}
-        best: tuple[tuple[Any, ...], Path, dict[str, Any]] | None = None
-        for result_path in _candidate_results(ref.result_globs):
-            result = _load_json(result_path)
-            measurements = result.get("measurements", {}) or {}
-            rank = _result_rank(measurements, targets, result_path)
-            candidate = (rank, result_path, result)
-            if best is None or candidate[0] < best[0]:
-                best = candidate
-        if best is None:
+        result_path = _manifest_result_path(job)
+        if result_path is None:
             continue
-        _, result_path, result = best
+        result = _load_json(result_path)
         measurements = result.get("measurements", {}) or {}
-        ratios = {
-            label: _achievement_ratio(measurements.get(metric), targets.get(target, {}))
-            for target, metric, label, _unit in METRICS
-        }
         status = _status_label(measurements, targets)
-        row = {
-            "topology": ref.label,
-            "schema": ref.schema,
-            "result_json": str(result_path.relative_to(ROOT)),
+        run = {
+            "topology": _topology_label(schema, schema_path),
+            "schema": schema_path,
+            "seed": job.get("seed", ""),
+            "result_json": str(result_path.relative_to(ROOT)) if result_path.is_relative_to(ROOT) else str(result_path),
             "iteration": _iteration_number(result_path),
             "status": status,
             "spec_pass": status == "pass",
-            "score": _violation_score(measurements, targets),
         }
-        row.update({f"ratio_{key}": value for key, value in ratios.items()})
         for target, metric, label, unit in METRICS:
-            row[label] = _display_value(measurements.get(metric), unit)
-            row[f"raw_{label}"] = _to_float(measurements.get(metric))
-            target_def = targets.get(target, {}) or {}
-            row[f"target_{label}"] = _target_value(target_def, unit)
+            raw = _to_float(measurements.get(metric))
+            run[f"raw_{label}"] = raw
+            run[f"ratio_{label}"] = _achievement_ratio(raw, targets.get(target, {}))
+            run[f"target_{label}"] = _target_value(targets.get(target, {}) or {}, unit)
+        per_run.append(run)
+
+    if not per_run:
+        return []
+    frame = pd.DataFrame(per_run)
+    rows: list[dict[str, Any]] = []
+    for topology, group in frame.groupby("topology", sort=False):
+        row: dict[str, Any] = {
+            "topology": topology,
+            "n_runs": int(len(group)),
+            "pass_count": int(group["spec_pass"].sum()),
+            "pass_fraction": f"{int(group['spec_pass'].sum())}/{int(len(group))}",
+            "median_iteration": int(round(float(group["iteration"].median()))) if "iteration" in group else 0,
+            "spec_pass_rate": float(group["spec_pass"].mean()),
+        }
+        for _target, _metric, label, unit in METRICS:
+            raw_median = float(group[f"raw_{label}"].median())
+            ratio_median = float(group[f"ratio_{label}"].median())
+            row[f"raw_{label}"] = raw_median
+            row[f"ratio_{label}"] = ratio_median
+            row[label] = _display_value(raw_median, unit)
         rows.append(row)
     return rows
 
@@ -223,7 +193,7 @@ def _draw_achievement_heatmap(ax: plt.Axes, records: pd.DataFrame) -> None:
 
 
 def _draw_summary_table(ax: plt.Axes, records: pd.DataFrame) -> None:
-    display = records[["topology", "iteration", "Gain", "UGBW", "PM", "SR"]].copy()
+    display = records[["topology", "pass_fraction", "Gain", "UGBW", "PM", "SR"]].copy()
     display["topology"] = display["topology"].replace(
         {
             "Current mirror": "Current\nmirror",
@@ -232,8 +202,8 @@ def _draw_summary_table(ax: plt.Axes, records: pd.DataFrame) -> None:
     )
     ax.axis("off")
     table = ax.table(
-        cellText=display[["topology", "iteration", "Gain", "UGBW", "PM", "SR"]].values,
-        colLabels=["Topology", "Iter", "Gain\n(dB)", "UGBW\n(MHz)", "PM\n(deg)", "SR\n(V/us)"],
+        cellText=display[["topology", "pass_fraction", "Gain", "UGBW", "PM", "SR"]].values,
+        colLabels=["Topology", "Pass", "Gain\n(dB)", "UGBW\n(MHz)", "PM\n(deg)", "SR\n(V/us)"],
         loc="center",
         cellLoc="center",
         colLoc="center",
@@ -258,11 +228,15 @@ def _draw_summary_table(ax: plt.Axes, records: pd.DataFrame) -> None:
             cell.get_text().set_weight("bold")
 
 
-def _candidate_results(patterns: tuple[str, ...]) -> list[Path]:
-    out: list[Path] = []
-    for pattern in patterns:
-        out.extend(sorted(ROOT.glob(pattern)))
-    return out
+def _manifest_result_path(job: dict[str, Any]) -> Path | None:
+    summary = job.get("summary", {}) or {}
+    if summary.get("result_json"):
+        path = _resolve(summary["result_json"])
+        if path.exists():
+            return path
+    runs_dir = _resolve(job.get("runs_dir", ""))
+    results = sorted(runs_dir.rglob("result.json"), key=lambda path: path.stat().st_mtime)
+    return results[-1] if results else None
 
 
 def _result_rank(measurements: dict[str, Any], targets: dict[str, Any], result_path: Path) -> tuple[Any, ...]:
@@ -300,6 +274,18 @@ def _status_label(measurements: dict[str, Any], targets: dict[str, Any]) -> str:
         "power": "power",
     }
     return "/".join(aliases.get(item, item) for item in failed) + " short"
+
+
+def _topology_label(schema: dict[str, Any], schema_path: str) -> str:
+    raw = str((schema.get("topology", {}) or {}).get("name") or schema.get("design_name") or Path(schema_path).stem)
+    labels = {
+        "five_transistor_ota": "5T",
+        "current_mirror_ota_ihp130": "Current mirror",
+        "folded_cascode_ota_ihp130": "Folded cascode",
+        "telescopic_ota_ihp130": "Telescopic",
+        "two_stage_miller_ota": "Two-stage",
+    }
+    return labels.get(raw, raw.replace("_", " ").title())
 
 
 def _violation_score(measurements: dict[str, Any], targets: dict[str, Any]) -> float:

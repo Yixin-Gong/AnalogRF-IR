@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import time
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ def build_spice_intervention_model(
     operating point and estimates one local effect column per action.
     """
 
+    started = time.perf_counter()
     metrics = _ordered_metrics(target_status)
     base_violation = _violation_vector(target_status, metrics)
     actions = _candidate_actions(tuning, limit=max(0, int(max_actions)))
@@ -57,6 +59,7 @@ def build_spice_intervention_model(
         return _empty_intervention_model("no_failed_targets", target_status, metrics, base_violation)
 
     for index, action in enumerate(actions, start=1):
+        action_started = time.perf_counter()
         action_id = str(action.get("action_id") or f"action_{index:03d}")
         trial_state = state.clone()
         applied = _apply_netlist_proxy_action(trial_state, action, perturbation_fraction)
@@ -71,16 +74,19 @@ def build_spice_intervention_model(
                     "delta_violation_vector": {metric: 0.0 for metric in metrics},
                     "violation_reduction": 0.0,
                     "uncertainty": 1.0,
+                    "elapsed_sec": round(time.perf_counter() - action_started, 6),
                 }
             )
             continue
 
         try:
             netlist = generate_netlist(trial_state)
+            sim_started = time.perf_counter()
             result: SimulationResult = sim.run(
                 netlist,
                 work_dir=str(work_path / _safe_action_dir(index, action_id)),
             )
+            sim_elapsed = time.perf_counter() - sim_started
         except Exception as exc:  # pragma: no cover - defensive around external simulator
             effects.append(
                 {
@@ -93,6 +99,7 @@ def build_spice_intervention_model(
                     "delta_violation_vector": {metric: 0.0 for metric in metrics},
                     "violation_reduction": 0.0,
                     "uncertainty": 1.0,
+                    "elapsed_sec": round(time.perf_counter() - action_started, 6),
                 }
             )
             continue
@@ -107,6 +114,7 @@ def build_spice_intervention_model(
             for metric in metrics
         }
         reduction = _weighted_objective(base_violation, target_status) - _weighted_objective(after_violation, target_status)
+        usable = result.success or _has_failed_metric_measurements(result.measurements or {}, metrics, base_violation)
         effects.append(
             {
                 "action_id": action_id,
@@ -116,19 +124,21 @@ def build_spice_intervention_model(
                 "direction": action.get("direction"),
                 "per_knob_values": action.get("per_knob_values", {}),
                 "source": "spice_small_perturbation",
-                "status": "ok" if result.success else "sim_failed",
+                "status": "ok" if usable else "sim_failed",
                 "applied_proxy": applied,
                 "measurements": dict(result.measurements or {}),
                 "base_violation_vector": base_violation,
                 "after_violation_vector": after_violation,
                 "delta_violation_vector": delta,
                 "violation_reduction": round(float(reduction), 6),
-                "uncertainty": 0.10 if result.success else 0.80,
+                "uncertainty": 0.10 if result.success else (0.25 if usable else 0.80),
                 "interpretation": _effect_interpretation(delta),
+                "elapsed_sec": round(time.perf_counter() - action_started, 6),
+                "sim_elapsed_sec": round(float(getattr(result, "elapsed_sec", sim_elapsed) or sim_elapsed), 6),
             }
         )
 
-    return _intervention_model_from_effects(
+    model = _intervention_model_from_effects(
         method="spice_small_perturbation",
         status="ok",
         target_status=target_status,
@@ -137,6 +147,13 @@ def build_spice_intervention_model(
         effects=effects,
         perturbation_fraction=perturbation_fraction,
     )
+    model["elapsed_sec"] = round(time.perf_counter() - started, 6)
+    model["timing"] = {
+        "action_count": len(effects),
+        "ok_action_count": sum(1 for item in effects if item.get("status") == "ok"),
+        "slowest_action": _slowest_action_effect(effects),
+    }
+    return model
 
 
 def build_surrogate_intervention_model(
@@ -178,6 +195,39 @@ def build_surrogate_intervention_model(
         effects=effects,
         perturbation_fraction=0.0,
     )
+
+
+def _has_failed_metric_measurements(
+    measurements: dict[str, Any],
+    metrics: list[str],
+    base_violation: dict[str, float],
+) -> bool:
+    if not measurements:
+        return False
+    failed_metrics = [
+        metric
+        for metric in metrics
+        if float(base_violation.get(metric, 0.0) or 0.0) > 0.0
+    ]
+    if not failed_metrics:
+        return False
+    return all(_measurement_for_metric(measurements, metric) is not None for metric in failed_metrics)
+
+
+def _measurement_for_metric(measurements: dict[str, Any], metric: str) -> Any:
+    aliases = {
+        "dc_gain": ("dc_gain_db", "dc_gain", "gain"),
+        "unity_gain_bandwidth": ("unity_gain_bandwidth", "ugbw", "gbw"),
+        "phase_margin": ("phase_margin", "pm"),
+        "slew_rate": ("slew_rate", "slew_rate_pos", "slew_rate_neg"),
+        "output_swing": ("output_swing", "swing"),
+        "power": ("total_power", "power"),
+        "saturation_margin": ("saturation_margin", "saturation_required_gap"),
+    }
+    for key in aliases.get(metric, (metric,)):
+        if key in measurements and measurements[key] is not None:
+            return measurements[key]
+    return None
 
 
 def optimize_tuning_actions(
@@ -434,6 +484,19 @@ def _intervention_model_from_effects(
             "sign_convention": "negative entries reduce normalized violation; positive entries worsen it",
         },
         "action_effects": effects,
+    }
+
+
+def _slowest_action_effect(effects: list[dict[str, Any]]) -> dict[str, Any]:
+    if not effects:
+        return {}
+    effect = max(effects, key=lambda item: float(item.get("elapsed_sec", 0.0) or 0.0))
+    return {
+        "action_id": effect.get("action_id"),
+        "knob": effect.get("knob"),
+        "status": effect.get("status"),
+        "elapsed_sec": effect.get("elapsed_sec"),
+        "sim_elapsed_sec": effect.get("sim_elapsed_sec"),
     }
 
 
@@ -733,6 +796,8 @@ def _constraint_penalty(
         penalty += 0.02
     primary_metric = action.get("metric")
     for metric, status in target_status.items():
+        if not _counts_for_action_objective(status):
+            continue
         if status.get("status") not in {"fail", "unverified"}:
             continue
         worsening = float(delta.get(metric, 0.0) or 0.0)
@@ -769,7 +834,12 @@ def _evidence_gate(
     improved_failed_metrics = []
     for metric, base in base_violation.items():
         value_delta = float(delta.get(metric, 0.0) or 0.0)
-        if value_delta < -1e-9 and target_status.get(metric, {}).get("status") in {"fail", "unverified"}:
+        status = target_status.get(metric, {})
+        if (
+            value_delta < -1e-9
+            and status.get("status") in {"fail", "unverified"}
+            and _counts_for_action_objective(status)
+        ):
             improved_failed_metrics.append(metric)
         if value_delta <= 0:
             continue
@@ -1067,11 +1137,23 @@ def _weighted_objective(violation: dict[str, float], target_status: dict[str, di
 
 
 def _target_weight(target_status: dict[str, dict[str, Any]], metric: str) -> float:
+    status = target_status.get(metric, {}) or {}
+    if not _counts_for_action_objective(status):
+        return 0.0
     try:
-        priority = int((target_status.get(metric, {}) or {}).get("priority", 1) or 1)
+        priority = int(status.get("priority", 1) or 1)
     except (TypeError, ValueError):
         priority = 1
     return max(0.25, 1.0 / max(priority, 1))
+
+
+def _counts_for_action_objective(status: dict[str, Any]) -> bool:
+    if "counts_for_pass" in status:
+        return bool(status.get("counts_for_pass"))
+    try:
+        return int(status.get("priority", 1) or 1) <= 2
+    except (TypeError, ValueError):
+        return True
 
 
 def _safe_action_dir(index: int, action_id: str) -> str:

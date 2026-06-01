@@ -2,14 +2,14 @@ schema_version: analogrf_ir.ablation_config.v0_1
 description: IHP SG13G2 130 nm OTA topology-family ablation matrix.
 
 base_config: configs/default.yaml
-output_dir: runs/ablations_ihp130_ota
+output_dir: runs/ablations_ihp130_ota_unified_seed1_10
 schemas:
   - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
   - inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml
   - inputs/ota/telescopic/telescopic_ota_ihp130.yaml
   - inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml
   - inputs/ota/five_transistor/five_transistor_ota.yaml
-seeds: [1, 2, 3]
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
 base_overrides:
   input:

@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Callable, Tuple, Any
 import numpy as np
 
 from optimizer.problem import OptimizationProblem
+from optimizer.initialization import build_topology_guided_initial_points
 from core.regions import compact_operating_region, inversion_region_from_gm_id, normalize_spice_region
 from schemas.design_state import DesignState, DesignVariable, Range, LossTerm
 from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
@@ -55,6 +56,9 @@ class NSGA2Config:
     seed: Optional[int] = None
     # Internal implementation note.
     verbose: bool = True
+    topology_guided_initialization: bool = True
+    initial_injection_fraction: float = 0.25
+    pass_oriented_objective: bool = True
 
 
 # Internal implementation note.
@@ -1261,6 +1265,11 @@ class CircuitEvaluator:
             total += weighted
             breakdown[lt.id] = weighted
 
+        if getattr(self, "pass_oriented_objective", True):
+            target_total, target_breakdown = _target_pass_objective(perf, self.schema.targets)
+            total += target_total
+            breakdown.update(target_breakdown)
+
         # Internal implementation note.
         proc = self.schema.process
         PENALTY_BIG = 1e6
@@ -1450,6 +1459,108 @@ def _safe_eval_loss_formula(formula: str, perf: Dict[str, float],
         return 1e6  # Internal implementation note.
 
 
+def _target_pass_objective(perf: Dict[str, float], targets: Dict[str, Any]) -> tuple[float, dict[str, float]]:
+    total = 0.0
+    breakdown: dict[str, float] = {}
+    for metric, target in targets.items():
+        value = _target_metric_value(perf, metric)
+        if value is None:
+            continue
+        priority = _target_priority(target)
+        weight = _target_objective_weight(priority)
+        target_min = getattr(target, "min", None)
+        target_max = getattr(target, "max", None)
+        if target_min is not None:
+            rel = max(0.0, (float(target_min) - value) / max(abs(float(target_min)), 1e-30))
+            if rel > 0.0:
+                penalty = weight * rel * rel
+                total += penalty
+                breakdown[f"target:{metric}:min"] = penalty
+        if target_max is not None:
+            rel = max(0.0, (value - float(target_max)) / max(abs(float(target_max)), 1e-30))
+            if rel > 0.0:
+                penalty = weight * rel * rel
+                total += penalty
+                breakdown[f"target:{metric}:max"] = penalty
+
+    pm = _target_metric_value(perf, "phase_margin")
+    pm_target = targets.get("phase_margin")
+    if pm is not None and pm_target is not None:
+        window = _phase_margin_window_penalty(pm, getattr(pm_target, "min", 60.0) or 60.0)
+        if window > 0.0:
+            penalty = 0.40 * _target_objective_weight(_target_priority(pm_target)) * window * window
+            total += penalty
+            breakdown["target_window:phase_margin"] = penalty
+    tradeoff_total, tradeoff_breakdown = _gain_shortfall_speed_excess_penalty(perf, targets)
+    total += tradeoff_total
+    breakdown.update(tradeoff_breakdown)
+    return total, breakdown
+
+
+def _target_metric_value(perf: Dict[str, float], metric: str) -> float | None:
+    aliases = {
+        "dc_gain": ("dc_gain", "dc_gain_db", "gain"),
+        "unity_gain_bandwidth": ("unity_gain_bandwidth", "ugbw", "gbw"),
+        "phase_margin": ("phase_margin", "pm"),
+        "slew_rate": ("slew_rate", "slew_rate_pos", "slew_rate_neg"),
+        "output_swing": ("output_swing", "swing"),
+        "saturation_margin": ("saturation_margin", "saturation_required_gap"),
+        "power": ("power", "total_power"),
+    }
+    for key in aliases.get(metric, (metric,)):
+        if key in perf and perf[key] is not None:
+            return float(perf[key])
+    return None
+
+
+def _target_priority(target: Any) -> int:
+    try:
+        return int(getattr(target, "priority", 1) or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _target_objective_weight(priority: int) -> float:
+    if priority <= 1:
+        return 18.0
+    if priority == 2:
+        return 7.0
+    if priority == 3:
+        return 3.0
+    return 1.5
+
+
+def _gain_shortfall_speed_excess_penalty(perf: Dict[str, float], targets: Dict[str, Any]) -> tuple[float, dict[str, float]]:
+    gain_target = targets.get("dc_gain") or targets.get("gain")
+    gain = _target_metric_value(perf, "dc_gain")
+    gain_min = getattr(gain_target, "min", None) if gain_target is not None else None
+    if gain is None or gain_min is None or float(gain_min) <= 0.0 or gain >= float(gain_min):
+        return 0.0, {}
+
+    gain_rel = max(0.0, (float(gain_min) - gain) / max(abs(float(gain_min)), 1.0))
+    gain_weight = _target_objective_weight(_target_priority(gain_target))
+    total = 0.0
+    breakdown: dict[str, float] = {}
+    for metric, threshold, scale in (
+        ("unity_gain_bandwidth", 1.50, 0.60),
+        ("slew_rate", 1.80, 0.24),
+    ):
+        target = targets.get(metric)
+        target_min = getattr(target, "min", None) if target is not None else None
+        value = _target_metric_value(perf, metric)
+        if value is None or target_min is None or float(target_min) <= 0.0:
+            continue
+        ratio = value / max(float(target_min), 1e-30)
+        if ratio <= threshold:
+            continue
+        excess = math.log(max(ratio / threshold, 1.0))
+        penalty = scale * gain_weight * gain_rel * excess * excess
+        if penalty > 0.0:
+            total += penalty
+            breakdown[f"target_tradeoff:gain_shortfall_{metric}_excess"] = penalty
+    return total, breakdown
+
+
 def _phase_margin_window_penalty(pm: float, target_min: float = 60.0) -> float:
     pm = float(pm or 0.0)
     target_min = float(target_min or 60.0)
@@ -1493,6 +1604,7 @@ class NSGA2Optimizer:
         self.schema = schema
         self.evaluator = evaluator
         self.config = config or NSGA2Config()
+        self.evaluator.pass_oriented_objective = bool(self.config.pass_oriented_objective)
         self.rng = np.random.RandomState(self.config.seed)
         self.history = []  # Internal implementation note.
         self.last_population: List[Individual] = []
@@ -1599,14 +1711,34 @@ class NSGA2Optimizer:
             else:
                 x_seed[j] = (bounds[j, 0] + bounds[j, 1]) / 2.0
         x_seed = np.clip(x_seed, bounds[:, 0], bounds[:, 1])
-        pop.append(Individual(x=x_seed))
+        pop.append(Individual(x=x_seed, meta={"initialization_source": "schema_seed"}))
+
+        if self.config.topology_guided_initialization:
+            n_guided = max(
+                0,
+                min(
+                    self.config.pop_size - 1,
+                    int(round(self.config.pop_size * float(self.config.initial_injection_fraction))),
+                ),
+            )
+            guided_points = build_topology_guided_initial_points(
+                self.evaluator,
+                bounds,
+                base=x_seed,
+                max_points=n_guided,
+                rng=self.rng,
+            )
+            for x in guided_points:
+                pop.append(Individual(x=x, meta={"initialization_source": "topology_guided"}))
+                if len(pop) >= self.config.pop_size:
+                    return pop
 
         # Internal implementation note.
-        for i in range(1, self.config.pop_size):
+        while len(pop) < self.config.pop_size:
             x = np.zeros(n_vars)
             for j in range(n_vars):
                 x[j] = self._sample_initial_value(j, bounds[j, 0], bounds[j, 1])
-            pop.append(Individual(x=x))
+            pop.append(Individual(x=x, meta={"initialization_source": "random"}))
         return pop
 
     def _sample_initial_value(self, index: int, low: float, high: float) -> float:
@@ -1643,7 +1775,9 @@ class NSGA2Optimizer:
     def _evaluate_population(self, population: List[Individual]) -> None:
         """AnalogRF-IR internal documentation."""
         for ind in population:
+            initial_meta = dict(ind.meta)
             objectives, violation, meta = self.evaluator.evaluate(ind.x)
+            meta.update(initial_meta)
             ind.objectives = objectives
             ind.constraints_violation = violation
             ind.feasible = (violation == 0)

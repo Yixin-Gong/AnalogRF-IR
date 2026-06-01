@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -75,6 +76,7 @@ class DiagnosticAgentLoop:
         self._environment = load_environment(config.env)
 
     def run(self) -> AgentLoopResult:
+        loop_started = time.perf_counter()
         loop_dir = Path(self.config.runs_dir) / f"agent_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         loop_dir.mkdir(parents=True, exist_ok=True)
         graph = self._build_graph()
@@ -97,6 +99,7 @@ class DiagnosticAgentLoop:
             self.emit(f"       Agent graph stopped: {final_state['stop_reason']}")
         if self._best_result is not None:
             self._final_result = self._best_result
+        self.emit(f"       [timing] agent_loop_total: {time.perf_counter() - loop_started:.2f}s")
         self._print_final_result(final_state)
         return AgentLoopResult(rounds=final_state.get("rounds", []), final_result=self._final_result)
 
@@ -122,6 +125,7 @@ class DiagnosticAgentLoop:
         return graph.compile()
 
     def _execute_main_flow_node(self, state: AgentGraphState) -> AgentGraphState:
+        node_started = time.perf_counter()
         round_index = int(state["round_index"])
         self.emit("\n" + "=" * 70)
         self.emit(f"  LangGraph node: execute_main_flow ({round_index}/{state['max_rounds']})")
@@ -135,10 +139,12 @@ class DiagnosticAgentLoop:
         ).run()
         self._final_result = result
         summary = self._round_summary(round_index, result)
+        summary["round_elapsed_sec"] = round(time.perf_counter() - node_started, 6)
         if self._is_better_summary(summary, self._best_summary):
             self._best_result = result
             self._best_summary = summary
         self._print_round_summary(summary)
+        self.emit(f"       [timing] agent.execute_main_flow.round_{round_index}: {summary['round_elapsed_sec']:.2f}s")
         return {
             "rounds": list(state.get("rounds", [])) + [summary],
             "last_design_state": str(result.artifacts.design_state),
@@ -150,6 +156,7 @@ class DiagnosticAgentLoop:
         }
 
     def _read_schema_diagnostics_node(self, state: AgentGraphState) -> AgentGraphState:
+        node_started = time.perf_counter()
         self.emit("       LangGraph node: read_schema_diagnostics")
         design_state_path = Path(state["last_design_state"])
         schema_state = self._load_design_state(design_state_path)
@@ -204,6 +211,7 @@ class DiagnosticAgentLoop:
             stop_reason = "maximum iterations reached"
         elif self._runtime_stagnation_detected(state.get("rounds", [])):
             stop_reason = "runtime stagnation: measured violations stopped improving"
+        self.emit(f"       [timing] agent.read_schema_diagnostics: {time.perf_counter() - node_started:.2f}s")
         return {
             "agent_model": agent_model,
             "last_spec_pass": bool(status.get("spec_pass", False)),
@@ -212,6 +220,7 @@ class DiagnosticAgentLoop:
         }
 
     def _execute_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
+        node_started = time.perf_counter()
         self.emit("       LangGraph node: execute_schema_command")
         schema_state = self._load_design_state(Path(state["last_design_state"]))
         round_index = int(state["round_index"])
@@ -220,6 +229,7 @@ class DiagnosticAgentLoop:
         if not application["applied_actions"]:
             if self._should_force_postprocess_rescue(state):
                 self.emit("       No schema edits were available; running one forced postprocess fallback before stopping")
+                self.emit(f"       [timing] agent.execute_schema_command: {time.perf_counter() - node_started:.2f}s")
                 return {
                     "current_schema": state["current_schema"],
                     "round_index": round_index + 1,
@@ -228,6 +238,7 @@ class DiagnosticAgentLoop:
                     "postprocess_rescue_attempted": True,
                     "stop_reason": "",
                 }
+            self.emit(f"       [timing] agent.execute_schema_command: {time.perf_counter() - node_started:.2f}s")
             return {
                 "last_tuning_application": application,
                 "stop_reason": "no automatic schema edits were available",
@@ -237,6 +248,7 @@ class DiagnosticAgentLoop:
         schema_state.to_yaml(tuned_schema, include_runtime_context=False)
         self.emit(f"       Next schema: {tuned_schema}")
         self.emit("       Adaptive policy: enabling one postprocess fallback after the applied schema edit")
+        self.emit(f"       [timing] agent.execute_schema_command: {time.perf_counter() - node_started:.2f}s")
         return {
             "current_schema": str(tuned_schema),
             "round_index": round_index + 1,
@@ -246,6 +258,7 @@ class DiagnosticAgentLoop:
         }
 
     def _llm_write_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
+        node_started = time.perf_counter()
         self.emit("       LangGraph node: llm_write_schema_command")
         design_state_path = Path(state["last_design_state"])
         schema_state = self._load_design_state(design_state_path)
@@ -257,17 +270,22 @@ class DiagnosticAgentLoop:
                 "       Skipped LLM request: constrained optimizer already selected "
                 f"{len(selected)} admissible action(s)"
             )
+            fast_command.setdefault("llm_planner", {})["elapsed_sec"] = round(time.perf_counter() - node_started, 6)
+            self.emit(f"       [timing] agent.llm_write_schema_command.fast_path: {time.perf_counter() - node_started:.2f}s")
             return {
                 "last_tool_command": fast_command,
                 "llm_planner": fast_command.get("llm_planner", {}),
             }
         planner = DeepSeekSchemaPlanner(self.llm_config)
+        planner_started = time.perf_counter()
         result = planner.write_command(
             schema_state,
             round_index=int(state["round_index"]),
             agent_model=state.get("agent_model", {}),
         )
+        planner_elapsed = time.perf_counter() - planner_started
         command = result.command
+        command.setdefault("llm_planner", {})["elapsed_sec"] = round(planner_elapsed, 6)
         schema_state.to_yaml(design_state_path, include_runtime_context=False)
         self.emit(
             "       Wrote schema command: "
@@ -276,8 +294,10 @@ class DiagnosticAgentLoop:
         )
         self.emit(
             "       LLM planner: "
-            f"{self.llm_config.provider}/{self.llm_config.model} status={result.status} reason={result.reason}"
+            f"{self.llm_config.provider}/{self.llm_config.model} status={result.status} "
+            f"elapsed={planner_elapsed:.2f}s reason={result.reason}"
         )
+        self.emit(f"       [timing] agent.llm_write_schema_command: {time.perf_counter() - node_started:.2f}s")
         return {
             "last_tool_command": command,
             "llm_planner": command.get("llm_planner", {}),
@@ -420,6 +440,7 @@ class DiagnosticAgentLoop:
             ],
             "postprocess_decision": result.flow_meta.get("postprocess_decision", {}),
             "postprocess_event_count": len(result.flow_meta.get("postprocess", []) or []),
+            "flow_timing": result.flow_meta.get("timing", {}),
         }
 
     @staticmethod
@@ -459,6 +480,14 @@ class DiagnosticAgentLoop:
         self.emit(f"         spec_pass: {summary['spec_pass']}")
         self.emit(f"         failed_targets: {summary['failed_targets']}")
         self.emit(f"         measured_violation_score: {summary.get('measured_violation_score')}")
+        if summary.get("round_elapsed_sec") is not None:
+            self.emit(f"         round_elapsed: {float(summary.get('round_elapsed_sec') or 0.0):.2f}s")
+        slowest = ((summary.get("flow_timing", {}) or {}).get("slowest_stage", {}) or {})
+        if slowest:
+            self.emit(
+                "         slowest_flow_stage: "
+                f"{slowest.get('stage')}={float(slowest.get('elapsed_sec', 0.0) or 0.0):.2f}s"
+            )
         for action in summary["top_actions"][:5]:
             self.emit(
                 "         tuning candidate: "
@@ -508,8 +537,8 @@ def _summary_rank(summary: dict[str, Any]) -> tuple[float, float, float]:
     failed_count = len(summary.get("failed_targets", []) or [])
     return (
         0.0 if summary.get("spec_pass", False) else 1.0,
-        float(failed_count),
         best_loss,
+        float(failed_count),
     )
 
 

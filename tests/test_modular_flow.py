@@ -3,6 +3,8 @@ import json
 import os
 import re
 
+import numpy as np
+
 from asir.capabilities import detect_circuit_capabilities
 from core.compensation import has_miller_rc_compensation
 from asir.profiles import select_circuit_profile
@@ -28,6 +30,7 @@ from flow.state_update import apply_optimizer_meta_to_state
 from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
 from netlist.generator import generate_netlist
+from optimizer.initialization import build_topology_guided_initial_points
 from optimizer.nsga2 import CircuitEvaluator
 from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter, _compact_tuning_action
@@ -381,6 +384,70 @@ def test_cascode_bias_candidates_are_topology_guided_initial_searches():
     assert all(0.30 <= item["vbias_tail"] <= 0.75 for item in telescopic_guided)
     assert all(0.45 <= item["vbias_ncas"] <= 0.90 for item in telescopic_guided)
     assert all(0.35 <= item["vbias_pcas"] <= 0.80 for item in telescopic_guided)
+
+
+def test_optimizer_injects_topology_guided_initial_points():
+    folded = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    folded_eval = CircuitEvaluator(folded, create_pygmid_adapter())
+    folded_bounds = np.array(folded_eval.bounds)
+    folded_base = np.array([
+        dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max)
+        for dv in folded_eval.encoded_design_variables
+    ])
+
+    folded_points = build_topology_guided_initial_points(
+        folded_eval,
+        folded_bounds,
+        base=folded_base,
+        max_points=8,
+        rng=np.random.RandomState(7),
+    )
+    m6_l_idx = next(
+        idx for idx, dv in enumerate(folded_eval.encoded_design_variables)
+        if dv.device == "M6" and dv.variable == "L"
+    )
+    i_tail_idx = next(
+        idx for idx, dv in enumerate(folded_eval.encoded_design_variables)
+        if dv.device == "" and dv.variable == "I_tail"
+    )
+
+    assert folded_points
+    assert any(point[m6_l_idx] > folded_base[m6_l_idx] for point in folded_points)
+    assert any(point[i_tail_idx] > folded_base[i_tail_idx] for point in folded_points)
+    assert all(np.all(point >= folded_bounds[:, 0]) and np.all(point <= folded_bounds[:, 1]) for point in folded_points)
+
+    two_stage = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    two_eval = CircuitEvaluator(two_stage, create_pygmid_adapter())
+    two_bounds = np.array(two_eval.bounds)
+    two_base = np.array([
+        dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max)
+        for dv in two_eval.encoded_design_variables
+    ])
+    two_points = build_topology_guided_initial_points(
+        two_eval,
+        two_bounds,
+        base=two_base,
+        max_points=8,
+        rng=np.random.RandomState(8),
+    )
+    stage2_current_idx = next(
+        idx for idx, dv in enumerate(two_eval.encoded_design_variables)
+        if dv.device == "" and dv.variable == "I_stage2"
+    )
+    cc_idx = next(
+        idx for idx, dv in enumerate(two_eval.encoded_design_variables)
+        if dv.device == "" and dv.variable == "Cc"
+    )
+
+    assert two_points
+    assert any(point[stage2_current_idx] > two_base[stage2_current_idx] for point in two_points)
+    assert any(point[cc_idx] < two_base[cc_idx] for point in two_points)
 
 
 def test_uncompensated_two_stage_does_not_trigger_rc_logic(tmp_path):
@@ -992,6 +1059,76 @@ def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
     assert any(action["knob"] == "M1.gm_id" and action["priority"] == "primary" for action in gain_failure["actions"])
 
 
+def test_gain_only_failure_prioritizes_rout_length_actions(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    result = SimulationResult(
+        success=True,
+        return_code=0,
+        measurements={
+            "dc_gain_db": 20.0,
+            "unity_gain_bandwidth": 8.0e7,
+            "phase_margin": 63.0,
+            "slew_rate": 5.0e7,
+            "output_swing": 0.82,
+            "saturation_margin": 0.12,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "total_power": 5.0e-5,
+        },
+    )
+    best_meta = {
+        "performance": {
+            "dc_gain": 20.0,
+            "unity_gain_bandwidth": 8.0e7,
+            "phase_margin": 63.0,
+            "slew_rate": 5.0e7,
+            "output_swing": 0.82,
+            "saturation_margin": 0.12,
+            "icmr_min": 0.63,
+            "icmr_max": 1.26,
+            "power": 5.0e-5,
+        },
+        "decoded": {"__global__": {}},
+        "loss_breakdown": {"gain_deficit": 1.0},
+    }
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {"__global__": {}},
+            "transistor_params": {
+                "M1": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M2": {"gm": 3.0e-4, "gds": 5.0e-6, "id": 2.0e-5, "vds": 0.53, "vdsat": 0.08, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 4.0e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M4": {"gm": 2.0e-4, "gds": 3.5e-5, "id": 2.0e-5, "vds": 0.51, "vdsat": 0.20, "region": "saturation"},
+                "M5": {"gm": 3.0e-4, "gds": 8.0e-5, "id": 4.0e-5, "vds": 0.15, "vdsat": 0.12, "region": "saturation"},
+            },
+        },
+    )
+
+    artifacts = ArtifactWriter(tmp_path).write(
+        state=state,
+        best_meta=best_meta,
+        sim_result=result,
+        iteration=6,
+        netlist_str="* netlist\n.end\n",
+        flow_meta={"source_kind": "schema", "options": {}},
+    )
+    causal = load_yaml_mapping(artifacts.design_state)["diagnostics"]["causal_diagnostics"]
+    gain_failure = next(item for item in causal["attribution_guided_tuning"]["by_failure"] if item["metric"] == "dc_gain")
+    length_actions = [
+        action
+        for action in gain_failure["actions"]
+        if action["direction"] == "increase" and action["knob"].endswith(".L")
+    ]
+
+    assert length_actions
+    policy_actions = [action for action in length_actions if action.get("gain_only_ro_policy")]
+    assert policy_actions
+    assert all(action["priority"] == "primary" for action in policy_actions)
+    assert all(action["min_step_fraction"] >= 0.14 for action in policy_actions)
+    assert all(action["max_step_fraction"] >= 0.30 for action in policy_actions)
+
+
 def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml"), default_environment())
     result = SimulationResult(
@@ -1132,6 +1269,75 @@ def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
     assert effect["violation_reduction"] > 0
 
 
+def test_spice_intervention_model_keeps_usable_warning_measurements(tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    spec_model = SpecRegistry().select(state)
+    base_measurements = {
+        "dc_gain_db": 20.0,
+        "unity_gain_bandwidth": 8.0e7,
+        "phase_margin": 62.0,
+        "slew_rate": 5.0e7,
+        "output_swing": 0.75,
+        "saturation_margin": 0.12,
+        "total_power": 5.0e-5,
+    }
+    target_status = {
+        name: spec_model.target_status(name, target, base_measurements, {})
+        for name, target in state.targets.items()
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "gain_01_M3_L_increase",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "primary",
+                        "knob": "M3.L",
+                        "apply_to": ["M3.L", "M4.L"],
+                        "direction": "increase",
+                        "suggested_unclipped_value": 6.0e-7,
+                        "expected_effect": {"dc_gain": "increase", "unity_gain_bandwidth": "may decrease"},
+                    }
+                ],
+            }
+        ]
+    }
+
+    class WarningInterventionSim:
+        def run(self, _netlist, work_dir=None, include_transient=False):
+            return SimulationResult(
+                success=False,
+                return_code=0,
+                measurements={
+                    "dc_gain_db": 26.0,
+                    "unity_gain_bandwidth": 6.0e7,
+                    "phase_margin": 62.0,
+                    "slew_rate": 4.0e7,
+                    "output_swing": 0.75,
+                    "saturation_margin": 0.12,
+                    "total_power": 5.0e-5,
+                },
+            )
+
+    model = build_spice_intervention_model(
+        state=state,
+        sim=WarningInterventionSim(),
+        work_dir=tmp_path,
+        spec_model=spec_model,
+        target_status=target_status,
+        tuning=tuning,
+        max_actions=1,
+    )
+    effect = model["action_effects"][0]
+
+    assert effect["status"] == "ok"
+    assert effect["uncertainty"] == 0.25
+    assert effect["delta_violation_vector"]["dc_gain"] < 0.0
+
+
 def test_constrained_optimizer_selects_action_with_best_local_model_support():
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
     target_status = {
@@ -1216,6 +1422,68 @@ def test_constrained_optimizer_selects_action_with_best_local_model_support():
     assert optimizer["selected_actions"][0]["action_id"] == "good_Cc_decrease"
     assert optimized_tuning["decision_model"]["selected_action_ids"] == ["good_Cc_decrease"]
     assert command["args"]["selected_actions"][0]["action_id"] == "good_Cc_decrease"
+
+
+def test_constrained_optimizer_downweights_advisory_targets_for_action_authority():
+    target_status = {
+        "dc_gain": {
+            "status": "fail",
+            "value": 44.9,
+            "min": 45.0,
+            "max": None,
+            "priority": 1,
+            "counts_for_pass": True,
+        },
+        "saturation_margin": {
+            "status": "fail",
+            "value": -0.02,
+            "min": 0.01,
+            "max": None,
+            "priority": 3,
+            "counts_for_pass": False,
+        },
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "gain_L_probe",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "primary",
+                        "knob": "M6.L",
+                        "apply_to": ["M6.L", "M7.L"],
+                        "direction": "increase",
+                        "expected_effect": {"dc_gain": "increase"},
+                    }
+                ],
+            }
+        ]
+    }
+    intervention_model = {
+        "base_violation_vector": {"dc_gain": 0.08, "saturation_margin": 3.0},
+        "action_effects": [
+            {
+                "action_id": "gain_L_probe",
+                "status": "ok",
+                "source": "spice_small_perturbation",
+                "delta_violation_vector": {"dc_gain": -0.06, "saturation_margin": 0.5},
+                "uncertainty": 0.1,
+            }
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(
+        tuning=tuning,
+        target_status=target_status,
+        intervention_model=intervention_model,
+    )
+
+    assert optimizer["status"] == "ok"
+    assert optimizer["selected_actions"][0]["action_id"] == "gain_L_probe"
+    assert optimizer["selected_actions"][0]["objective_delta"] < 0
 
 
 def test_guarded_action_requires_passing_spice_evidence_gate():
@@ -1787,6 +2055,50 @@ def test_cli_config_file_loads_defaults_and_cli_overrides(tmp_path):
     assert args.runs_dir == "runs/from_config"
 
 
+def test_ngspice_run_marks_missing_required_transient_as_failed(monkeypatch):
+    sim = NgspiceSimulator(timeout_sec=30)
+
+    monkeypatch.setattr(
+        sim,
+        "_run_ac_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=True,
+            return_code=0,
+            measurements={"dc_gain_db": 40.0, "unity_gain_bandwidth": 2.0e7, "phase_margin": 65.0},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_dc_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=True,
+            return_code=0,
+            measurements={"total_power": 1.0e-4, "output_swing": 0.8, "saturation_margin": 0.05},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_icmr_pass",
+        lambda _netlist, _work_dir: SimulationResult(success=True, return_code=0, measurements={}),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_tran_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=False,
+            return_code=-1,
+            raw_stderr="Timeout after 30s",
+        ),
+    )
+
+    result = sim.run("* ota\n.end", include_transient=True)
+
+    assert result.success is False
+    assert result.return_code == 1
+    assert result.pass_status["tran"]["missing_measurements"] == ["slew_rate"]
+    assert "Timeout after 30s" in result.pass_status["tran"]["stderr_tail"]
+
+
 def test_ablation_plan_builds_case_seed_schema_jobs(tmp_path):
     plan = {
         "base_config": "configs/default.yaml",
@@ -2280,6 +2592,52 @@ def test_optimizer_and_netlist_include_slew_rate():
     assert "swing_deficit" in meta["loss_breakdown"]
     assert "icmr_min_excess" not in meta["loss_breakdown"]
     assert ".tran" in netlist
+
+
+def test_optimizer_loss_uses_pass_oriented_targets_and_pm_window():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [
+        dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max)
+        for dv in evaluator.encoded_design_variables
+    ]
+    _obj, _violation, meta = evaluator.evaluate(x)
+    tp = meta["transistor_params"]
+
+    _loss, failing_breakdown = evaluator._compute_loss(
+        {
+            "dc_gain": 20.0,
+            "unity_gain_bandwidth": 1.0e8,
+            "phase_margin": 80.0,
+            "slew_rate": 6.0e7,
+            "output_swing": 0.7,
+            "saturation_margin": 0.02,
+            "power": 1.0e-4,
+        },
+        tp,
+    )
+    _loss_pass, passing_breakdown = evaluator._compute_loss(
+        {
+            "dc_gain": 35.0,
+            "unity_gain_bandwidth": 4.0e7,
+            "phase_margin": 62.0,
+            "slew_rate": 3.0e7,
+            "output_swing": 0.7,
+            "saturation_margin": 0.02,
+            "power": 1.0e-4,
+        },
+        tp,
+    )
+
+    assert failing_breakdown["target:dc_gain:min"] > 0
+    assert failing_breakdown["target_window:phase_margin"] > 0
+    assert failing_breakdown["target_tradeoff:gain_shortfall_unity_gain_bandwidth_excess"] > 0
+    assert "target:dc_gain:min" not in passing_breakdown
+    assert "target_window:phase_margin" not in passing_breakdown
+    assert "target_tradeoff:gain_shortfall_unity_gain_bandwidth_excess" not in passing_breakdown
 
 
 def test_comparator_estimator_reports_extended_metrics():

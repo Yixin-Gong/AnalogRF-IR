@@ -5,6 +5,8 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--run", action="store_true", help="Execute jobs; default is dry-run")
     parser.add_argument("--keep-going", action="store_true", help="Continue after a failing job")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Maximum number of ablation jobs to execute concurrently when --run is set",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Reuse an existing result.json under a job runs_dir instead of rerunning it",
+    )
     return parser.parse_args(argv)
 
 
@@ -69,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         "job_count": len(jobs),
         "jobs": [],
     }
+    prepared_jobs: list[tuple[dict[str, Any], list[str], dict[str, Any]]] = []
     for job in jobs:
         config_path = write_yaml_mapping(job["config_path"], job["config"])
         command = [args.python, str(ROOT / "main.py"), "--config", str(config_path)]
@@ -84,22 +98,73 @@ def main(argv: list[str] | None = None) -> int:
             "command": command,
             "status": "pending",
         }
-        print(" ".join(command))
-        if args.run:
-            result = subprocess.run(command, cwd=str(ROOT), check=False)
-            record["return_code"] = result.returncode
-            record["status"] = "passed" if result.returncode == 0 else "failed"
-            record["summary"] = _latest_result_summary(job["runs_dir"])
-            manifest["jobs"].append(record)
-            _write_manifest(output_dir, manifest)
-            if result.returncode != 0 and not args.keep_going:
-                return result.returncode
-        else:
+        prepared_jobs.append((job, command, record))
+        if not args.run:
             record["status"] = "dry_run"
             manifest["jobs"].append(record)
+    if args.run:
+        max_workers = max(1, int(args.jobs or 1))
+        if max_workers == 1:
+            for job, command, record in prepared_jobs:
+                finished = _execute_job(job, command, record, skip_existing=args.skip_existing)
+                manifest["jobs"].append(finished)
+                _write_manifest(output_dir, manifest)
+                if finished.get("return_code", 0) != 0 and not args.keep_going:
+                    _write_summary_table(output_dir, manifest)
+                    return int(finished.get("return_code") or 1)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_execute_job, job, command, record, skip_existing=args.skip_existing): job["name"]
+                    for job, command, record in prepared_jobs
+                }
+                failed_return_code = 0
+                for future in as_completed(futures):
+                    finished = future.result()
+                    manifest["jobs"].append(finished)
+                    _write_manifest(output_dir, manifest)
+                    if finished.get("return_code", 0) != 0 and not args.keep_going:
+                        failed_return_code = int(finished.get("return_code") or 1)
+                        for pending in futures:
+                            pending.cancel()
+                        break
+                if failed_return_code:
+                    _write_summary_table(output_dir, manifest)
+                    return failed_return_code
     _write_manifest(output_dir, manifest)
     _write_summary_table(output_dir, manifest)
     return 0
+
+
+def _execute_job(
+    job: dict[str, Any],
+    command: list[str],
+    record: dict[str, Any],
+    *,
+    skip_existing: bool,
+) -> dict[str, Any]:
+    print(" ".join(command), flush=True)
+    started = time.perf_counter()
+    record["started_at"] = datetime.now().isoformat()
+    existing_summary = _latest_result_summary(job["runs_dir"]) if skip_existing else {}
+    if existing_summary:
+        record["return_code"] = 0
+        record["status"] = "skipped_existing"
+        record["summary"] = existing_summary
+        record["elapsed_sec"] = round(time.perf_counter() - started, 6)
+        print(f"[ablation timing] {job['name']} skipped_existing elapsed={record['elapsed_sec']:.2f}s", flush=True)
+        return record
+    result = subprocess.run(command, cwd=str(ROOT), check=False)
+    record["return_code"] = result.returncode
+    record["status"] = "passed" if result.returncode == 0 else "failed"
+    record["summary"] = _latest_result_summary(job["runs_dir"])
+    record["elapsed_sec"] = round(time.perf_counter() - started, 6)
+    print(
+        f"[ablation timing] {job['name']} status={record['status']} "
+        f"elapsed={record['elapsed_sec']:.2f}s",
+        flush=True,
+    )
+    return record
 
 
 def build_jobs(
@@ -203,7 +268,7 @@ def _write_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def _write_summary_table(output_dir: Path, manifest: dict[str, Any]) -> None:
-    lines = ["case,schema,seed,status,spec_pass,best_loss,failed_targets,unverified_targets,runs_dir"]
+    lines = ["case,schema,seed,status,spec_pass,best_loss,failed_targets,unverified_targets,elapsed_sec,runs_dir"]
     for job in manifest.get("jobs", []):
         summary = job.get("summary", {}) or {}
         lines.append(
@@ -217,6 +282,7 @@ def _write_summary_table(output_dir: Path, manifest: dict[str, Any]) -> None:
                     str(summary.get("best_loss", "")),
                     "|".join(str(item) for item in summary.get("failed_targets", []) or []),
                     "|".join(str(item) for item in summary.get("unverified_targets", []) or []),
+                    str(job.get("elapsed_sec", "")),
                     str(job.get("runs_dir", "")),
                 ]
             )

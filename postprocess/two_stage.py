@@ -766,6 +766,9 @@ def tune_two_stage_compensation(
                 (1.15, 1.20, 1.05),
                 (1.15, 1.20, 1.10),
                 (1.20, 1.25, 1.10),
+                (1.20, 1.40, 1.15),
+                (1.25, 1.60, 1.20),
+                (1.30, 1.80, 1.25),
                 (1.08, 1.15, 1.05),
                 (1.12, 1.25, 1.10),
             )
@@ -794,9 +797,9 @@ def tune_two_stage_compensation(
             return best
         if gain < max(0.0, gain_min - 8.0):
             return best
-        if bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < 0.85 * bw_min:
+        if bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < 0.75 * bw_min:
             return best
-        if pm_min > 0.0 and float(meas.get("phase_margin", 0.0) or 0.0) < pm_min:
+        if pm_min > 0.0 and float(meas.get("phase_margin", 0.0) or 0.0) < max(55.0, pm_min - 5.0):
             return best
         if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
             return best

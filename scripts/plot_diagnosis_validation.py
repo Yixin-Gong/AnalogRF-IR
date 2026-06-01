@@ -13,12 +13,7 @@ import seaborn as sns
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ROOTS = [
-    ROOT / "runs" / "llm_full_retarget_seed10_max30",
-    ROOT / "runs" / "folded_topology_guided_seed10_current",
-    ROOT / "runs" / "telescopic_topology_guided_seed10_fast_final",
-    ROOT / "runs" / "two_stage_gain57_ugbw20_seed10_current",
-]
+DEFAULT_MANIFEST = ROOT / "runs" / "ablations_ihp130_ota_unified_seed1_10" / "manifest.json"
 DEFAULT_OUTPUT_DIRS = [
     ROOT / "docs" / "assets",
     ROOT / "paper" / "date" / "figures",
@@ -40,7 +35,9 @@ TOPOLOGY_LABELS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot diagnosis validation artifacts")
-    parser.add_argument("--root", action="append", default=[], help="Run root to scan; may repeat")
+    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="Unified ablation manifest JSON")
+    parser.add_argument("--case", action="append", default=[], help="Manifest case to include; may repeat")
+    parser.add_argument("--root", action="append", default=[], help="Ad-hoc run root to scan; may repeat")
     parser.add_argument("--out-dir", action="append", default=[], help="Output directory; may repeat")
     parser.add_argument("--format", action="append", default=[], choices=("png", "pdf", "svg"))
     parser.add_argument("--write-csv", action="store_true", help="Also write the extracted validation records")
@@ -50,11 +47,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    roots = [Path(p).resolve() for p in args.root] if args.root else DEFAULT_ROOTS
+    sources = _run_sources(args)
     out_dirs = [Path(p).resolve() for p in args.out_dir] if args.out_dir else DEFAULT_OUTPUT_DIRS
     formats = args.format or ["png"]
 
-    actions, selected, overlaps = collect_records(roots)
+    actions, selected, overlaps = collect_records(sources)
     if actions.empty and selected.empty:
         raise SystemExit("No causal_diagnostics.json files with intervention records were found.")
 
@@ -76,21 +73,24 @@ def main() -> int:
     return 0
 
 
-def collect_records(roots: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def collect_records(sources: list[dict[str, Any]]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     action_rows: list[dict[str, Any]] = []
     selected_rows: list[dict[str, Any]] = []
     overlap_rows: list[dict[str, Any]] = []
 
-    for root in roots:
+    for source in sources:
+        root = Path(source["root"])
         for path in sorted(root.glob("**/iter_*/causal_diagnostics.json")):
             data = _load_json(path)
             run_name = path.parents[1].name
-            method_id = run_name.split("__", 1)[0]
+            method_id = str(source.get("case") or run_name.split("__", 1)[0])
             if method_id not in METHOD_LABELS:
                 continue
             method = METHOD_LABELS.get(method_id, method_id.replace("_", " ").title())
             scope = data.get("scope", {}) if isinstance(data, dict) else {}
             topology_id = str(scope.get("topology", "unknown"))
+            if topology_id == "unknown" and source.get("schema"):
+                topology_id = Path(str(source["schema"])).stem
             topology = TOPOLOGY_LABELS.get(topology_id, topology_id.replace("_", " ").title())
             iteration = path.parent.name.replace("iter_", "")
 
@@ -171,6 +171,29 @@ def collect_records(roots: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
         pd.DataFrame.from_records(selected_rows),
         pd.DataFrame.from_records(overlap_rows),
     )
+
+
+def _run_sources(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.root:
+        return [{"root": Path(path).resolve(), "case": ""} for path in args.root]
+    manifest_path = Path(args.manifest)
+    if not manifest_path.is_absolute():
+        manifest_path = ROOT / manifest_path
+    manifest = _load_json(manifest_path)
+    selected_cases = set(args.case or METHOD_LABELS)
+    sources: list[dict[str, Any]] = []
+    for job in manifest.get("jobs", []) or []:
+        case = str(job.get("case", ""))
+        if case not in selected_cases:
+            continue
+        runs_dir = Path(str(job.get("runs_dir", "")))
+        if not runs_dir.is_absolute():
+            runs_dir = ROOT / runs_dir
+        if runs_dir.exists():
+            sources.append({"root": runs_dir, "case": case, "schema": job.get("schema", "")})
+    if not sources:
+        raise SystemExit(f"No diagnosis run roots found in manifest {manifest_path}")
+    return sources
 
 
 def plot_validation(actions: pd.DataFrame, selected: pd.DataFrame, overlaps: pd.DataFrame) -> plt.Figure:
