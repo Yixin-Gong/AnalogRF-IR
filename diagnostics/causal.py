@@ -1268,6 +1268,7 @@ def _tuning_actions_for_cause(state: DesignState, metric: str, cause: CandidateC
                     priority="primary",
                 )
             ]
+            actions.extend(_single_stage_headroom_gain_composite_actions(state, metric, node, cause.score * 1.25))
             actions.extend(_companion_gain_ro_actions(state, metric, node, dev_id, cause.score))
             return actions + _bias_voltage_tuning_actions(
                 state,
@@ -1450,7 +1451,8 @@ def _gm_tuning_actions(state: DesignState, metric: str, dev_id: str, role: str, 
 
 def _headroom_tuning_actions(state: DesignState, metric: str, dev_id: str, cause_node: str, score: float) -> list[dict[str, Any]]:
     role = _role_for_cause_node(state, cause_node)
-    actions = [
+    actions = _single_stage_headroom_gain_composite_actions(state, metric, cause_node, score * 1.18)
+    actions.extend([
         _knob_action(
             state,
             metric=metric,
@@ -1465,7 +1467,7 @@ def _headroom_tuning_actions(state: DesignState, metric: str, dev_id: str, cause
             tradeoffs=["Device width and capacitance can increase.", "Do not push into excessive weak inversion if speed is already marginal."],
             priority="primary",
         )
-    ]
+    ])
     current_name = _current_variable_for_role(role)
     if current_name:
         actions.append(
@@ -1494,6 +1496,104 @@ def _headroom_tuning_actions(state: DesignState, metric: str, dev_id: str, cause
         )
     )
     return actions
+
+
+def _single_stage_headroom_gain_composite_actions(
+    state: DesignState,
+    metric: str,
+    cause_node: str,
+    score: float,
+) -> list[dict[str, Any]]:
+    architecture = (state.topology.architecture or "").lower()
+    roles = {(dev.role or "").lower() for dev in state.topology.devices}
+    if "two" in architecture or "cascode" in architecture:
+        return []
+    if not {"input_pair", "current_mirror_load", "tail_current_source"}.issubset(roles):
+        return []
+
+    input_ids = [dev.id for dev in state.topology.devices if (dev.role or "").lower() == "input_pair"]
+    load_ids = [dev.id for dev in state.topology.devices if (dev.role or "").lower() == "current_mirror_load"]
+    tail_id = next((dev.id for dev in state.topology.devices if (dev.role or "").lower() == "tail_current_source"), "")
+    required_knobs = [
+        *(f"{dev_id}.gm_id" for dev_id in input_ids),
+        *(f"{dev_id}.L" for dev_id in input_ids),
+        *(f"{dev_id}.L" for dev_id in load_ids),
+        f"{tail_id}.gm_id",
+        f"{tail_id}.L",
+        "global.I_tail",
+        "global.vbias",
+    ]
+    if len(input_ids) < 2 or len(load_ids) < 2 or not tail_id:
+        return []
+    if not all(_knob_has_design_variable(state, knob) for knob in required_knobs):
+        return []
+
+    values: dict[str, float] = {}
+
+    def set_scaled(knob: str, scale: float, *, quantile_floor: float | None = None) -> None:
+        device, variable = _parse_knob_name(knob)
+        current = _current_variable_value(state, device, variable)
+        bounds = _variable_range(state, device, variable)
+        if current is None or bounds is None:
+            return
+        target = float(current) * float(scale)
+        if quantile_floor is not None:
+            target = max(target, _range_quantile_for_bounds(bounds, quantile_floor))
+        values[knob] = round(_clip_to_bounds(target, bounds), _value_precision(variable))
+
+    for dev_id in input_ids:
+        set_scaled(f"{dev_id}.gm_id", 1.08)
+        set_scaled(f"{dev_id}.L", 1.45, quantile_floor=0.58)
+    for dev_id in load_ids:
+        set_scaled(f"{dev_id}.L", 1.10, quantile_floor=0.86)
+    set_scaled(f"{tail_id}.gm_id", 1.10)
+    set_scaled(f"{tail_id}.L", 1.50, quantile_floor=0.42)
+    set_scaled("global.I_tail", 0.94)
+    set_scaled("global.vbias", 0.95)
+
+    if len(values) < len(required_knobs):
+        return []
+    current = {knob: _current_variable_value(state, *_parse_knob_name(knob)) for knob in values}
+    if all(value is not None and abs(float(values[knob]) - float(value)) <= _no_op_tolerance(knob) for knob, value in current.items()):
+        return []
+
+    return [
+        {
+            "metric": metric,
+            "cause_node": cause_node,
+            "action_class": "operating_point_headroom_gain",
+            "score": round(float(score), 4),
+            "priority": "primary",
+            "knob": "global.vbias",
+            "apply_to": list(values),
+            "direction": "set",
+            "current_value": current,
+            "suggested_next_value": None,
+            "per_knob_values": values,
+            "range": {knob: _variable_range(state, *_parse_knob_name(knob)) for knob in values},
+            "limit_status": "topology_guided_headroom_gain_search",
+            "step_hint": "apply one topology-guided OP/gain candidate; accept only if local SPICE reduces the formal objective",
+            "rationale": (
+                "Single-stage current-mirror OTA gain failures often need coupled load-ro, input-gm, "
+                "tail-headroom, and bias-current movement; evaluating the knobs separately can reject "
+                "a useful joint move."
+            ),
+            "expected_effect": {
+                "dc_gain": "increase if load ro and saturation headroom improve together",
+                "unity_gain_bandwidth": "preserve through input gm/ID while current is reduced",
+                "output_swing": "increase if tail and load headroom recover",
+                "saturation_margin": "improve through lower tail current and longer tail device",
+                "power": "decrease with lower tail current",
+            },
+            "tradeoffs": [
+                "The action is topology-specific and must be admitted by local SPICE evidence.",
+                "Over-aggressive current reduction can reduce slew rate.",
+            ],
+            "schema_variable_present": True,
+            "auto_range_expansion_allowed": False,
+            "target_formula": "single_stage_topology_guided_headroom_gain_search",
+        }
+    ]
 
 
 def _capacitance_tuning_actions(state: DesignState, metric: str, dev_id: str, cause_node: str, score: float) -> list[dict[str, Any]]:
@@ -1846,9 +1946,30 @@ def _range_quantile(state: DesignState, variable: str, quantile: float) -> float
     if not bounds:
         vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
         return float(quantile) * vdd
+    return _range_quantile_for_bounds(bounds, quantile)
+
+
+def _range_quantile_for_bounds(bounds: dict[str, Any], quantile: float) -> float:
     lo = float(bounds["min"])
     hi = float(bounds["max"])
     return _clip_to_bounds(lo + float(quantile) * (hi - lo), bounds)
+
+
+def _value_precision(variable: str) -> int:
+    if variable in {"gm_id", "vbias", "vbias_tail", "vbias_ncas", "vbias_pcas", "vbias_ptail"}:
+        return 4
+    if variable.startswith("I_"):
+        return 12
+    return 15
+
+
+def _no_op_tolerance(knob: str) -> float:
+    _, variable = _parse_knob_name(knob)
+    if variable.startswith("I_"):
+        return 1e-9
+    if variable == "L":
+        return 1e-12
+    return 1e-4
 
 
 def _knob_action(
@@ -2473,6 +2594,19 @@ def _gm_for_role(state: DesignState, role: str) -> float | None:
 
 def _format_knob(device: str, variable: str) -> str:
     return f"{device}.{variable}" if device else f"global.{variable}"
+
+
+def _parse_knob_name(knob: str) -> tuple[str, str]:
+    if knob.startswith("global."):
+        return "", knob.split(".", 1)[1]
+    if "." not in knob:
+        return "", knob
+    device, variable = knob.split(".", 1)
+    return device, variable
+
+
+def _knob_has_design_variable(state: DesignState, knob: str) -> bool:
+    return _primary_design_variable(state, *_parse_knob_name(knob)) is not None
 
 
 def _design_variables_for_knob(state: DesignState, device: str, variable: str) -> list[Any]:

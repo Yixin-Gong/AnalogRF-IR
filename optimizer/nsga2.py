@@ -18,6 +18,8 @@ from pygmid.adapter import PygmidAdapter, create_pygmid_adapter
 
 _SATURATION_MARGIN_V = 0.01
 _SATURATION_PENALTY_SCALE = 4.0e3
+_HARD_TARGET_FAIL_PENALTY = 2.5e2
+_HARD_TARGET_VIOLATION_PENALTY = 7.5e2
 _DYNAMIC_ROLE_TOKENS = ("reset", "precharge", "equalize", "switch")
 
 
@@ -134,6 +136,10 @@ class CircuitEvaluator:
 
         # Internal implementation note.
         total_loss, loss_breakdown = self._compute_loss(performance, transistor_params)
+        hard_failures, hard_violation_score = _hard_target_violation_summary(
+            performance,
+            self.schema.targets,
+        )
 
         # Internal implementation note.
         violation = self._check_constraints(x, decoded)
@@ -149,6 +155,8 @@ class CircuitEvaluator:
             "loss_breakdown": loss_breakdown,
             "total_loss": total_loss,
             "constraint_violation": violation,
+            "hard_target_failures": hard_failures,
+            "hard_target_violation_score": hard_violation_score,
         }
 
         return np.array([total_loss]), violation, meta
@@ -1269,6 +1277,17 @@ class CircuitEvaluator:
             target_total, target_breakdown = _target_pass_objective(perf, self.schema.targets)
             total += target_total
             breakdown.update(target_breakdown)
+            hard_failures, hard_violation_score = _hard_target_violation_summary(
+                perf,
+                self.schema.targets,
+            )
+            if hard_failures > 0:
+                count_penalty = _HARD_TARGET_FAIL_PENALTY * hard_failures
+                violation_penalty = _HARD_TARGET_VIOLATION_PENALTY * hard_violation_score
+                total += count_penalty + violation_penalty
+                breakdown["target_gate:hard_fail_count"] = count_penalty
+                if hard_violation_score > 0.0:
+                    breakdown["target_gate:hard_violation"] = violation_penalty
 
         # Internal implementation note.
         proc = self.schema.process
@@ -1497,6 +1516,39 @@ def _target_pass_objective(perf: Dict[str, float], targets: Dict[str, Any]) -> t
     return total, breakdown
 
 
+def _hard_target_violation_summary(
+    perf: Dict[str, float],
+    targets: Dict[str, Any],
+    *,
+    max_priority: int = 2,
+) -> tuple[int, float]:
+    failures = 0
+    weighted_score = 0.0
+    for metric, target in targets.items():
+        if _target_priority(target) > max_priority:
+            continue
+        value = _target_metric_value(perf, metric)
+        if value is None:
+            continue
+        metric_score = 0.0
+        target_min = getattr(target, "min", None)
+        target_max = getattr(target, "max", None)
+        if target_min is not None:
+            metric_score += max(
+                0.0,
+                (float(target_min) - value) / max(abs(float(target_min)), 1e-30),
+            )
+        if target_max is not None:
+            metric_score += max(
+                0.0,
+                (value - float(target_max)) / max(abs(float(target_max)), 1e-30),
+            )
+        if metric_score > 0.0:
+            failures += 1
+            weighted_score += _target_objective_weight(_target_priority(target)) * metric_score
+    return failures, weighted_score
+
+
 def _target_metric_value(perf: Dict[str, float], metric: str) -> float | None:
     aliases = {
         "dc_gain": ("dc_gain", "dc_gain_db", "gain"),
@@ -1639,6 +1691,7 @@ class NSGA2Optimizer:
         best_x = population[best_idx].x.copy()
         best_meta = dict(population[best_idx].meta)
         best_loss = float(population[best_idx].objectives[0])
+        best_key = self._best_key(population[best_idx])
 
         # Internal implementation note.
         no_improve = 0
@@ -1661,10 +1714,12 @@ class NSGA2Optimizer:
             # Internal implementation note.
             current_best_idx = self._get_best_index(population)
             current_loss = float(population[current_best_idx].objectives[0])
+            current_key = self._best_key(population[current_best_idx])
 
-            if current_loss < best_loss - config.tol:
+            if self._best_key_improved(current_key, best_key, config.tol):
                 no_improve = 0
                 best_loss = current_loss
+                best_key = current_key
                 best_x = population[current_best_idx].x.copy()
                 best_meta = dict(population[current_best_idx].meta)
             else:
@@ -1993,12 +2048,27 @@ class NSGA2Optimizer:
         """AnalogRF-IR internal documentation."""
         best = 0
         for i in range(1, len(population)):
-            if population[i].rank < population[best].rank:
+            if self._best_key(population[i]) < self._best_key(population[best]):
                 best = i
-            elif population[i].rank == population[best].rank:
-                if np.sum(population[i].objectives) < np.sum(population[best].objectives):
-                    best = i
         return best
+
+    def _best_key(self, ind: Individual) -> tuple[float, ...]:
+        meta = ind.meta or {}
+        feasible_key = 0.0 if ind.feasible else 1.0
+        return (
+            feasible_key,
+            float(ind.constraints_violation),
+            float(meta.get("hard_target_failures", 0) or 0),
+            float(meta.get("hard_target_violation_score", 0.0) or 0.0),
+            float(ind.rank),
+            float(np.sum(ind.objectives)),
+        )
+
+    @staticmethod
+    def _best_key_improved(current: tuple[float, ...], best: tuple[float, ...], tol: float) -> bool:
+        if current[:-1] != best[:-1]:
+            return current[:-1] < best[:-1]
+        return current[-1] < best[-1] - tol
 
 
 # Internal implementation note.

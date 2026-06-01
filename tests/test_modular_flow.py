@@ -15,11 +15,13 @@ from diagnostics import (
     agent_write_policy,
     apply_optimized_action_plan,
     apply_attribution_guided_tuning,
+    build_causal_diagnostics,
     build_spice_intervention_model,
     execute_tuning_tool_commands,
     optimize_tuning_actions,
     write_tuning_tool_command,
 )
+from diagnostics.action_optimizer import _candidate_actions, _target_status_with_measured_updates
 from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object
 from flow.config import load_cli_config
 from flow.agent_loop import DiagnosticAgentLoop
@@ -31,7 +33,7 @@ from frontends.design_input import load_design_input
 from frontends.yaml_loader import build_design_state_from_yaml, load_yaml_mapping
 from netlist.generator import generate_netlist
 from optimizer.initialization import build_topology_guided_initial_points
-from optimizer.nsga2 import CircuitEvaluator
+from optimizer.nsga2 import CircuitEvaluator, Individual, NSGA2Optimizer
 from optimizer.problem import OptimizationProblem
 from outputs.artifacts import ArtifactWriter, _compact_tuning_action
 from postprocess.cascode import (
@@ -987,7 +989,7 @@ def test_causal_attribution_keeps_tail_source_out_of_direct_gain_load_path(tmp_p
     assert m3_l.range.max > 5.0e-7
     assert m3_l.initial > 5.0e-7
     assert m4_l.initial == m3_l.initial
-    assert m1_gm_id.initial > 15.0
+    assert m1_gm_id.initial == 15.0
 
 
 def test_gain_length_action_is_guarded_when_bandwidth_also_fails(tmp_path):
@@ -1129,6 +1131,32 @@ def test_gain_only_failure_prioritizes_rout_length_actions(tmp_path):
     assert all(action["max_step_fraction"] >= 0.30 for action in policy_actions)
 
 
+def test_optimizer_state_update_synchronizes_design_variable_initials():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"), default_environment())
+    m3_l = next(dv for dv in state.design_variables if dv.device == "M3" and dv.variable == "L")
+    i_tail = next(dv for dv in state.design_variables if not dv.device and dv.variable == "I_tail")
+    best_meta = {
+        "decoded": {
+            "__global__": {"I_tail": 9.0e-5, "vbias": 0.55},
+            "M1": {"gm_id": 16.0, "L": 8.0e-7},
+            "M2": {"gm_id": 16.0, "L": 8.0e-7},
+            "M3": {"gm_id": 8.0, "L": 1.5e-6},
+            "M4": {"gm_id": 8.0, "L": 1.5e-6},
+            "M5": {"gm_id": 10.0, "L": 4.0e-7},
+        },
+        "transistor_params": {
+            "M3": {"W": 10e-6, "L": 1.5e-6, "gm": 1e-4, "gds": 1e-6, "id": 4.5e-5, "vds": 0.5, "vdsat": 0.1},
+            "M4": {"W": 10e-6, "L": 1.5e-6, "gm": 1e-4, "gds": 1e-6, "id": 4.5e-5, "vds": 0.5, "vdsat": 0.1},
+        },
+    }
+
+    apply_optimizer_meta_to_state(state, best_meta)
+
+    assert m3_l.initial == 1.5e-6
+    assert i_tail.initial == 9.0e-5
+    assert state.global_parameters["I_tail"] == 9.0e-5
+
+
 def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml"), default_environment())
     result = SimulationResult(
@@ -1189,6 +1217,59 @@ def test_cascode_gain_plan_exposes_typed_bias_voltage_actions(tmp_path):
     assert all(action["direction"] == "set" for action in bias_actions)
     assert all(action["action_class"] == "operating_point_headroom" for action in bias_actions)
     assert all(action["target_formula"] == "folded_cascode_topology_guided_bias_search" for action in bias_actions)
+
+
+def test_current_mirror_gain_plan_includes_composite_headroom_gain_action():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"), default_environment())
+    apply_optimizer_meta_to_state(
+        state,
+        {
+            "decoded": {
+                "__global__": {"I_tail": 1.0e-4, "vbias": 0.52},
+                "M1": {"gm_id": 10.4, "L": 8.4e-7},
+                "M2": {"gm_id": 10.4, "L": 8.4e-7},
+                "M3": {"gm_id": 9.2, "L": 1.85e-6},
+                "M4": {"gm_id": 9.2, "L": 1.85e-6},
+                "M5": {"gm_id": 7.0, "L": 1.85e-7},
+            },
+            "transistor_params": {
+                "M1": {"gm": 6.0e-4, "gds": 2.0e-5, "id": 5.0e-5, "vds": 0.45, "vdsat": 0.20, "region": "saturation"},
+                "M2": {"gm": 6.0e-4, "gds": 2.0e-5, "id": 5.0e-5, "vds": 0.45, "vdsat": 0.20, "region": "saturation"},
+                "M3": {"gm": 2.0e-4, "gds": 3.0e-5, "id": 5.0e-5, "vds": 0.60, "vdsat": 0.24, "region": "saturation"},
+                "M4": {"gm": 2.0e-4, "gds": 3.0e-5, "id": 5.0e-5, "vds": 0.60, "vdsat": 0.24, "region": "saturation"},
+                "M5": {"gm": 1.5e-4, "gds": 5.0e-5, "id": 1.0e-4, "vds": 0.14, "vdsat": 0.19, "region": "linear"},
+            },
+        },
+    )
+    spec_model = SpecRegistry().select(state)
+    result = SimulationResult(
+        success=False,
+        return_code=1,
+        measurements={
+            "dc_gain_db": 27.5,
+            "unity_gain_bandwidth": 6.0e7,
+            "phase_margin": 70.0,
+            "slew_rate": 8.0e7,
+            "output_swing": 0.65,
+            "saturation_margin": -0.04,
+            "total_power": 1.2e-4,
+        },
+    )
+    target_status = {
+        name: spec_model.target_status(name, target, result.measurements, {})
+        for name, target in state.targets.items()
+    }
+
+    causal = build_causal_diagnostics(state, {}, result, target_status, spec_model, {"local_intervention_model": {}})
+    gain_failure = next(item for item in causal["attribution_guided_tuning"]["by_failure"] if item["metric"] == "dc_gain")
+    composite = [action for action in gain_failure["actions"] if action["action_class"] == "operating_point_headroom_gain"]
+
+    assert composite
+    action = composite[0]
+    assert action["priority"] == "primary"
+    assert action["target_formula"] == "single_stage_topology_guided_headroom_gain_search"
+    assert {"global.vbias", "global.I_tail", "M1.L", "M2.L", "M3.L", "M4.L", "M5.L"}.issubset(set(action["apply_to"]))
+    assert action["per_knob_values"]["global.I_tail"] < state.global_parameters["I_tail"]
 
 
 def test_spice_intervention_model_builds_local_A_matrix(tmp_path):
@@ -1486,6 +1567,167 @@ def test_constrained_optimizer_downweights_advisory_targets_for_action_authority
     assert optimizer["selected_actions"][0]["objective_delta"] < 0
 
 
+def test_formal_objective_delta_excludes_action_selection_penalty():
+    target_status = {
+        "dc_gain": {
+            "status": "fail",
+            "value": 44.95,
+            "min": 45.0,
+            "max": None,
+            "priority": 1,
+            "counts_for_pass": True,
+        },
+        "unity_gain_bandwidth": {
+            "status": "fail",
+            "value": 99.0e6,
+            "min": 100.0e6,
+            "max": None,
+            "priority": 1,
+            "counts_for_pass": True,
+        }
+    }
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {
+                        "action_id": "near_feasible_gain_headroom_probe",
+                        "metric": "dc_gain",
+                        "rank": 1,
+                        "priority": "primary",
+                        "action_class": "operating_point_headroom",
+                        "knob": "M3.gm_id",
+                        "apply_to": ["M3.gm_id", "M4.gm_id"],
+                        "direction": "increase",
+                        "expected_effect": {"dc_gain": "increase", "headroom": "improve"},
+                    }
+                ],
+            }
+        ]
+    }
+    intervention_model = {
+        "base_violation_vector": {"dc_gain": 0.01, "unity_gain_bandwidth": 0.01},
+        "action_effects": [
+            {
+                "action_id": "near_feasible_gain_headroom_probe",
+                "status": "ok",
+                "source": "spice_small_perturbation",
+                "delta_violation_vector": {"dc_gain": -0.006, "unity_gain_bandwidth": 0.001},
+                "uncertainty": 0.1,
+            }
+        ],
+    }
+
+    optimizer = optimize_tuning_actions(
+        tuning=tuning,
+        target_status=target_status,
+        intervention_model=intervention_model,
+    )
+    candidate = optimizer["candidate_actions"][0]
+
+    assert candidate["objective_delta"] < 0
+    assert candidate["penalized_objective_delta"] > 0
+    assert optimizer["selected_actions"][0]["action_id"] == "near_feasible_gain_headroom_probe"
+    assert optimizer["selected_actions"][0]["action_admissibility"]["passed"] is True
+
+
+def test_surrogate_only_negative_delta_is_not_auto_selected_as_admissible():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    action = {
+        "action_id": "dc_gain_01_M3_L_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "action_class": "gain_pole_tradeoff",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "increase",
+        "suggested_next_value": 5.0e-7,
+        "objective_delta": -0.01,
+        "local_model_source": "surrogate_structural_prior",
+        "action_admissibility": {"passed": True},
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_improving_combination",
+            "selected_actions": [],
+            "candidate_actions": [action],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": [action]}]},
+    }
+
+    command = write_tuning_tool_command(state, round_index=1)
+
+    assert command["args"]["selected_actions"] == []
+
+
+def test_local_intervention_budget_keeps_primary_actions_before_guarded_fill():
+    tuning = {
+        "by_failure": [
+            {
+                "metric": "dc_gain",
+                "actions": [
+                    {"action_id": "a1", "priority": "primary", "rank": 1, "knob": "global.vbias", "direction": "set"},
+                    {"action_id": "a2", "priority": "primary", "rank": 2, "knob": "M2.L", "direction": "increase"},
+                    {"action_id": "a3", "priority": "primary", "rank": 3, "knob": "M1.gm_id", "direction": "increase"},
+                    {"action_id": "a4", "priority": "primary", "rank": 4, "knob": "M4.L", "direction": "increase"},
+                    {"action_id": "guarded", "priority": "guarded", "rank": 5, "knob": "M5.gm_id", "direction": "increase"},
+                ],
+            },
+            {
+                "metric": "saturation_margin",
+                "actions": [
+                    {"action_id": "sat1", "priority": "primary", "rank": 1, "knob": "global.vbias", "direction": "set"},
+                    {"action_id": "sat2", "priority": "primary", "rank": 2, "knob": "M1.gm_id", "direction": "increase"},
+                    {"action_id": "sat3", "priority": "primary", "rank": 3, "knob": "M3.gm_id", "direction": "increase"},
+                ],
+            }
+        ]
+    }
+
+    selected = _candidate_actions(tuning, limit=4)
+
+    assert [item["action_id"] for item in selected] == ["a1", "a2", "a3", "a4"]
+
+
+def test_local_intervention_keeps_baseline_status_for_unmeasured_metrics():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"), default_environment())
+    spec_model = SpecRegistry().select(state)
+    baseline_measurements = {
+        "dc_gain_db": 27.5,
+        "unity_gain_bandwidth": 6.0e7,
+        "phase_margin": 70.0,
+        "slew_rate": 8.0e7,
+        "output_swing": 0.65,
+        "saturation_margin": -0.04,
+        "total_power": 1.2e-4,
+    }
+    baseline_status = {
+        name: spec_model.target_status(name, target, baseline_measurements, {})
+        for name, target in state.targets.items()
+    }
+    ac_only_measurements = {
+        "dc_gain_db": 28.6,
+        "unity_gain_bandwidth": 4.3e7,
+        "phase_margin": 69.0,
+        "output_swing": 0.64,
+        "saturation_margin": -0.09,
+        "total_power": 1.1e-4,
+    }
+
+    after_status = _target_status_with_measured_updates(
+        spec_model=spec_model,
+        targets=state.targets,
+        measurements=ac_only_measurements,
+        baseline_status=baseline_status,
+    )
+
+    assert baseline_status["slew_rate"]["status"] == "pass"
+    assert after_status["slew_rate"] == baseline_status["slew_rate"]
+    assert after_status["dc_gain"]["value"] == 28.6
+
+
 def test_guarded_action_requires_passing_spice_evidence_gate():
     target_status = {
         "dc_gain": {
@@ -1603,7 +1845,7 @@ def test_default_command_uses_negative_objective_optimizer_candidate():
         "direction": "increase",
         "suggested_unclipped_value": next_value,
         "expected_effect": {"dc_gain": "increase"},
-        "optimizer": {"objective_delta": -0.01},
+        "optimizer": {"objective_delta": -0.01, "local_model_source": "spice_small_perturbation"},
         "optimizer_selected": False,
     }
     tuning = {"by_failure": [{"metric": "dc_gain", "actions": [action]}]}
@@ -1612,11 +1854,12 @@ def test_default_command_uses_negative_objective_optimizer_candidate():
         "selected_actions": [],
         "candidate_actions": [
             {
-                **action,
-                "objective_delta": -0.01,
-                "action_admissibility": {"passed": True},
-            }
-        ],
+                    **action,
+                    "objective_delta": -0.01,
+                    "local_model_source": "spice_small_perturbation",
+                    "action_admissibility": {"passed": True},
+                }
+            ],
     }
     state.diagnostics["causal_diagnostics"] = {
         "constrained_action_optimizer": optimizer,
@@ -1755,6 +1998,12 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     available = state.diagnostics["causal_diagnostics"]["attribution_guided_tuning"]["by_failure"][0]["actions"]
     load_l_action = next(action for action in available if action["knob"] in {"M3.L", "M4.L"})
     m1_action = next(action for action in available if action["knob"] == "M1.gm_id")
+    load_l_action["optimizer_selected"] = True
+    load_l_action["optimizer"] = {
+        "optimizer_selected": True,
+        "objective_delta": 0.0,
+        "objective_source": "spice_small_perturbation",
+    }
 
     command = write_tuning_tool_command(
         state,
@@ -1909,6 +2158,42 @@ def test_deepseek_schema_planner_writes_fallback_command_without_api_key(monkeyp
     assert command["llm_planner"]["status"] == "fallback"
     assert command["args"]["selected_actions"][0]["action_id"] == "dc_gain_01_M3_L_increase"
     assert state.diagnostics["agent_tool_commands"][0]["id"] == command["id"]
+
+
+def test_agent_fast_path_uses_negative_objective_candidate_when_combo_status_is_not_ok():
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    action = {
+        "action_id": "dc_gain_01_M3_L_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "increase",
+        "suggested_next_value": 5.0e-7,
+        "objective_delta": -0.001,
+        "penalized_objective_delta": 0.010,
+        "local_model_source": "spice_small_perturbation",
+        "action_admissibility": {"passed": True},
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_improving_combination",
+            "selected_actions": [],
+            "candidate_actions": [action],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": [action]}]},
+    }
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="deepseek-v4-pro")
+
+    command = loop._optimizer_evidence_fast_path(state, round_index=1)
+
+    assert command is not None
+    assert command["llm_planner"]["status"] == "skipped"
+    assert "negative-objective" in command["llm_planner"]["reason"]
+    assert command["args"]["selected_actions"][0]["action_id"] == "dc_gain_01_M3_L_increase"
+    assert command["args"]["allowed_priorities"] == ["primary"]
 
 
 def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeypatch):
@@ -2645,6 +2930,62 @@ def test_optimizer_loss_uses_pass_oriented_targets_and_pm_window():
     assert "target:dc_gain:min" not in passing_breakdown
     assert "target_window:phase_margin" not in passing_breakdown
     assert "target_tradeoff:gain_shortfall_unity_gain_bandwidth_excess" not in passing_breakdown
+
+
+def test_optimizer_loss_prioritizes_hard_target_pass_over_soft_advisory_terms():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    x = [
+        dv.initial if dv.initial is not None else 0.5 * (dv.range.min + dv.range.max)
+        for dv in evaluator.encoded_design_variables
+    ]
+    _obj, _violation, meta = evaluator.evaluate(x)
+    tp = meta["transistor_params"]
+
+    _loss, breakdown = evaluator._compute_loss(
+        {
+            "dc_gain": 35.0,
+            "unity_gain_bandwidth": 4.0e7,
+            "phase_margin": 62.0,
+            "slew_rate": 3.0e7,
+            "output_swing": 0.58,
+            "saturation_margin": 0.02,
+            "power": 1.0e-4,
+        },
+        tp,
+    )
+
+    assert breakdown["target:output_swing:min"] > 0
+    assert breakdown["target_gate:hard_fail_count"] >= 250.0
+    assert breakdown["target_gate:hard_violation"] > breakdown["target:output_swing:min"]
+
+
+def test_optimizer_best_index_prefers_hard_target_pass_before_soft_loss():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml"),
+        load_yaml_mapping("environment_ihp_sg13g2.yaml"),
+    )
+    evaluator = CircuitEvaluator(state, create_pygmid_adapter())
+    optimizer = NSGA2Optimizer(state, evaluator)
+    soft_loss_with_hard_fail = Individual(
+        x=np.array([0.0]),
+        objectives=np.array([1.0]),
+        rank=0,
+        feasible=True,
+        meta={"hard_target_failures": 1, "hard_target_violation_score": 0.1},
+    )
+    hard_pass_with_higher_soft_loss = Individual(
+        x=np.array([1.0]),
+        objectives=np.array([100.0]),
+        rank=1,
+        feasible=True,
+        meta={"hard_target_failures": 0, "hard_target_violation_score": 0.0},
+    )
+
+    assert optimizer._get_best_index([soft_loss_with_hard_fail, hard_pass_with_higher_soft_loss]) == 1
 
 
 def test_comparator_estimator_reports_extended_metrics():

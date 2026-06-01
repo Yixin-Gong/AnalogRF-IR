@@ -16,8 +16,9 @@ OPTIMIZER_SCHEMA_VERSION = "analogrf_ir.constrained_action_optimizer.v0_1"
 EVIDENCE_GATE_SCHEMA_VERSION = "analogrf_ir.evidence_gate.v0_1"
 ACTION_ADMISSIBILITY_SCHEMA_VERSION = "analogrf_ir.formal_action_admissibility.v0_1"
 ACTION_ADMISSIBILITY_RULE = (
-    "apply_allowed := optimizer_selected OR objective_delta < 0; guarded actions also require evidence_gate.passed"
+    "apply_allowed := optimizer_selected OR trusted objective_delta < 0; guarded actions also require evidence_gate.passed"
 )
+TRUSTED_OBJECTIVE_SOURCES = {"spice_small_perturbation"}
 EVIDENCE_GATE_THRESHOLDS = {
     "min_absolute_objective_improvement": 0.002,
     "min_relative_objective_improvement": 0.015,
@@ -107,10 +108,12 @@ def build_spice_intervention_model(
             )
             continue
 
-        after_status = {
-            name: spec_model.target_status(name, target, result.measurements or {}, {})
-            for name, target in trial_state.targets.items()
-        }
+        after_status = _target_status_with_measured_updates(
+            spec_model=spec_model,
+            targets=trial_state.targets,
+            measurements=result.measurements or {},
+            baseline_status=target_status,
+        )
         after_violation = _violation_vector(after_status, metrics)
         delta = {
             metric: round(float(after_violation.get(metric, 0.0) - base_violation.get(metric, 0.0)), 6)
@@ -246,6 +249,22 @@ def _measurement_for_metric(measurements: dict[str, Any], metric: str) -> Any:
     return None
 
 
+def _target_status_with_measured_updates(
+    *,
+    spec_model: CircuitSpecModel,
+    targets: dict[str, Any],
+    measurements: dict[str, Any],
+    baseline_status: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for name, target in targets.items():
+        if _measurement_for_metric(measurements, name) is None and name in baseline_status:
+            out[name] = dict(baseline_status[name])
+        else:
+            out[name] = spec_model.target_status(name, target, measurements, {})
+    return out
+
+
 def optimize_tuning_actions(
     *,
     tuning: dict[str, Any],
@@ -355,6 +374,7 @@ def apply_optimized_action_plan(tuning: dict[str, Any], optimizer_result: dict[s
                     for key in (
                         "optimizer_selected",
                         "objective_delta",
+                        "penalized_objective_delta",
                         "local_model_source",
                         "predicted_violation_delta",
                         "uncertainty",
@@ -398,9 +418,7 @@ def default_selected_actions_from_optimizer(
     source_actions = selected or [
         item
         for item in optimizer.get("candidate_actions", []) or []
-        if (item.get("action_admissibility") or {}).get("passed")
-        or _optional_float(item.get("objective_delta")) is not None
-        and _optional_float(item.get("objective_delta")) < 0.0
+        if _action_has_admissible_optimizer_math(item)
     ]
     if not source_actions:
         tuning = causal.get("attribution_guided_tuning", {}) or {}
@@ -436,16 +454,7 @@ def default_selected_actions_from_optimizer(
 
 
 def _action_has_admissible_optimizer_math(action: dict[str, Any]) -> bool:
-    optimizer = action.get("optimizer", {}) or {}
-    admissibility = action.get("action_admissibility") or optimizer.get("action_admissibility") or {}
-    if admissibility.get("passed"):
-        return True
-    objective_delta = _optional_float(
-        action.get("objective_delta")
-        if action.get("objective_delta") is not None
-        else optimizer.get("objective_delta")
-    )
-    return objective_delta is not None and objective_delta < 0.0
+    return bool(action_admissibility_trace(action).get("passed"))
 
 
 def _empty_intervention_model(
@@ -531,15 +540,18 @@ def action_admissibility_trace(action: dict[str, Any]) -> dict[str, Any]:
         else optimizer.get("objective_delta")
     )
     objective_delta_negative = objective_delta is not None and objective_delta < 0.0
+    objective_source_trusted = _objective_delta_source_is_trusted(action, optimizer)
     guarded = action.get("priority") == "guarded"
     evidence_passed = _passes_evidence_gate(action) or _passes_evidence_gate(optimizer)
     has_optimizer_math = selected or objective_delta is not None
-    passed = has_optimizer_math and (selected or objective_delta_negative) and (not guarded or evidence_passed)
+    passed = has_optimizer_math and (selected or (objective_delta_negative and objective_source_trusted)) and (not guarded or evidence_passed)
     reasons: list[str] = []
     if not has_optimizer_math:
         reasons.append("no optimizer candidate math was attached to this action")
     if has_optimizer_math and not (selected or objective_delta_negative):
         reasons.append("neither optimizer_selected nor objective_delta < 0")
+    if has_optimizer_math and objective_delta_negative and not selected and not objective_source_trusted:
+        reasons.append("objective_delta < 0 is surrogate-only and lacks trusted local SPICE evidence")
     if guarded and not evidence_passed:
         reasons.append("guarded action lacks passing evidence_gate")
     if passed:
@@ -552,11 +564,21 @@ def action_admissibility_trace(action: dict[str, Any]) -> dict[str, Any]:
             "has_optimizer_math": has_optimizer_math,
             "optimizer_selected": selected,
             "objective_delta_negative": objective_delta_negative,
+            "objective_delta_source_trusted": objective_source_trusted,
             "guarded_evidence_passed": (not guarded) or evidence_passed,
         },
         "objective_delta": round(float(objective_delta), 6) if objective_delta is not None else None,
         "reasons": reasons,
     }
+
+
+def _objective_delta_source_is_trusted(action: dict[str, Any], optimizer: dict[str, Any]) -> bool:
+    source = action.get("local_model_source")
+    if source is None:
+        source = optimizer.get("local_model_source")
+    if source is None:
+        return False
+    return str(source) in TRUSTED_OBJECTIVE_SOURCES
 
 
 def _optimizer_result(
@@ -630,14 +652,23 @@ def _optimizer_result(
 def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
-    actions = [
-        action
-        for failure in tuning.get("by_failure", [])
-        for action in failure.get("actions", [])
-        if action.get("action_id")
-    ]
+    actions = []
+    for failure_index, failure in enumerate(tuning.get("by_failure", []) or []):
+        for action in failure.get("actions", []) or []:
+            if not action.get("action_id"):
+                continue
+            action_copy = dict(action)
+            action_copy["_failure_index"] = failure_index
+            actions.append(action_copy)
     priority_order = {"primary": 0, "secondary": 1, "guarded": 2}
-    actions = sorted(actions, key=lambda item: (priority_order.get(item.get("priority", ""), 9), int(item.get("rank", 999))))
+    actions = sorted(
+        actions,
+        key=lambda item: (
+            priority_order.get(item.get("priority", ""), 9),
+            int(item.get("_failure_index", 999)),
+            int(item.get("rank", 999)),
+        ),
+    )
     out = []
     seen_ids: set[str] = set()
     seen_effect_keys: set[tuple[tuple[str, ...], str]] = set()
@@ -651,7 +682,7 @@ def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, 
         out.append(action)
         if len(out) >= limit:
             break
-    if limit > 1 and not any(item.get("priority") == "guarded" for item in out):
+    if limit > 1 and len(out) < limit and not any(item.get("priority") == "guarded" for item in out):
         guarded = next(
             (
                 item
@@ -662,9 +693,7 @@ def _candidate_actions(tuning: dict[str, Any], *, limit: int) -> list[dict[str, 
             ),
             None,
         )
-        if guarded is not None and len(out) >= limit:
-            out[-1] = guarded
-        elif guarded is not None:
+        if guarded is not None:
             out.append(guarded)
     return out
 
@@ -700,6 +729,7 @@ def _best_individually_admissible_action(records: list[dict[str, Any]]) -> dict[
         admissible,
         key=lambda item: (
             float(item.get("objective_delta", 0.0) or 0.0),
+            float(item.get("penalized_objective_delta", item.get("objective_delta", 0.0)) or 0.0),
             float(item.get("uncertainty", 0.0) or 0.0),
             float(item.get("constraint_penalty", 0.0) or 0.0),
         ),
@@ -743,6 +773,8 @@ def _action_record(
         uncertainty=uncertainty,
     )
     penalty = _constraint_penalty(action, delta, target_status, uncertainty, evidence_gate=evidence_gate)
+    formal_delta = after - before
+    penalized_delta = formal_delta + penalty
     return {
         "action_id": action.get("action_id"),
         "metric": action.get("metric"),
@@ -757,7 +789,8 @@ def _action_record(
         "target_value": action.get("target_value"),
         "per_knob_values": action.get("per_knob_values", {}),
         "range_update": action.get("range_update"),
-        "objective_delta": round(float(after - before + penalty), 6),
+        "objective_delta": round(float(formal_delta), 6),
+        "penalized_objective_delta": round(float(penalized_delta), 6),
         "predicted_violation_delta": {metric: round(float(delta.get(metric, 0.0)), 6) for metric in base_violation},
         "local_model_source": source,
         "uncertainty": round(float(uncertainty), 4),

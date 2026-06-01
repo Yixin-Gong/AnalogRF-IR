@@ -312,7 +312,8 @@ class DiagnosticAgentLoop:
     def _optimizer_evidence_fast_path(self, schema_state: DesignState, round_index: int) -> dict[str, Any] | None:
         causal = schema_state.diagnostics.get("causal_diagnostics", {}) if schema_state.diagnostics else {}
         optimizer = causal.get("constrained_action_optimizer", {}) or {}
-        if optimizer.get("status") != "ok":
+        status = str(optimizer.get("status") or "")
+        if status not in {"ok", "no_improving_combination"}:
             return None
         selected = default_selected_actions_from_optimizer(schema_state, allowed_priorities=["primary"])
         if not selected:
@@ -333,10 +334,14 @@ class DiagnosticAgentLoop:
             "temperature": self.llm_config.temperature,
             "max_tokens": self.llm_config.max_tokens,
             "status": "skipped",
-            "reason": "Constrained optimizer selected admissible actions; LLM request was unnecessary for this round.",
+            "reason": (
+                "Constrained optimizer selected admissible actions; LLM request was unnecessary for this round."
+                if status == "ok"
+                else "Formal gate found admissible negative-objective candidates despite no improving penalized combination."
+            ),
         }
-        command["llm_notes"] = "Evidence fast path: applied optimizer-selected admissible actions without an LLM request."
-        command["llm_rationale"] = "The formal action gate already had optimizer-selected actions."
+        command["llm_notes"] = "Evidence fast path: applied formal-admissible optimizer candidates without an LLM request."
+        command["llm_rationale"] = "The formal action gate already had admissible optimizer evidence."
         return command
 
     def _round_flow_config(

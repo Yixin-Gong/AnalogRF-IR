@@ -10,6 +10,7 @@ from schemas.design_state import DesignState, TransistorParameters
 def apply_optimizer_meta_to_state(state: DesignState, best_meta: dict[str, Any]) -> None:
     decoded = best_meta.get("decoded", {}) or {}
     transistor_params = best_meta.get("transistor_params", {}) or {}
+    _sync_design_variable_initials(state, decoded)
     merged_globals = dict(state.global_parameters or {})
     merged_globals.update({
         str(k): float(v)
@@ -44,3 +45,13 @@ def apply_optimizer_meta_to_state(state: DesignState, best_meta: dict[str, Any])
                 ic=float(phys.get("ic", 0.0)),
             )
     round_and_update_state(state, decoded, transistor_params)
+
+
+def _sync_design_variable_initials(state: DesignState, decoded: dict[str, Any]) -> None:
+    for dv in state.design_variables:
+        decoded_key = dv.device if dv.device else "__global__"
+        values = decoded.get(decoded_key, {}) or {}
+        if dv.variable not in values:
+            continue
+        value = float(values[dv.variable])
+        dv.initial = min(max(value, float(dv.range.min)), float(dv.range.max))
