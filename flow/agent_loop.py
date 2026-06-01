@@ -226,6 +226,22 @@ class DiagnosticAgentLoop:
     def _execute_schema_command_node(self, state: AgentGraphState) -> AgentGraphState:
         node_started = time.perf_counter()
         self.emit("       LangGraph node: execute_schema_command")
+        if self._should_prefer_postprocess_before_schema_edit(state):
+            round_index = int(state["round_index"])
+            self.emit("       Close repair-sensitive failure; running one forced postprocess fallback before schema edits")
+            self.emit(f"       [timing] agent.execute_schema_command: {time.perf_counter() - node_started:.2f}s")
+            return {
+                "current_schema": state["current_schema"],
+                "round_index": round_index + 1,
+                "last_tuning_application": {
+                    "applied_actions": [],
+                    "skipped_actions": [],
+                    "reason": "close repair-sensitive failure; postprocess fallback preferred before schema edit",
+                },
+                "force_postprocess_once": True,
+                "postprocess_rescue_attempted": True,
+                "stop_reason": "",
+            }
         schema_state = self._load_design_state(Path(state["last_design_state"]))
         round_index = int(state["round_index"])
         application = execute_tuning_tool_commands(schema_state, round_index=round_index)
@@ -268,6 +284,27 @@ class DiagnosticAgentLoop:
         self.emit("       LangGraph node: llm_write_schema_command")
         design_state_path = Path(state["last_design_state"])
         schema_state = self._load_design_state(design_state_path)
+        if self._should_prefer_postprocess_before_schema_edit(state):
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=int(state["round_index"]),
+                author="postprocess_rescue_fast_path",
+                selected_actions=[],
+            )
+            command["llm_planner"] = {
+                "provider": self.llm_config.provider,
+                "model": self.llm_config.model,
+                "status": "skipped",
+                "reason": "Close repair-sensitive failure; postprocess fallback is preferred before schema edits.",
+                "elapsed_sec": round(time.perf_counter() - node_started, 6),
+            }
+            schema_state.to_yaml(design_state_path, include_runtime_context=False)
+            self.emit("       Skipped LLM request: close repair-sensitive failure will use postprocess fallback")
+            self.emit(f"       [timing] agent.llm_write_schema_command.rescue_fast_path: {time.perf_counter() - node_started:.2f}s")
+            return {
+                "last_tool_command": command,
+                "llm_planner": command.get("llm_planner", {}),
+            }
         fast_command = self._optimizer_evidence_fast_path(schema_state, int(state["round_index"]))
         if fast_command is not None:
             schema_state.to_yaml(design_state_path, include_runtime_context=False)
@@ -414,9 +451,39 @@ class DiagnosticAgentLoop:
         if str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast":
             failed = set(rounds[-1].get("failed_targets", []) or [])
             repair_sensitive = {"phase_margin", "slew_rate", "slew_rate_pos", "slew_rate_neg", "output_swing"}
+            try:
+                measured_score = float(rounds[-1].get("measured_violation_score"))
+            except (TypeError, ValueError):
+                measured_score = float("inf")
+            if 0.0 < measured_score <= 0.02:
+                repair_sensitive.add("dc_gain")
             if not failed.intersection(repair_sensitive):
                 return False
         return int(rounds[-1].get("postprocess_event_count", 0) or 0) == 0
+
+    def _should_prefer_postprocess_before_schema_edit(self, state: AgentGraphState) -> bool:
+        if str(self.config.postprocess_policy or "fallback").lower() != "fallback":
+            return False
+        if self.config.skip_dc_repair and self.config.skip_comp_tune:
+            return False
+        if state.get("postprocess_rescue_attempted"):
+            return False
+        if int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
+            return False
+        rounds = state.get("rounds", []) or []
+        if not rounds or rounds[-1].get("spec_pass"):
+            return False
+        if int(rounds[-1].get("postprocess_event_count", 0) or 0) != 0:
+            return False
+        try:
+            measured_score = float(rounds[-1].get("measured_violation_score"))
+        except (TypeError, ValueError):
+            return False
+        if not (0.0 < measured_score <= 0.02):
+            return False
+        failed = set(rounds[-1].get("failed_targets", []) or [])
+        repair_sensitive = {"dc_gain", "phase_margin", "slew_rate", "slew_rate_pos", "slew_rate_neg", "output_swing"}
+        return bool(failed.intersection(repair_sensitive))
 
     def _load_design_state(self, path: Path) -> DesignState:
         schema_state = DesignState.from_yaml(path)

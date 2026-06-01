@@ -109,8 +109,8 @@ def build_topology_guided_initial_points(
                 ("var_role", ("L", _cascode_role), 0.33),
                 ("var_role", ("gm_id", _cascode_role), 0.26),
                 ("var_name", "I_tail", 0.62),
-                ("var_name", "vbias_ptail", 0.44),
-                ("var_name", "vbias_ncas", 0.74),
+                ("var_name", "vbias_ptail", 0.50),
+                ("var_name", "vbias_ncas", 0.30),
             ],
         )
         add(
@@ -121,8 +121,8 @@ def build_topology_guided_initial_points(
                 ("var_role", ("L", _tail_role), 0.68),
                 ("var_role", ("gm_id", _input_role), 0.60),
                 ("var_name", "I_tail", 0.60),
-                ("var_name", "vbias_ptail", 0.68),
-                ("var_name", "vbias_ncas", 0.72),
+                ("var_name", "vbias_ptail", 0.56),
+                ("var_name", "vbias_ncas", 0.28),
             ],
         )
         add(
@@ -133,7 +133,7 @@ def build_topology_guided_initial_points(
                 ("var_role", ("gm_id", _input_role), 0.68),
                 ("var_name", "I_tail", 0.80),
                 ("var_name", "vbias_ptail", 0.56),
-                ("var_name", "vbias_ncas", 0.62),
+                ("var_name", "vbias_ncas", 0.36),
             ],
         )
 

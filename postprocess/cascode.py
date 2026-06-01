@@ -136,6 +136,20 @@ def tune_cascode_ota_operating_point(
         candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
         max_candidates=max_width_refinement_candidates,
     )
+    best = _refine_telescopic_close_gain_bias(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        started=started,
+        time_budget_sec=max(
+            float(time_budget_sec),
+            float(refinement_time_budget_sec or 0.0),
+            90.0,
+        ),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+    )
     _restore_globals(state, original_globals)
     _restore_widths(state, original_widths)
     _restore_lengths(state, original_lengths)
@@ -198,7 +212,7 @@ def _candidate_points(
     points: list[dict[str, Any]] = [{**original, "phase": "baseline"}]
     ports = list(original)
 
-    points.extend(_topology_guided_initial_points(state, original, vdd))
+    guided_points = _topology_guided_initial_points(state, original, vdd)
 
     heuristic: dict[str, list[float]] = {}
     family = _topology_family(state)
@@ -223,6 +237,12 @@ def _candidate_points(
         else:
             candidates.extend(_bias_quantile_values(state, name, vdd, (0.35, 0.50, 0.65)))
         heuristic[name] = _unique_values(candidates, low, high)
+
+    # Fast ablation mode caps cascode repair candidates tightly. For folded
+    # cascode, the decisive move is usually a paired ptail/ncas allocation, so
+    # spend the first candidates on the compact topology-guided grid instead of
+    # exhausting the budget on one-port sweeps.
+    points.extend(guided_points)
 
     # One-at-a-time moves keep the repair trace interpretable when the topology
     # exposes a non-standard bias port outside the coupled initial search.
@@ -275,8 +295,10 @@ def _topology_guided_initial_points(
                 # for output resistance while still allowing tens-of-MHz UGBW.
                 "vbias_ptail": (0.44, 0.50, 0.56, 0.62, 0.68),
                 # NMOS cascode: upper-mid bias splits voltage across mirror and
-                # common-gate devices under a 1.2 V stack.
-                "vbias_ncas": (0.58, 0.62, 0.66, 0.70, 0.74),
+                # common-gate devices under a 1.2 V stack. In the folded
+                # PMOS-input OTA the useful headroom point is often lower than
+                # in telescopic stacks, so cover that region early.
+                "vbias_ncas": (0.24, 0.30, 0.36, 0.44, 0.52),
             },
             max_points=25,
         )
@@ -290,9 +312,9 @@ def _topology_guided_initial_points(
                 # Low-voltage telescopic stacks need tail bias near the low
                 # end, NMOS cascode bias near the high end, and PMOS cascode
                 # bias near the low end to allocate headroom before speed.
-                "vbias_tail": (0.00, 0.03, 0.08, 0.16),
-                "vbias_ncas": (0.78, 0.90, 1.00),
-                "vbias_pcas": (0.00, 0.05, 0.14),
+                "vbias_tail": (0.044, 0.075, 0.080, 0.030, 0.16),
+                "vbias_ncas": (1.00, 0.90),
+                "vbias_pcas": (0.00, 0.022, 0.067, 0.076, 0.080),
             },
             max_points=24,
         )
@@ -333,14 +355,14 @@ def _single_bias_quantiles(family: str, name: str) -> tuple[float, ...]:
         if "ptail" in name_low:
             return (0.38, 0.44, 0.50, 0.56, 0.62, 0.68, 0.70)
         if "ncas" in name_low:
-            return (0.56, 0.58, 0.62, 0.66, 0.70, 0.74, 0.82)
+            return (0.24, 0.30, 0.36, 0.44, 0.52, 0.62, 0.72)
     if family == "telescopic_cascode_ota":
         if "tail" in name_low:
             return (0.00, 0.03, 0.08, 0.16, 0.32)
         if "ncas" in name_low:
             return (0.70, 0.82, 0.92, 1.00)
         if "pcas" in name_low:
-            return (0.00, 0.05, 0.14, 0.28)
+            return (0.00, 0.05, 0.067, 0.14, 0.151, 0.28)
     return (0.30, 0.45, 0.60, 0.75)
 
 
@@ -407,7 +429,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     power_max = float(targets.get("power", Target()).max or float("inf"))
     swing_min = float(targets.get("output_swing", Target()).min or 0.0)
 
-    if not result.success:
+    if not result.success and "dc_gain_db" not in meas:
         gain -= 200.0
     op_margin, op_required_margin = _minimum_margins(state, result.operating_points or {})
     op_ok = op_required_margin >= 0.0
@@ -454,6 +476,12 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
         for value in (gain_deficit, bw_deficit, pm_deficit, sr_deficit, swing_deficit)
         if value > 0.0
     )
+    # Hard spec failures should dominate advisory PM-window and OP-quality costs.
+    score += 60.0 * measured_fail_count
+    score += 120.0 * gain_deficit
+    score += 70.0 * bw_deficit
+    score += 55.0 * sr_deficit
+    score += 55.0 * swing_deficit
     item = dict(candidate)
     item.update(
         {
@@ -619,76 +647,206 @@ def _refine_widths_for_speed(
     return selected
 
 
+def _refine_telescopic_close_gain_bias(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    if _topology_family(state) != "telescopic_cascode_ota":
+        return best
+    targets = state.targets
+    gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
+    bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
+    pm_min = float(targets.get("phase_margin", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
+    swing_min = float(targets.get("output_swing", Target()).min or 0.0)
+    meas = best.get("measurements", {}) or {}
+    gain = float(meas.get("dc_gain_db", 0.0) or 0.0)
+    if gain_min <= 0.0 or gain >= gain_min:
+        return best
+    # Keep this polish narrow: it is only for points that already satisfy the
+    # speed/stability/swing constraints and need a small stack-bias gain lift.
+    if (gain_min - gain) / max(gain_min, 1.0) > 0.04:
+        return best
+    if bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min:
+        return best
+    if pm_min > 0.0 and float(meas.get("phase_margin", 0.0) or 0.0) < pm_min:
+        return best
+    if sr_min > 0.0 and float(meas.get("slew_rate", 0.0) or 0.0) < sr_min:
+        return best
+    if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
+        return best
+
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+    pcas_low, pcas_high = _bias_range(state, "vbias_pcas", vdd)
+    ncas0 = float(best.get("vbias_ncas", state.global_parameters.get("vbias_ncas", ncas_low)))
+    pcas0 = float(best.get("vbias_pcas", state.global_parameters.get("vbias_pcas", pcas_low)))
+    ncas_values = _unique_values(
+        [ncas0 + 0.015, ncas0 + 0.03, min(ncas_high, 0.90)],
+        ncas_low,
+        ncas_high,
+    )
+    pcas_values = _unique_values(
+        [pcas0 + 0.002, pcas0 + 0.006],
+        pcas_low,
+        pcas_high,
+    )
+
+    records: list[dict[str, Any]] = []
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        trial_points: list[dict[str, float]] = []
+        trial_points.extend({"vbias_ncas": value, "vbias_pcas": pcas0} for value in ncas_values)
+        trial_points.extend({"vbias_ncas": ncas0, "vbias_pcas": value} for value in pcas_values)
+        for point in trial_points[:5]:
+            if time.time() - started > time_budget_sec:
+                break
+            _restore_globals(state, original_globals)
+            _apply_candidate(state, best)
+            candidate = dict(best)
+            candidate.update(point)
+            candidate["phase"] = f"{best.get('phase', '')}+telescopic_close_gain_bias_refine"
+            _apply_candidate(state, candidate)
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            item = _score_candidate(state, trial, candidate)
+            item["close_gain_bias_refinement_count"] = len(records) + 1
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["close_gain_bias_refinement_count"] = len(records)
+    return selected
+
+
 def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
     family = _topology_family(state)
     if family == "telescopic_cascode_ota":
         return [
             {
                 "__role_min_widths__": {
-                    "input_pair": 22.0e-6,
-                    "tail_current_source": 11.0e-6,
-                    "input_cascode": 7.5e-6,
-                    "current_mirror_load": 110.0e-6,
-                    "load_cascode": 70.0e-6,
+                    "input_pair": 55.0e-6,
+                    "tail_current_source": 7.0e-6,
+                    "input_cascode": 4.1e-6,
+                    "current_mirror_load": 36.0e-6,
+                    "load_cascode": 150.0e-6,
+                },
+                "__role_max_widths__": {
+                    "input_pair": 64.0e-6,
+                    "tail_current_source": 8.0e-6,
+                    "input_cascode": 4.5e-6,
+                    "current_mirror_load": 40.0e-6,
+                    "load_cascode": 155.0e-6,
+                },
+                "__role_max_lengths__": {
+                    "input_pair": 1.10e-6,
+                    "tail_current_source": 0.60e-6,
+                    "input_cascode": 0.90e-6,
+                    "load_cascode": 1.20e-6,
+                },
+            },
+            {
+                "__role_min_widths__": {
+                    "input_pair": 60.0e-6,
+                    "tail_current_source": 7.0e-6,
+                    "input_cascode": 4.1e-6,
+                    "current_mirror_load": 36.0e-6,
+                    "load_cascode": 140.0e-6,
+                },
+                "__role_max_widths__": {
+                    "input_pair": 64.0e-6,
+                    "tail_current_source": 8.0e-6,
+                    "input_cascode": 4.3e-6,
+                    "current_mirror_load": 40.0e-6,
+                    "load_cascode": 150.0e-6,
+                },
+                "__role_max_lengths__": {
+                    "input_pair": 1.05e-6,
+                    "tail_current_source": 0.60e-6,
+                    "input_cascode": 0.88e-6,
+                    "load_cascode": 1.20e-6,
+                },
+            },
+            {
+                "__role_min_widths__": {
+                    "input_pair": 24.0e-6,
+                    "tail_current_source": 14.0e-6,
+                    "input_cascode": 8.0e-6,
+                    "current_mirror_load": 55.0e-6,
+                    "load_cascode": 55.0e-6,
                 },
                 "__role_min_lengths__": {
-                    "input_pair": 1.95e-6,
-                    "tail_current_source": 0.33e-6,
-                    "input_cascode": 1.93e-6,
-                    "current_mirror_load": 2.42e-6,
-                    "load_cascode": 1.98e-6,
+                    "input_pair": 2.20e-6,
+                    "tail_current_source": 0.60e-6,
+                    "input_cascode": 2.40e-6,
+                    "current_mirror_load": 2.80e-6,
+                    "load_cascode": 2.80e-6,
                 },
             },
             {
-                "input_pair": 2.0,
-                "tail_current_source": 3.0,
-                "current_mirror_load": 2.0,
-                "load_cascode": 5.0,
-            },
-            {
-                "input_pair": 2.0,
-                "tail_current_source": 3.0,
-                "current_mirror_load": 2.0,
-                "load_cascode": 8.0,
-            },
-            {
-                "input_pair": 2.4,
-                "tail_current_source": 3.0,
+                "__role_max_widths__": {
+                    "input_pair": 90.0e-6,
+                    "load_cascode": 160.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.60e-6,
+                    "current_mirror_load": 2.20e-6,
+                    "load_cascode": 2.20e-6,
+                },
+                "input_pair": 1.15,
+                "tail_current_source": 1.35,
                 "input_cascode": 1.1,
-                "current_mirror_load": 2.25,
-                "load_cascode": 8.2,
+                "current_mirror_load": 1.15,
+                "load_cascode": 1.2,
             },
             {
-                "tail_current_source": 3.0,
-                "current_mirror_load": 2.0,
-                "load_cascode": 8.0,
+                "__role_max_widths__": {
+                    "input_pair": 75.0e-6,
+                    "input_cascode": 4.8e-6,
+                    "load_cascode": 155.0e-6,
+                },
+                "tail_current_source": 1.15,
             },
         ]
     if family == "folded_cascode_ota":
         return [
             {
                 "__role_min_lengths__": {
-                    "input_pair": 1.35e-6,
-                    "tail_current_source": 1.20e-6,
-                    "current_mirror_load": 2.20e-6,
-                    "folded_cascode": 2.20e-6,
+                    "input_pair": 1.50e-6,
+                    "tail_current_source": 1.40e-6,
+                    "current_mirror_load": 2.40e-6,
+                    "folded_cascode": 2.40e-6,
                 },
-                "input_pair": 1.25,
-                "tail_current_source": 0.85,
-                "current_mirror_load": 1.10,
-                "folded_cascode": 1.10,
+                "input_pair": 1.45,
+                "tail_current_source": 1.10,
+                "current_mirror_load": 1.30,
+                "folded_cascode": 1.30,
             },
             {
                 "__role_min_lengths__": {
-                    "input_pair": 1.70e-6,
-                    "tail_current_source": 1.50e-6,
-                    "current_mirror_load": 2.80e-6,
-                    "folded_cascode": 2.80e-6,
+                    "input_pair": 1.50e-6,
+                    "tail_current_source": 1.30e-6,
+                    "current_mirror_load": 2.00e-6,
+                    "folded_cascode": 2.00e-6,
                 },
-                "input_pair": 1.10,
-                "tail_current_source": 0.75,
-                "current_mirror_load": 0.90,
-                "folded_cascode": 0.90,
+                "input_pair": 1.60,
+                "tail_current_source": 1.35,
+                "current_mirror_load": 1.45,
+                "folded_cascode": 1.45,
             },
             {
                 "input_pair": 1.6,
@@ -727,7 +885,9 @@ def _apply_role_geometry_template(
     min_l = float(getattr(proc, "min_L", 130e-9) or 130e-9)
     max_l = float(getattr(proc, "max_L", 3e-6) or 3e-6)
     min_widths = role_scales.get("__role_min_widths__", {})
+    max_widths = role_scales.get("__role_max_widths__", {})
     min_lengths = role_scales.get("__role_min_lengths__", {})
+    max_lengths = role_scales.get("__role_max_lengths__", {})
     any_applied = False
     for dev in state.topology.devices:
         ts = state.transistors.get(dev.id)
@@ -736,16 +896,25 @@ def _apply_role_geometry_template(
             continue
         scale = role_scales.get(dev.role)
         min_role_w = min_widths.get(dev.role)
-        if scale is not None or min_role_w is not None:
+        max_role_w = max_widths.get(dev.role)
+        if scale is not None or min_role_w is not None or max_role_w is not None:
             next_w = base_w * float(scale) if scale is not None else base_w
             if min_role_w is not None:
                 next_w = max(next_w, float(min_role_w))
+            if max_role_w is not None:
+                next_w = min(next_w, float(max_role_w))
             ts.parameters.W = min(max(next_w, min_w), max_w)
             any_applied = True
         min_role_l = min_lengths.get(dev.role)
-        if min_role_l is not None:
+        max_role_l = max_lengths.get(dev.role)
+        if min_role_l is not None or max_role_l is not None:
             base_l = base_lengths.get(dev.id, ts.parameters.L)
-            ts.parameters.L = min(max(max(base_l, float(min_role_l)), min_l), max_l)
+            next_l = base_l
+            if min_role_l is not None:
+                next_l = max(next_l, float(min_role_l))
+            if max_role_l is not None:
+                next_l = min(next_l, float(max_role_l))
+            ts.parameters.L = min(max(next_l, min_l), max_l)
             ts.L_strategy = ts.parameters.L
             any_applied = True
     if any_applied:

@@ -312,27 +312,43 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
     swing_min = float(targets.get("output_swing", Target()).min or 0.0)
 
     op_margin, op_required_margin = _minimum_margins(state, result.operating_points or {})
-    if not result.success:
+    if not result.success and "dc_gain_db" not in meas:
         gain -= 200.0
     op_ok = op_required_margin >= 0.0
-    spec_pass = (
+    static_spec_pass = (
         gain >= gain_min
         and (bw_min <= 0.0 or bw >= bw_min)
         and (pm_min <= 0.0 or pm >= pm_min)
-        and (sr_min <= 0.0 or sr >= sr_min)
         and (power_max == float("inf") or power <= power_max)
         and (swing_min <= 0.0 or swing >= swing_min)
     )
+    spec_pass = static_spec_pass and (sr_min <= 0.0 or ("slew_rate" in meas and sr >= sr_min))
+    gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
+    bw_deficit = max(0.0, bw_min - bw) / max(bw_min, 1.0)
+    pm_deficit = max(0.0, pm_min - pm) / max(pm_min, 1.0)
+    sr_deficit = max(0.0, sr_min - sr) / max(sr_min, 1.0)
+    swing_deficit = max(0.0, swing_min - swing) / max(swing_min, 1.0)
+    power_deficit = (
+        max(0.0, power - power_max) / max(power_max, 1e-12)
+        if power_max < float("inf")
+        else 0.0
+    )
+    hard_fail_count = sum(
+        1
+        for value in (gain_deficit, bw_deficit, pm_deficit, sr_deficit, swing_deficit, power_deficit)
+        if value > 0.0
+    )
     score = 0.0
-    score += 80.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
-    score += 55.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-    score += 32.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
-    score += 30.0 * max(0.0, sr_min - sr) / max(sr_min, 1.0)
+    score += 45.0 * hard_fail_count
+    score += 95.0 * gain_deficit
+    score += 70.0 * bw_deficit
+    score += 24.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
+    score += 35.0 * sr_deficit
     if power_max < float("inf"):
-        score += 35.0 * max(0.0, power - power_max) / max(power_max, 1e-12)
+        score += 40.0 * power_deficit
         score += 0.15 * max(power, 0.0) / max(power_max, 1e-12)
     if swing_min > 0.0:
-        score += 10.0 * max(0.0, swing_min - swing) / max(swing_min, 1.0)
+        score += 35.0 * swing_deficit
     if op_required_margin < 0.0:
         score += 60.0 * abs(op_required_margin)
     if bw_min > 0.0 and "unity_gain_bandwidth" not in meas:
@@ -353,6 +369,7 @@ def _score_candidate(state: DesignState, result, candidate: dict[str, Any]) -> d
             "measurements": meas,
             "success": bool(result.success),
             "spec_pass": spec_pass,
+            "static_spec_pass": static_spec_pass,
             "op_ok": op_ok,
             "op_margin": op_margin,
             "op_required_margin": op_required_margin,
@@ -478,7 +495,7 @@ def _bandwidth_merit(
     pm = _metric(item, "phase_margin")
     power = _metric(item, "total_power")
     power_ratio = power / max(power_max, 1e-12) if power_max < float("inf") else 0.0
-    spec_pass = bool(item.get("spec_pass", False))
+    spec_pass = bool(item.get("spec_pass", False) or item.get("static_spec_pass", False))
     gain_margin = gain - gain_min if gain_min > 0.0 else gain
     pm_penalty = phase_margin_window_penalty(pm, pm_min or 60.0)
     pm_ok = pm_min <= 0.0 or pm >= pm_min

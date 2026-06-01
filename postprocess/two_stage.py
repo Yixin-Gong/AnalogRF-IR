@@ -332,7 +332,7 @@ def tune_two_stage_compensation(
     gain_refine_ids = [
         dev.id
         for dev in state.topology.devices
-        if dev.role in {"current_mirror_load", "second_stage_gain", "output_current_source"}
+        if dev.role in {"current_mirror_load", "second_stage_gain"}
     ]
     gain_refine_dims = {
         dev_id: (
@@ -341,6 +341,20 @@ def tune_two_stage_compensation(
             state.transistors[dev_id].L_strategy,
         )
         for dev_id in gain_refine_ids
+        if dev_id in state.transistors
+    }
+    output_source_ids = [
+        dev.id
+        for dev in state.topology.devices
+        if dev.role in {"output_current_source", "output_bias_mirror"}
+    ]
+    output_source_dims = {
+        dev_id: (
+            state.transistors[dev_id].parameters.W,
+            state.transistors[dev_id].parameters.L,
+            state.transistors[dev_id].L_strategy,
+        )
+        for dev_id in output_source_ids
         if dev_id in state.transistors
     }
     base_currents = {
@@ -384,6 +398,14 @@ def tune_two_stage_compensation(
             ts.parameters.L = scaled_l
             ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
 
+    def apply_output_source_geometry(length_scale: float) -> None:
+        for dev_id, (base_w, base_l, base_strategy_l) in output_source_dims.items():
+            ts = state.transistors[dev_id]
+            ts.parameters.W = min(max(_snap_to_grid(base_w, w_grid), min_w), max_w)
+            scaled_l = min(max(_snap_to_grid(base_l * length_scale, l_grid), min_l), max_l)
+            ts.parameters.L = scaled_l
+            ts.L_strategy = scaled_l if base_strategy_l > 0 else base_strategy_l
+
     def apply_current_scale(tail_scale: float, stage2_scale: float) -> None:
         scale_by_name = {"I_tail": tail_scale, "I_stage2": stage2_scale}
         for name, base_value in base_currents.items():
@@ -423,11 +445,33 @@ def tune_two_stage_compensation(
         gain = meas.get("dc_gain_db", 0.0)
         bw = meas.get("unity_gain_bandwidth", 0.0)
         pm = meas.get("phase_margin", 0.0)
+        sr = meas.get("slew_rate", 0.0)
         power = meas.get("total_power", 0.0)
+        swing = meas.get("output_swing", 0.0)
+        gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
+        bw_deficit = max(0.0, bw_min - bw) / max(bw_min, 1.0)
+        pm_deficit = max(0.0, pm_min - pm) / max(pm_min, 1.0)
+        sr_deficit = max(0.0, sr_min - sr) / max(sr_min, 1.0)
+        swing_deficit = max(0.0, swing_min - swing) / max(swing_min, 1.0)
+        power_deficit = (
+            max(0.0, power - power_max) / max(power_max, 1e-12)
+            if power_max < float("inf")
+            else 0.0
+        )
+        hard_fail_count = sum(
+            1
+            for value in (gain_deficit, bw_deficit, pm_deficit, sr_deficit, swing_deficit, power_deficit)
+            if value > 0.0
+        )
+        pm_window_weight = 12.0 if hard_fail_count else 48.0
         score = 0.0
-        score += 25.0 * max(0.0, gain_min - gain) / max(gain_min, 1.0)
-        score += 25.0 * max(0.0, bw_min - bw) / max(bw_min, 1.0)
-        score += 48.0 * phase_margin_window_penalty(pm, pm_min or 60.0)
+        score += 70.0 * hard_fail_count
+        score += 80.0 * gain_deficit
+        score += 60.0 * bw_deficit
+        score += 35.0 * sr_deficit
+        score += 30.0 * swing_deficit
+        score += 50.0 * power_deficit
+        score += pm_window_weight * phase_margin_window_penalty(pm, pm_min or 60.0)
         if pm < 55.0:
             score += 80.0 + max(0.0, 55.0 - pm)
         if bw_max < float("inf"):
@@ -435,7 +479,7 @@ def tune_two_stage_compensation(
         if power_max < float("inf"):
             score += 0.2 * max(0.0, power) / max(power_max, 1e-12)
         if swing_min:
-            score += 6.0 * max(0.0, swing_min - meas.get("output_swing", 0.0)) / max(swing_min, 1.0)
+            score += 6.0 * swing_deficit
         if icmr_min_max is not None:
             if "icmr_min" in meas:
                 score += 4.0 * max(0.0, meas["icmr_min"] - icmr_min_max) / max(icmr_min_max, 1.0)
@@ -759,19 +803,36 @@ def tune_two_stage_compensation(
         ):
             current_candidates: list[tuple[float, float, float, float, float, str]] = []
             seeds = sorted(records, key=lambda item: item["score"])[:2] or [best]
-            recovery_steps = (
-                (1.08, 1.10, 1.00),
-                (1.12, 1.15, 1.05),
-                (1.12, 1.15, 1.10),
-                (1.15, 1.20, 1.05),
-                (1.15, 1.20, 1.10),
-                (1.20, 1.25, 1.10),
-                (1.20, 1.40, 1.15),
-                (1.25, 1.60, 1.20),
-                (1.30, 1.80, 1.25),
-                (1.08, 1.15, 1.05),
-                (1.12, 1.25, 1.10),
+            current_meas = best.get("measurements", {}) or {}
+            gain_limited = (
+                float(current_meas.get("dc_gain_db", 0.0) or 0.0) < gain_min
+                and (bw_min <= 0.0 or float(current_meas.get("unity_gain_bandwidth", 0.0) or 0.0) >= 1.20 * bw_min)
             )
+            if gain_limited:
+                recovery_steps = (
+                    (0.78, 0.65, 0.95),
+                    (0.70, 0.55, 1.00),
+                    (1.00, 0.60, 0.95),
+                    (0.92, 0.90, 0.95),
+                    (0.88, 0.85, 1.00),
+                    (1.00, 0.84, 0.95),
+                    (0.90, 1.00, 0.95),
+                    (1.08, 1.10, 1.00),
+                )
+            else:
+                recovery_steps = (
+                    (1.08, 1.10, 1.00),
+                    (1.12, 1.15, 1.05),
+                    (1.12, 1.15, 1.10),
+                    (1.15, 1.20, 1.05),
+                    (1.15, 1.20, 1.10),
+                    (1.20, 1.25, 1.10),
+                    (1.20, 1.40, 1.15),
+                    (1.25, 1.60, 1.20),
+                    (1.30, 1.80, 1.25),
+                    (1.08, 1.15, 1.05),
+                    (1.12, 1.25, 1.10),
+                )
             for seed in seeds:
                 for tail_scale, stage2_scale, cc_factor in recovery_steps:
                     add_candidate(
@@ -804,31 +865,38 @@ def tune_two_stage_compensation(
         if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
             return best
         candidates = (
-            (1.20, 1.80, 1.00, 2.00),
-            (1.50, 2.30, 1.00, 2.40),
-            (2.00, 3.00, 1.00, 3.00),
-            (1.20, 2.00, 0.90, 2.80),
-            (1.50, 2.60, 0.90, 3.00),
-            (2.00, 2.60, 1.10, 2.80),
-            (1.00, 2.00, 0.85, 3.00),
-            (1.00, 2.60, 0.85, 3.00),
-            (1.20, 3.00, 0.75, 3.00),
-            (1.60, 3.00, 0.85, 3.00),
-            (2.20, 3.00, 1.00, 3.00),
-            (1.40, 2.80, 1.20, 2.80),
+            (1.00, 1.00, 1.00, 1.00, 1.03),
+            (1.00, 1.00, 1.00, 1.00, 1.05),
+            (1.00, 1.00, 1.00, 1.00, 1.08),
+            (1.00, 1.00, 1.00, 1.00, 1.10),
+            (0.90, 2.20, 0.80, 3.00, 1.00),
+            (0.75, 2.60, 0.75, 3.00, 1.00),
+            (1.20, 1.80, 1.00, 2.00, 1.00),
+            (1.50, 2.30, 1.00, 2.40, 1.00),
+            (2.00, 3.00, 1.00, 3.00, 1.00),
+            (1.20, 2.00, 0.90, 2.80, 1.00),
+            (1.50, 2.60, 0.90, 3.00, 1.00),
+            (2.00, 2.60, 1.10, 2.80, 1.00),
+            (1.00, 2.00, 0.85, 3.00, 1.00),
+            (1.00, 2.60, 0.85, 3.00, 1.00),
+            (1.20, 3.00, 0.75, 3.00, 1.00),
+            (1.60, 3.00, 0.85, 3.00, 1.00),
+            (2.20, 3.00, 1.00, 3.00, 1.00),
+            (1.40, 2.80, 1.20, 2.80, 1.00),
         )
         selected = best
         original_timeout = getattr(sim, "timeout_sec", None)
         if original_timeout is not None:
             sim.timeout_sec = min(float(original_timeout), max(float(candidate_timeout_sec), 12.0))
         try:
-            for width_scale, length_scale, gain_width_scale, gain_length_scale in candidates[:max_gain_candidates]:
+            for width_scale, length_scale, gain_width_scale, gain_length_scale, output_source_length_scale in candidates[:max_gain_candidates]:
                 if time.time() - started >= time_budget_sec:
                     break
                 apply_load_scale(best.get("load_scale", 1.0))
                 apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
                 apply_input_pair_geometry(width_scale, length_scale)
                 apply_gain_refine_geometry(gain_width_scale, gain_length_scale)
+                apply_output_source_geometry(output_source_length_scale)
                 state.global_parameters["Cc"] = best["Cc"]
                 state.global_parameters["Rz"] = best["Rz"]
                 trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=True)
@@ -847,6 +915,7 @@ def tune_two_stage_compensation(
                         "input_pair_length_scale": length_scale,
                         "gain_refine_width_scale": gain_width_scale,
                         "gain_refine_length_scale": gain_length_scale,
+                        "output_source_length_scale": output_source_length_scale,
                         "measurements": meas,
                         "_has_operating_points": bool(trial.operating_points),
                     }
@@ -868,6 +937,7 @@ def tune_two_stage_compensation(
         best.get("gain_refine_width_scale", 1.0),
         best.get("gain_refine_length_scale", 1.0),
     )
+    apply_output_source_geometry(best.get("output_source_length_scale", 1.0))
     state.global_parameters["Cc"] = best["Cc"]
     state.global_parameters["Rz"] = best["Rz"]
     final_hard_errors = []

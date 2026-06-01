@@ -508,7 +508,62 @@ def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
             return f"agent write policy rejected knob outside design_variables: {knob}"
         if device and variable not in {"gm_id", "L"}:
             return f"agent write policy rejected unsupported device strategy variable: {knob}"
+        if _folded_gain_headroom_l_decrease_is_unsafe(state, action, device, variable):
+            return "agent write policy rejected folded-cascode tail L decrease while gain/headroom is failing"
+        if _telescopic_input_gmid_increase_is_unsafe(state, action, device, variable):
+            return "agent write policy rejected telescopic input-pair gm/ID increase in the high-gm/ID headroom-limited region"
     return ""
+
+
+def _folded_gain_headroom_l_decrease_is_unsafe(
+    state: DesignState,
+    action: dict[str, Any],
+    device: str,
+    variable: str,
+) -> bool:
+    if not device or variable != "L":
+        return False
+    architecture = (state.topology.architecture or "").lower()
+    roles = {dev.id: (dev.role or "").lower() for dev in state.topology.devices}
+    if "folded" not in architecture or roles.get(device) != "tail_current_source":
+        return False
+    causal = state.diagnostics.get("causal_diagnostics", {}) if state.diagnostics else {}
+    failed = set(causal.get("failed_symptoms", []) or [])
+    if not failed.intersection({"dc_gain", "saturation_margin"}):
+        return False
+    return str(action.get("direction", "")).lower() == "decrease"
+
+
+def _telescopic_input_gmid_increase_is_unsafe(
+    state: DesignState,
+    action: dict[str, Any],
+    device: str,
+    variable: str,
+) -> bool:
+    if not device or variable != "gm_id":
+        return False
+    architecture = (state.topology.architecture or "").lower()
+    roles = {dev.id: (dev.role or "").lower() for dev in state.topology.devices}
+    if "telescopic" not in architecture or roles.get(device) != "input_pair":
+        return False
+    if str(action.get("direction", "")).lower() != "increase":
+        return False
+    causal = state.diagnostics.get("causal_diagnostics", {}) if state.diagnostics else {}
+    failed = set(causal.get("failed_symptoms", []) or [])
+    if not failed.intersection({"dc_gain", "unity_gain_bandwidth", "slew_rate", "saturation_margin"}):
+        return False
+    current = action.get("current_value")
+    if isinstance(current, dict):
+        current = current.get(f"{device}.gm_id")
+    if current is None:
+        design_var = _find_design_variable(state, device, variable)
+        current = getattr(design_var, "initial", None) if design_var is not None else None
+    if current is None and device in state.transistors:
+        current = state.transistors[device].gm_id_strategy
+    try:
+        return float(current) >= 20.0
+    except (TypeError, ValueError):
+        return False
 
 
 def _formal_action_admissibility_error(state: DesignState, action: dict[str, Any]) -> str:

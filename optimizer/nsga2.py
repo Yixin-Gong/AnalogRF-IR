@@ -311,7 +311,7 @@ class CircuitEvaluator:
             or self.capabilities.has("telescopic_cascode")
             or "cascode" in architecture
         ):
-            return self._estimate_cascode_performance(tp)
+            return self._estimate_cascode_performance(tp, global_vars or {})
         return self._estimate_five_transistor_performance(tp)
 
     def _is_comparator(self) -> bool:
@@ -652,7 +652,11 @@ class CircuitEvaluator:
             "power": power,
         }
 
-    def _estimate_cascode_performance(self, tp: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    def _estimate_cascode_performance(
+        self,
+        tp: Dict[str, Dict[str, float]],
+        global_vars: Dict[str, float],
+    ) -> Dict[str, float]:
         """Topology-aware single-stage cascode OTA surrogate.
 
         This keeps the fast gm/ID search aligned with ngspice for telescopic
@@ -743,6 +747,20 @@ class CircuitEvaluator:
         stack_need = n_required + p_required
         stack_required_gap = span - stack_need
         headroom_factor = min(1.0, span / max(stack_need, 1e-9))
+        architecture = (self.schema.topology.architecture or "").lower()
+        if "folded" in architecture:
+            # The folded PMOS-input SG13G2 OTA is very sensitive to the NMOS
+            # cascode bias. A high ncas bias looks acceptable to the stack-only
+            # model but leaves too little measured VDS on the folded devices.
+            # Penalize that region so the surrogate seeds lower-ncas,
+            # higher-output-resistance points before ngspice repair.
+            ncas = self._global_value("vbias_ncas", 0.48 * span + vss, global_vars)
+            ptail = self._global_value("vbias_ptail", 0.78 * span + vss, global_vars)
+            high_ncas_penalty = max(0.0, ncas - (vss + 0.48 * span)) / max(span, 1e-9)
+            low_ncas_penalty = max(0.0, (vss + 0.34 * span) - ncas) / max(span, 1e-9)
+            low_ptail_penalty = max(0.0, (vss + 0.60 * span) - ptail) / max(span, 1e-9)
+            bias_factor = 1.0 - 2.4 * high_ncas_penalty - 1.2 * low_ncas_penalty - 0.8 * low_ptail_penalty
+            headroom_factor *= min(max(bias_factor, 0.35), 1.0)
 
         dc_gain = gm_in * rout * headroom_factor * headroom_factor
         dc_gain_db = 20.0 * math.log10(max(dc_gain, 1e-15))
