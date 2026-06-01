@@ -890,6 +890,7 @@ def tune_two_stage_compensation(
 class TwoStagePostProcessor:
     skip_dc_repair: bool = False
     skip_comp_tune: bool = False
+    compensation_kwargs: dict = field(default_factory=dict)
     events: list[dict] = field(default_factory=list)
 
     def run(self, state: DesignState, sim: NgspiceSimulator, work_dir: Path) -> list[dict]:
@@ -910,12 +911,16 @@ class TwoStagePostProcessor:
                 if rebalance:
                     self.events.append({"type": "stage2_rebalance", **rebalance})
         if not self.skip_comp_tune and has_miller_rc_compensation(state):
+            compensation_kwargs = {
+                "time_budget_sec": 160.0,
+                "candidate_timeout_sec": 12.0,
+            }
+            compensation_kwargs.update(dict(self.compensation_kwargs or {}))
             comp = tune_two_stage_compensation(
                 state,
                 sim,
                 work_dir,
-                time_budget_sec=160.0,
-                candidate_timeout_sec=12.0,
+                **compensation_kwargs,
             )
             if comp:
                 self.events.append({"type": "compensation_tune", **comp})

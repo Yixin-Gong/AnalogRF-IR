@@ -143,6 +143,9 @@ class DiagnosticAgentLoop:
         if self._is_better_summary(summary, self._best_summary):
             self._best_result = result
             self._best_summary = summary
+        rescue_attempted = bool(state.get("postprocess_rescue_attempted", False))
+        if round_config.force_postprocess_fallback and summary.get("postprocess_event_count", 0):
+            rescue_attempted = True
         self._print_round_summary(summary)
         self.emit(f"       [timing] agent.execute_main_flow.round_{round_index}: {summary['round_elapsed_sec']:.2f}s")
         return {
@@ -152,6 +155,7 @@ class DiagnosticAgentLoop:
             "last_spec_pass": bool(summary["spec_pass"]),
             "last_failed_targets": list(summary["failed_targets"]),
             "force_postprocess_once": False,
+            "postprocess_rescue_attempted": rescue_attempted,
             "stop_reason": "",
         }
 
@@ -247,13 +251,15 @@ class DiagnosticAgentLoop:
         schema_state.diagnostics = _next_round_diagnostics(application)
         schema_state.to_yaml(tuned_schema, include_runtime_context=False)
         self.emit(f"       Next schema: {tuned_schema}")
-        self.emit("       Adaptive policy: enabling one postprocess fallback after the applied schema edit")
+        force_postprocess = bool(getattr(self.config, "force_postprocess_after_schema_edit", False))
+        if force_postprocess:
+            self.emit("       Adaptive policy: enabling one postprocess fallback after the applied schema edit")
         self.emit(f"       [timing] agent.execute_schema_command: {time.perf_counter() - node_started:.2f}s")
         return {
             "current_schema": str(tuned_schema),
             "round_index": round_index + 1,
             "last_tuning_application": application,
-            "force_postprocess_once": True,
+            "force_postprocess_once": force_postprocess,
             "stop_reason": "",
         }
 
@@ -345,7 +351,9 @@ class DiagnosticAgentLoop:
             generations = self._short_reopt_generations()
             pop_size = self._short_reopt_pop_size()
         force_once = bool(state.get("force_postprocess_once", False))
-        stagnated = self._stagnation_detected(state.get("rounds", []))
+        stagnated = self._stagnation_detected(state.get("rounds", [])) and not bool(
+            state.get("postprocess_rescue_attempted", False)
+        )
         force_postprocess = force_once or stagnated
         if force_once:
             self.emit("       Adaptive policy: enabling postprocess fallback because no admissible schema edit was available")
@@ -398,6 +406,11 @@ class DiagnosticAgentLoop:
         rounds = state.get("rounds", []) or []
         if not rounds or rounds[-1].get("spec_pass"):
             return False
+        if str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast":
+            failed = set(rounds[-1].get("failed_targets", []) or [])
+            repair_sensitive = {"phase_margin", "slew_rate", "slew_rate_pos", "slew_rate_neg", "output_swing"}
+            if not failed.intersection(repair_sensitive):
+                return False
         return int(rounds[-1].get("postprocess_event_count", 0) or 0) == 0
 
     def _load_design_state(self, path: Path) -> DesignState:
@@ -449,14 +462,17 @@ class DiagnosticAgentLoop:
             return True
         return _summary_rank(candidate) < _summary_rank(incumbent)
 
-    @staticmethod
-    def _runtime_stagnation_detected(rounds: list[dict[str, Any]]) -> bool:
-        if len(rounds) < 6:
+    def _runtime_stagnation_detected(self, rounds: list[dict[str, Any]]) -> bool:
+        fast_profile = str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast"
+        min_rounds = 3 if fast_profile else 6
+        window = 2 if fast_profile else 4
+        tolerance = 0.03 if fast_profile else 0.02
+        if len(rounds) < min_rounds:
             return False
         current_failed = set(rounds[-1].get("failed_targets", []) or [])
         if not current_failed:
             return False
-        recent = rounds[-4:]
+        recent = rounds[-window:]
         if any(set(item.get("failed_targets", []) or []) != current_failed for item in recent):
             return False
         scores = []
@@ -468,11 +484,11 @@ class DiagnosticAgentLoop:
             if not (score >= 0.0):
                 return False
             scores.append(score)
-        older_best = min(scores[:-4])
-        recent_best = min(scores[-4:])
+        older_best = min(scores[:-window])
+        recent_best = min(scores[-window:])
         if older_best <= 1e-12:
             return False
-        return (older_best - recent_best) <= max(1e-6, 0.02 * older_best)
+        return (older_best - recent_best) <= max(1e-6, tolerance * older_best)
 
     def _print_round_summary(self, summary: dict[str, Any]) -> None:
         self.emit("       Round summary:")

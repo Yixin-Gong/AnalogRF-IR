@@ -146,6 +146,30 @@ def _parse_args(argv=None):
         default=default("intervention_perturbation", 0.10),
         help="Default fractional perturbation for local intervention modeling when an action has no explicit value",
     )
+    parser.add_argument(
+        "--intervention-transient-policy",
+        choices=("targeted", "auto", "off"),
+        default=default("intervention_transient_policy", "targeted"),
+        help="Transient use in local intervention probes: targeted only runs TRAN for slew actions.",
+    )
+    parser.add_argument(
+        "--runtime-profile",
+        choices=("standard", "ablation_fast"),
+        default=default("runtime_profile", "standard"),
+        help="Runtime budget profile for agent/postprocess execution.",
+    )
+    parser.add_argument(
+        "--force-postprocess-after-schema-edit",
+        action="store_true",
+        default=bool(default("force_postprocess_after_schema_edit", False)),
+        help="Run one fallback postprocess pass after each applied schema edit.",
+    )
+    parser.add_argument(
+        "--no-force-postprocess-after-schema-edit",
+        dest="force_postprocess_after_schema_edit",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--asir", dest="no_asir", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-asir",
@@ -203,9 +227,12 @@ def main(argv=None) -> int:
             enable_intervention_model=bool(args.enable_intervention_model or args.agent_rounds > 1),
             intervention_max_actions=max(0, int(args.intervention_max_actions)),
             intervention_perturbation_fraction=float(args.intervention_perturbation),
+            intervention_transient_policy=args.intervention_transient_policy,
             reopt_generations=int(args.reopt_generations) if int(args.reopt_generations) > 0 else None,
             reopt_pop_size=int(args.reopt_pop_size) if int(args.reopt_pop_size) > 0 else None,
             action_strategy=args.action_strategy,
+            runtime_profile=args.runtime_profile,
+            force_postprocess_after_schema_edit=bool(args.force_postprocess_after_schema_edit),
         )
         if args.agent_rounds > 1:
             DiagnosticAgentLoop(

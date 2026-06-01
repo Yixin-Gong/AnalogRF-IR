@@ -46,6 +46,9 @@ CONFIG_KEY_ALIASES = {
     "intervention.enable": "enable_intervention_model",
     "intervention.max_actions": "intervention_max_actions",
     "intervention.perturbation": "intervention_perturbation",
+    "intervention.transient_policy": "intervention_transient_policy",
+    "runtime.profile": "runtime_profile",
+    "runtime.force_postprocess_after_schema_edit": "force_postprocess_after_schema_edit",
     "output.runs_dir": "runs_dir",
 }
 

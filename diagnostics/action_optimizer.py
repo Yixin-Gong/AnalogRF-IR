@@ -37,6 +37,7 @@ def build_spice_intervention_model(
     tuning: dict[str, Any],
     max_actions: int = 4,
     perturbation_fraction: float = 0.10,
+    transient_policy: str = "targeted",
 ) -> dict[str, Any]:
     """Build a local action-to-violation model from small SPICE perturbations.
 
@@ -81,10 +82,12 @@ def build_spice_intervention_model(
 
         try:
             netlist = generate_netlist(trial_state)
+            include_transient = _include_transient_for_action(action, transient_policy)
             sim_started = time.perf_counter()
             result: SimulationResult = sim.run(
                 netlist,
                 work_dir=str(work_path / _safe_action_dir(index, action_id)),
+                include_transient=include_transient,
             )
             sim_elapsed = time.perf_counter() - sim_started
         except Exception as exc:  # pragma: no cover - defensive around external simulator
@@ -133,6 +136,7 @@ def build_spice_intervention_model(
                 "violation_reduction": round(float(reduction), 6),
                 "uncertainty": 0.10 if result.success else (0.25 if usable else 0.80),
                 "interpretation": _effect_interpretation(delta),
+                "include_transient": include_transient,
                 "elapsed_sec": round(time.perf_counter() - action_started, 6),
                 "sim_elapsed_sec": round(float(getattr(result, "elapsed_sec", sim_elapsed) or sim_elapsed), 6),
             }
@@ -154,6 +158,18 @@ def build_spice_intervention_model(
         "slowest_action": _slowest_action_effect(effects),
     }
     return model
+
+
+def _include_transient_for_action(action: dict[str, Any], policy: str) -> bool | None:
+    normalized = str(policy or "targeted").strip().lower()
+    if normalized in {"auto", "default", "ngspice"}:
+        return None
+    if normalized in {"off", "false", "0", "dc_ac"}:
+        return False
+    metric = str(action.get("metric") or "").lower()
+    if metric.startswith("slew_rate"):
+        return True
+    return False
 
 
 def build_surrogate_intervention_model(

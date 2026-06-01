@@ -80,6 +80,9 @@ cases:
         provider: deepseek
       intervention:
         enable: true
-        max_actions: 8
+        max_actions: 4
+        transient_policy: targeted
       postprocess:
         policy: 'fallback'
+      runtime:
+        profile: ablation_fast

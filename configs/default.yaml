@@ -53,6 +53,11 @@ intervention:
   enable: false
   max_actions: 4
   perturbation: 0.10
+  transient_policy: targeted
+
+runtime:
+  profile: standard
+  force_postprocess_after_schema_edit: false
 
 output:
   runs_dir: runs

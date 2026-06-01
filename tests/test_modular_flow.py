@@ -2186,6 +2186,10 @@ def test_adaptive_strategy_cli_and_short_reoptimization_budget():
             "12",
             "--action-strategy",
             "combo_coarse_fine",
+            "--runtime-profile",
+            "ablation_fast",
+            "--intervention-transient-policy",
+            "targeted",
         ]
     )
     loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
@@ -2196,11 +2200,14 @@ def test_adaptive_strategy_cli_and_short_reoptimization_budget():
         reopt_pop_size=args.reopt_pop_size,
         postprocess_policy=args.postprocess_policy,
         postprocess_near_feasible_ratio=args.postprocess_near_feasible_ratio,
+        runtime_profile=args.runtime_profile,
     )
     loop.emit = lambda _msg: None
 
     assert args.postprocess_policy == "fallback"
     assert args.action_strategy == "combo_coarse_fine"
+    assert args.runtime_profile == "ablation_fast"
+    assert args.intervention_transient_policy == "targeted"
     assert loop._short_reopt_generations() == 3
     assert loop._short_reopt_pop_size() == 12
     assert loop._stagnation_detected([{"best_loss": 1.0}, {"best_loss": 0.99}]) is True

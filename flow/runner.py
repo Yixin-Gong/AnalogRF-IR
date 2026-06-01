@@ -50,9 +50,12 @@ class FlowConfig:
     enable_intervention_model: bool = False
     intervention_max_actions: int = 4
     intervention_perturbation_fraction: float = 0.10
+    intervention_transient_policy: str = "targeted"
     reopt_generations: int | None = None
     reopt_pop_size: int | None = None
     action_strategy: str = "combo_coarse_fine"
+    runtime_profile: str = "standard"
+    force_postprocess_after_schema_edit: bool = False
 
 
 @dataclass
@@ -251,6 +254,7 @@ class AnalogRFIRFlowRunner:
                 config=PostprocessConfig(
                     skip_dc_repair=cfg.skip_dc_repair,
                     skip_comp_tune=cfg.skip_comp_tune,
+                    runtime_profile=cfg.runtime_profile,
                 ),
                 profile=problem.profile,
                 capabilities=problem.capabilities,
@@ -402,6 +406,7 @@ class AnalogRFIRFlowRunner:
             tuning=provisional.get("attribution_guided_tuning", {}),
             max_actions=max(0, int(cfg.intervention_max_actions)),
             perturbation_fraction=float(cfg.intervention_perturbation_fraction),
+            transient_policy=str(cfg.intervention_transient_policy or "targeted"),
         )
         if timing is not None:
             self._record_timing(

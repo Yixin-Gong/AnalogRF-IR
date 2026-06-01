@@ -28,13 +28,18 @@ def tune_current_mirror_ota_operating_point(
     state: DesignState,
     sim: NgspiceSimulator,
     work_dir: Path,
+    *,
+    max_candidates: int = 120,
+    time_budget_sec: float = 150.0,
+    candidate_timeout_sec: float = 5.0,
 ) -> dict[str, Any]:
     event = tune_single_stage_ota_operating_point(
         state,
         sim,
         work_dir,
-        max_candidates=120,
-        time_budget_sec=150.0,
+        max_candidates=max_candidates,
+        time_budget_sec=time_budget_sec,
+        candidate_timeout_sec=candidate_timeout_sec,
     )
     if not event:
         return {}
@@ -49,6 +54,9 @@ def tune_cascode_ota_operating_point(
     max_candidates: int = 48,
     time_budget_sec: float = 45.0,
     candidate_timeout_sec: float = 2.5,
+    refinement_time_budget_sec: float | None = None,
+    max_current_refinement_candidates: int | None = None,
+    max_width_refinement_candidates: int | None = None,
 ) -> dict[str, Any]:
     if not is_cascode_ota_state(state):
         return {}
@@ -103,8 +111,13 @@ def tune_cascode_ota_operating_point(
         best,
         original_globals,
         started=started,
-        time_budget_sec=max(time_budget_sec, 180.0),
+        time_budget_sec=(
+            refinement_time_budget_sec
+            if refinement_time_budget_sec is not None
+            else max(time_budget_sec, 180.0)
+        ),
         candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+        max_candidates=max_current_refinement_candidates,
     )
     best = _refine_widths_for_speed(
         state,
@@ -115,8 +128,13 @@ def tune_cascode_ota_operating_point(
         original_widths,
         original_lengths,
         started=started,
-        time_budget_sec=max(time_budget_sec, 90.0),
+        time_budget_sec=(
+            refinement_time_budget_sec
+            if refinement_time_budget_sec is not None
+            else max(time_budget_sec, 90.0)
+        ),
         candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+        max_candidates=max_width_refinement_candidates,
     )
     _restore_globals(state, original_globals)
     _restore_widths(state, original_widths)
@@ -470,6 +488,7 @@ def _refine_tail_current_for_speed(
     started: float,
     time_budget_sec: float,
     candidate_timeout_sec: float,
+    max_candidates: int | None,
 ) -> dict[str, Any]:
     targets = state.targets
     bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
@@ -499,7 +518,8 @@ def _refine_tail_current_for_speed(
     if original_timeout is not None and candidate_timeout_sec > 0:
         sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
     try:
-        for scale in (1.15, 1.35, 1.6, 2.0, 2.6, 3.4, 4.5, 6.0, 8.0, 11.0, 15.0, 22.0, 32.0):
+        scales = (1.15, 1.35, 1.6, 2.0, 2.6, 3.4, 4.5, 6.0, 8.0, 11.0, 15.0, 22.0, 32.0)
+        for scale in scales[: max_candidates or len(scales)]:
             if time.time() - started > time_budget_sec:
                 break
             current = min(max(base_current * scale, low), high)
@@ -542,6 +562,7 @@ def _refine_widths_for_speed(
     started: float,
     time_budget_sec: float,
     candidate_timeout_sec: float,
+    max_candidates: int | None,
 ) -> dict[str, Any]:
     targets = state.targets
     gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
@@ -564,7 +585,7 @@ def _refine_widths_for_speed(
     if original_timeout is not None and candidate_timeout_sec > 0:
         sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
     try:
-        for idx, template in enumerate(templates, start=1):
+        for idx, template in enumerate(templates[: max_candidates or len(templates)], start=1):
             if time.time() - started > time_budget_sec:
                 break
             _restore_globals(state, original_globals)

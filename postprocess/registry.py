@@ -21,6 +21,7 @@ from simulator.ngspice import NgspiceSimulator
 class PostprocessConfig:
     skip_dc_repair: bool = False
     skip_comp_tune: bool = False
+    runtime_profile: str = "standard"
 
 
 @dataclass(frozen=True)
@@ -51,9 +52,23 @@ class TwoStagePass:
         return context.capabilities.has("two_stage_gain")
 
     def run(self, context: PostprocessContext) -> list[dict]:
+        fast = _fast_runtime(context)
         processor = TwoStagePostProcessor(
             skip_dc_repair=context.config.skip_dc_repair,
             skip_comp_tune=context.config.skip_comp_tune,
+            compensation_kwargs=(
+                {
+                    "max_base_candidates": 10,
+                    "max_refine_candidates": 2,
+                    "max_load_candidates": 2,
+                    "max_current_candidates": 4,
+                    "max_gain_candidates": 4,
+                    "time_budget_sec": 60.0,
+                    "candidate_timeout_sec": 4.0,
+                }
+                if fast
+                else {}
+            ),
         )
         return processor.run(context.state, context.sim, context.work_dir)
 
@@ -74,7 +89,12 @@ class SingleStageOTAPass:
         )
 
     def run(self, context: PostprocessContext) -> list[dict]:
-        event = tune_single_stage_ota_operating_point(context.state, context.sim, context.work_dir)
+        kwargs = (
+            {"max_candidates": 16, "time_budget_sec": 30.0, "candidate_timeout_sec": 3.0}
+            if _fast_runtime(context)
+            else {}
+        )
+        event = tune_single_stage_ota_operating_point(context.state, context.sim, context.work_dir, **kwargs)
         return [{"type": "single_stage_ota_op_tune", **event}] if event else []
 
 
@@ -93,7 +113,12 @@ class CurrentMirrorOTAPass:
         )
 
     def run(self, context: PostprocessContext) -> list[dict]:
-        event = tune_current_mirror_ota_operating_point(context.state, context.sim, context.work_dir)
+        kwargs = (
+            {"max_candidates": 16, "time_budget_sec": 35.0, "candidate_timeout_sec": 3.0}
+            if _fast_runtime(context)
+            else {}
+        )
+        event = tune_current_mirror_ota_operating_point(context.state, context.sim, context.work_dir, **kwargs)
         return [{"type": "current_mirror_ota_op_tune", **event}] if event else []
 
 
@@ -112,7 +137,19 @@ class CascodeOTAPass:
         )
 
     def run(self, context: PostprocessContext) -> list[dict]:
-        event = tune_cascode_ota_operating_point(context.state, context.sim, context.work_dir)
+        kwargs = (
+            {
+                "max_candidates": 12,
+                "time_budget_sec": 32.0,
+                "candidate_timeout_sec": 2.5,
+                "refinement_time_budget_sec": 45.0,
+                "max_current_refinement_candidates": 4,
+                "max_width_refinement_candidates": 4,
+            }
+            if _fast_runtime(context)
+            else {}
+        )
+        event = tune_cascode_ota_operating_point(context.state, context.sim, context.work_dir, **kwargs)
         return [{"type": "cascode_ota_op_tune", **event}] if event else []
 
 
@@ -149,3 +186,7 @@ class PostprocessRegistry:
         for postprocess_pass in self.resolve(context):
             events.extend(postprocess_pass.run(context))
         return events
+
+
+def _fast_runtime(context: PostprocessContext) -> bool:
+    return str(context.config.runtime_profile or "standard").lower() == "ablation_fast"
