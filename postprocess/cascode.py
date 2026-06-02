@@ -150,6 +150,20 @@ def tune_cascode_ota_operating_point(
         ),
         candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
     )
+    best = _refine_close_miss_bias(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        started=started,
+        time_budget_sec=max(
+            float(time_budget_sec),
+            float(refinement_time_budget_sec or 0.0),
+            90.0,
+        ),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+    )
     _restore_globals(state, original_globals)
     _restore_widths(state, original_widths)
     _restore_lengths(state, original_lengths)
@@ -285,23 +299,7 @@ def _topology_guided_initial_points(
 ) -> list[dict[str, Any]]:
     family = _topology_family(state)
     if family == "folded_cascode_ota" and {"vbias_ptail", "vbias_ncas"}.issubset(original):
-        return _guided_grid(
-            state,
-            original,
-            vdd,
-            "folded_initial_search",
-            {
-                # PMOS tail: upper-mid gate bias keeps current moderate enough
-                # for output resistance while still allowing tens-of-MHz UGBW.
-                "vbias_ptail": (0.44, 0.50, 0.56, 0.62, 0.68),
-                # NMOS cascode: upper-mid bias splits voltage across mirror and
-                # common-gate devices under a 1.2 V stack. In the folded
-                # PMOS-input OTA the useful headroom point is often lower than
-                # in telescopic stacks, so cover that region early.
-                "vbias_ncas": (0.24, 0.30, 0.36, 0.44, 0.52),
-            },
-            max_points=25,
-        )
+        return _folded_guided_points(state, original, vdd, max_points=25)
     if family == "telescopic_cascode_ota" and {"vbias_tail", "vbias_ncas", "vbias_pcas"}.issubset(original):
         return _guided_grid(
             state,
@@ -319,6 +317,53 @@ def _topology_guided_initial_points(
             max_points=24,
         )
     return []
+
+
+def _folded_guided_points(
+    state: DesignState,
+    original: dict[str, float],
+    vdd: float,
+    *,
+    max_points: int,
+) -> list[dict[str, Any]]:
+    ptail_low, ptail_high = _bias_range(state, "vbias_ptail", vdd)
+    ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+
+    def qvalue(low: float, high: float, q: float) -> float:
+        return low + _clip(float(q), 0.0, 1.0) * (high - low)
+
+    # Ordered by usefulness under a small fast-ablation budget: start from
+    # moderate current/headroom points, then bracket toward high-current speed
+    # and low-current gain corners.
+    quantile_pairs = (
+        (0.28, 0.12),
+        (0.32, 0.16),
+        (0.24, 0.08),
+        (0.36, 0.22),
+        (0.20, 0.12),
+        (0.40, 0.18),
+        (0.16, 0.08),
+        (0.44, 0.24),
+        (0.12, 0.04),
+        (0.48, 0.30),
+        (0.08, 0.12),
+        (0.56, 0.34),
+        (0.04, 0.18),
+        (0.62, 0.40),
+        (0.00, 0.22),
+        (0.68, 0.48),
+    )
+    points = []
+    for ptail_q, ncas_q in quantile_pairs[:max_points]:
+        points.append(
+            {
+                **original,
+                "vbias_ptail": qvalue(ptail_low, ptail_high, ptail_q),
+                "vbias_ncas": qvalue(ncas_low, ncas_high, ncas_q),
+                "phase": "folded_initial_search",
+            }
+        )
+    return _dedupe(points)
 
 
 def _guided_grid(
@@ -546,7 +591,7 @@ def _refine_tail_current_for_speed(
     if original_timeout is not None and candidate_timeout_sec > 0:
         sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
     try:
-        scales = (1.15, 1.35, 1.6, 2.0, 2.6, 3.4, 4.5, 6.0, 8.0, 11.0, 15.0, 22.0, 32.0)
+        scales = (1.35, 2.0, 3.4, 6.0, 1.15, 1.6, 2.6, 4.5, 8.0, 11.0, 15.0, 22.0, 32.0)
         for scale in scales[: max_candidates or len(scales)]:
             if time.time() - started > time_budget_sec:
                 break
@@ -730,6 +775,103 @@ def _refine_telescopic_close_gain_bias(
     if selected is None:
         return best
     selected["close_gain_bias_refinement_count"] = len(records)
+    return selected
+
+
+def _refine_close_miss_bias(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    family = _topology_family(state)
+    if family not in {"telescopic_cascode_ota", "folded_cascode_ota"}:
+        return best
+
+    targets = state.targets
+    gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
+    bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
+    pm_min = float(targets.get("phase_margin", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
+    swing_min = float(targets.get("output_swing", Target()).min or 0.0)
+    meas = best.get("measurements", {}) or {}
+    gain = float(meas.get("dc_gain_db", 0.0) or 0.0)
+    bw = float(meas.get("unity_gain_bandwidth", 0.0) or 0.0)
+    pm = float(meas.get("phase_margin", 0.0) or 0.0)
+    sr = float(meas.get("slew_rate", 0.0) or 0.0)
+    swing = float(meas.get("output_swing", 0.0) or 0.0)
+
+    gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
+    sr_deficit = max(0.0, sr_min - sr) / max(sr_min, 1.0) if sr_min > 0.0 else 0.0
+    if gain_deficit <= 0.0 and sr_deficit <= 0.0:
+        return best
+    if gain_deficit > 0.06 or sr_deficit > 0.12:
+        return best
+    if bw_min > 0.0 and bw < 0.90 * bw_min:
+        return best
+    if pm_min > 0.0 and pm < max(55.0, pm_min - 5.0):
+        return best
+    if swing_min > 0.0 and swing < swing_min:
+        return best
+
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    trial_points: list[dict[str, float]] = []
+    if family == "telescopic_cascode_ota":
+        tail_low, tail_high = _bias_range(state, "vbias_tail", vdd)
+        tail0 = float(best.get("vbias_tail", state.global_parameters.get("vbias_tail", tail_low)))
+        for delta in (0.015, 0.03, 0.05, 0.075):
+            trial_points.append({"vbias_tail": _clip(tail0 + delta, tail_low, tail_high)})
+    else:
+        ptail_low, ptail_high = _bias_range(state, "vbias_ptail", vdd)
+        ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+        ptail0 = float(best.get("vbias_ptail", state.global_parameters.get("vbias_ptail", ptail_high)))
+        ncas0 = float(best.get("vbias_ncas", state.global_parameters.get("vbias_ncas", ncas_low)))
+        for delta in (0.015, 0.03, 0.05):
+            trial_points.append({"vbias_ptail": _clip(ptail0 - delta, ptail_low, ptail_high)})
+        for delta in (0.02, 0.04, 0.06):
+            trial_points.append({"vbias_ncas": _clip(ncas0 - delta, ncas_low, ncas_high)})
+        if gain_deficit > 0.0 and sr_deficit > 0.0:
+            trial_points.extend(
+                {
+                    "vbias_ptail": _clip(ptail0 - ptail_delta, ptail_low, ptail_high),
+                    "vbias_ncas": _clip(ncas0 - ncas_delta, ncas_low, ncas_high),
+                }
+                for ptail_delta, ncas_delta in ((0.015, 0.02), (0.03, 0.04))
+            )
+
+    records: list[dict[str, Any]] = []
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        for point in _dedupe(trial_points)[:5]:
+            if time.time() - started > time_budget_sec:
+                break
+            _restore_globals(state, original_globals)
+            _apply_candidate(state, best)
+            candidate = dict(best)
+            candidate.update(point)
+            candidate["phase"] = f"{best.get('phase', '')}+close_miss_bias_refine"
+            _apply_candidate(state, candidate)
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            item = _score_candidate(state, trial, candidate)
+            item["close_miss_bias_refinement_count"] = len(records) + 1
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["close_miss_bias_refinement_count"] = len(records)
     return selected
 
 

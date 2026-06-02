@@ -39,6 +39,23 @@ def stage2_vout_from_result(state: DesignState, result) -> float | None:
     return None
 
 
+def stage2_headroom_from_result(state: DesignState, result) -> dict:
+    gain_id, sink_id = get_stage2_device_ids(state)
+    out: dict[str, float] = {}
+    for key, device_id in (("gain", gain_id), ("sink", sink_id)):
+        if not device_id:
+            continue
+        op = op_for_device(result, device_id)
+        if not op:
+            continue
+        vds = abs(float(op.get("vds", 0.0) or 0.0))
+        vdsat = abs(float(op.get("vdsat", 0.0) or 0.0))
+        out[f"{key}_vds"] = vds
+        out[f"{key}_vdsat"] = vdsat
+        out[f"{key}_margin"] = vds - vdsat
+    return out
+
+
 def op_for_device(result, device_id: str) -> dict:
     for name in (f"M{device_id}".upper(), device_id.upper()):
         op = result.operating_points.get(name)
@@ -115,9 +132,11 @@ def balance_two_stage_output(
     sim: NgspiceSimulator,
     work_dir: Path,
     max_iter: int = 9,
+    required_margin: float = 0.01,
 ) -> dict:
     if not is_two_stage_state(state):
         return {}
+    started_for_balance = time.time()
     gain_id, sink_id = get_stage2_device_ids(state)
     if not gain_id or not sink_id:
         return {}
@@ -134,7 +153,13 @@ def balance_two_stage_output(
     max_w = getattr(proc, "max_W", 200e-6)
     w_grid = getattr(proc, "W_precision", 10e-9)
     base_sink_w = sink_ts.parameters.W if sink_ts and sink_ts.parameters.W > 0 else None
-    best = {"scale": 1.0, "sink_scale": 1.0, "vout": None, "error": float("inf")}
+    best = {
+        "scale": 1.0,
+        "sink_scale": 1.0,
+        "vout": None,
+        "error": float("inf"),
+        "headroom_score": float("inf"),
+    }
 
     def _clip_width(width: float) -> float:
         return min(max(_snap_to_grid(width, w_grid), min_w), max_w)
@@ -150,8 +175,22 @@ def balance_two_stage_output(
         if vout is None:
             return None
         err = abs(vout - target)
-        if err < best["error"]:
-            best.update({"scale": scale, "sink_scale": sink_scale, "vout": vout, "error": err})
+        headroom = stage2_headroom_from_result(state, trial)
+        gain_margin = float(headroom.get("gain_margin", 0.0))
+        sink_margin = float(headroom.get("sink_margin", 0.0))
+        margin_deficit = max(0.0, required_margin - gain_margin) + max(0.0, required_margin - sink_margin)
+        score = err + 4.0 * margin_deficit
+        if score < best["headroom_score"]:
+            best.update(
+                {
+                    "scale": scale,
+                    "sink_scale": sink_scale,
+                    "vout": vout,
+                    "error": err,
+                    "headroom_score": score,
+                    **headroom,
+                }
+            )
         return vout
 
     base_vout = evaluate(1.0, 1.0)
@@ -160,11 +199,23 @@ def balance_two_stage_output(
         if sink_ts and base_sink_w:
             set_symmetric_width(state, sink_id, base_sink_w)
         return {}
-    if 0.25 * vdd <= base_vout <= 0.75 * vdd:
+    base_headroom = stage2_headroom_from_result(state, sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=False))
+    gain_margin = float(base_headroom.get("gain_margin", 0.0))
+    sink_margin = float(base_headroom.get("sink_margin", 0.0))
+    if 0.25 * vdd <= base_vout <= 0.75 * vdd and min(gain_margin, sink_margin) >= required_margin:
         gain_ts.parameters.W = base_w
         if sink_ts and base_sink_w:
             set_symmetric_width(state, sink_id, base_sink_w)
-        best.update({"scale": 1.0, "sink_scale": 1.0, "vout": base_vout, "error": abs(base_vout - target)})
+        best.update(
+            {
+                "scale": 1.0,
+                "sink_scale": 1.0,
+                "vout": base_vout,
+                "error": abs(base_vout - target),
+                "headroom_score": abs(base_vout - target),
+                **base_headroom,
+            }
+        )
         return best
 
     lo = max(0.25, min_w / base_w) if base_w > 0 else 0.25
@@ -208,6 +259,29 @@ def balance_two_stage_output(
         for sink_scale in sink_candidates:
             if sink_scale > 0:
                 evaluate(gain_scale, sink_scale)
+
+    if sink_ts and base_sink_w:
+        sink_hi = min(16.0, max_w / base_sink_w) if base_sink_w > 0 else 16.0
+        if (best["vout"] or base_vout) > target:
+            paired = [
+                (lo, 1.5),
+                (lo, 2.5),
+                (lo, 4.0),
+                (max(lo, 0.35), min(6.0, sink_hi)),
+                (0.50, min(8.0, sink_hi)),
+            ]
+        else:
+            paired = [
+                (1.25, 0.75),
+                (1.60, 0.50),
+                (2.20, 0.33),
+                (min(hi, 3.20), 0.20),
+                (hi, 0.125),
+            ]
+        for gain_scale, sink_scale in paired:
+            if time.time() - started_for_balance > 8.0:
+                break
+            evaluate(gain_scale, sink_scale)
 
     gain_ts.parameters.W = _clip_width(base_w * best["scale"])
     if sink_ts and base_sink_w:
@@ -579,6 +653,7 @@ def tune_two_stage_compensation(
         "rejected_unsafe_candidates": 0,
         "unsafe_examples": [],
         "gain_refine_candidates": 0,
+        "near_miss_refine_candidates": 0,
     }
     started = time.time()
     evaluated: set[tuple[str, str, str, str, str]] = set()
@@ -865,6 +940,10 @@ def tune_two_stage_compensation(
         if swing_min > 0.0 and float(meas.get("output_swing", 0.0) or 0.0) < swing_min:
             return best
         candidates = (
+            (1.00, 1.10, 0.90, 1.18, 1.03),
+            (1.00, 1.15, 0.85, 1.25, 1.05),
+            (0.95, 1.20, 0.85, 1.30, 1.08),
+            (1.05, 1.25, 0.80, 1.35, 1.10),
             (1.00, 1.00, 1.00, 1.00, 1.03),
             (1.00, 1.00, 1.00, 1.00, 1.05),
             (1.00, 1.00, 1.00, 1.00, 1.08),
@@ -926,7 +1005,95 @@ def tune_two_stage_compensation(
                 sim.timeout_sec = original_timeout
         return selected
 
+    def run_near_miss_refine(best: dict) -> dict:
+        meas = best.get("measurements", {}) or {}
+        if spec_pass(meas):
+            return best
+        gain = float(meas.get("dc_gain_db", 0.0) or 0.0)
+        bw = float(meas.get("unity_gain_bandwidth", 0.0) or 0.0)
+        pm = float(meas.get("phase_margin", 0.0) or 0.0)
+        sr = float(meas.get("slew_rate", 0.0) or 0.0)
+        swing = float(meas.get("output_swing", 0.0) or 0.0)
+        gain_deficit = max(0.0, gain_min - gain) / max(gain_min, 1.0)
+        pm_deficit = max(0.0, pm_min - pm) / max(pm_min, 1.0) if pm_min > 0.0 else 0.0
+        if gain_deficit > 0.05 or pm_deficit > 0.06:
+            return best
+        if bw_min > 0.0 and bw < 0.95 * bw_min:
+            return best
+        if sr_min > 0.0 and sr < sr_min:
+            return best
+        if swing_min > 0.0 and swing < swing_min:
+            return best
+
+        candidates = (
+            (1.04, 1.00, 1.05, 0.95, 1.12, 1.05, 1.05, 1.00, 1.00),
+            (1.07, 1.00, 1.10, 0.95, 1.20, 1.08, 1.08, 1.00, 1.00),
+            (1.03, 1.00, 1.00, 1.20, 1.00, 1.00, 1.00, 1.00, 1.25),
+            (1.06, 0.95, 1.05, 1.10, 1.20, 1.08, 1.08, 1.00, 1.10),
+        )
+        selected = best
+        original_timeout = getattr(sim, "timeout_sec", None)
+        if original_timeout is not None:
+            sim.timeout_sec = min(float(original_timeout), max(float(candidate_timeout_sec), 12.0))
+        try:
+            for (
+                cc_scale,
+                rz_scale,
+                input_l_scale,
+                gain_w_scale,
+                gain_l_scale,
+                output_l_scale,
+                load_scale_extra,
+                tail_scale_extra,
+                stage2_scale_extra,
+            ) in candidates:
+                if time.time() - started >= time_budget_sec:
+                    break
+                apply_load_scale(best.get("load_scale", 1.0) * load_scale_extra)
+                apply_current_scale(
+                    best.get("tail_current_scale", 1.0) * tail_scale_extra,
+                    best.get("stage2_current_scale", 1.0) * stage2_scale_extra,
+                )
+                apply_input_pair_geometry(1.0, input_l_scale)
+                apply_gain_refine_geometry(gain_w_scale, gain_l_scale)
+                apply_output_source_geometry(output_l_scale)
+                state.global_parameters["Cc"] = min(max(best["Cc"] * cc_scale, cc_low), cc_high)
+                state.global_parameters["Rz"] = min(max(best["Rz"] * rz_scale, rz_low), rz_high)
+                trial = sim.run(generate_netlist(state), work_dir=str(work_dir), include_transient=True)
+                hard_errors = hard_reliability_errors(state, trial)
+                stats["near_miss_refine_candidates"] += 1
+                if hard_errors:
+                    stats["rejected_unsafe_candidates"] += 1
+                    continue
+                trial_meas = dict(trial.measurements)
+                score = score_measurements(trial_meas)
+                if score < selected["score"] or spec_pass(trial_meas):
+                    selected = {
+                        **best,
+                        "score": score,
+                        "Cc": state.global_parameters["Cc"],
+                        "Rz": state.global_parameters["Rz"],
+                        "load_scale": best.get("load_scale", 1.0) * load_scale_extra,
+                        "input_pair_width_scale": 1.0,
+                        "input_pair_length_scale": input_l_scale,
+                        "gain_refine_width_scale": gain_w_scale,
+                        "gain_refine_length_scale": gain_l_scale,
+                        "output_source_length_scale": output_l_scale,
+                        "tail_current_scale": best.get("tail_current_scale", 1.0) * tail_scale_extra,
+                        "stage2_current_scale": best.get("stage2_current_scale", 1.0) * stage2_scale_extra,
+                        "near_miss_refine": True,
+                        "measurements": trial_meas,
+                        "_has_operating_points": bool(trial.operating_points),
+                    }
+                if spec_pass(trial_meas):
+                    break
+        finally:
+            if original_timeout is not None:
+                sim.timeout_sec = original_timeout
+        return selected
+
     best = run_gain_refine(best)
+    best = run_near_miss_refine(best)
     apply_load_scale(best.get("load_scale", 1.0))
     apply_current_scale(best.get("tail_current_scale", 1.0), best.get("stage2_current_scale", 1.0))
     apply_input_pair_geometry(

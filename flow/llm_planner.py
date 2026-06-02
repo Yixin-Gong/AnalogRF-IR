@@ -173,6 +173,7 @@ class DeepSeekSchemaPlanner:
 
 def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> dict[str, Any]:
     args = command.get("args", {})
+    actions = _rank_planner_actions(args.get("available_actions", []))
     return {
         "task": "Write a schema-level tuning command for the next analog optimization round.",
         "rules": [
@@ -216,13 +217,217 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "rationale": "short English explanation",
             "notes": "optional English notes",
         },
-        "agent_model": agent_model,
-        "write_policy": command.get("write_policy", {}),
-        "available_actions": args.get("available_actions", []),
-        "default_selected_actions": args.get("selected_actions", []),
+        "design_state": _compact_agent_model(agent_model),
+        "available_actions": [_compact_action_for_planner(action) for action in actions[:10]],
+        "default_selected_actions": _compact_selected_actions(args.get("selected_actions", [])),
         "formal_apply_gate": (command.get("write_policy", {}) or {}).get("action_admissibility", {}),
-        "editable_fields": command.get("llm_editable_fields", {}),
+        "editable_scope": _compact_editable_fields(command.get("llm_editable_fields", {})),
     }
+
+
+def _rank_planner_actions(actions: Any) -> list[dict[str, Any]]:
+    if not isinstance(actions, list):
+        return []
+    typed = [action for action in actions if isinstance(action, dict)]
+
+    def score(action: dict[str, Any]) -> tuple[int, float, str]:
+        admissibility = action.get("action_admissibility", {}) or {}
+        optimizer = action.get("optimizer", {}) or {}
+        passed = bool(admissibility.get("passed"))
+        selected = bool(
+            action.get("optimizer_selected")
+            or optimizer.get("optimizer_selected")
+            or optimizer.get("selected")
+        )
+        objective_delta = _as_float(
+            admissibility.get("objective_delta", optimizer.get("objective_delta")),
+            default=float("inf"),
+        )
+        priority = str(action.get("priority") or "")
+        rank = 0
+        if selected:
+            rank -= 60
+        if passed:
+            rank -= 40
+        if objective_delta < 0.0:
+            rank -= 25
+        if priority == "primary":
+            rank -= 8
+        elif priority == "guarded":
+            rank += 8
+        return (rank, objective_delta, str(action.get("action_id") or ""))
+
+    return sorted(typed, key=score)
+
+
+def _compact_agent_model(agent_model: dict[str, Any]) -> dict[str, Any]:
+    status = agent_model.get("status", {}) if isinstance(agent_model, dict) else {}
+    optimizer = agent_model.get("constrained_action_optimizer", {}) if isinstance(agent_model, dict) else {}
+    intervention = agent_model.get("local_intervention_model", {}) if isinstance(agent_model, dict) else {}
+    return {
+        "state_source": agent_model.get("state_source", "") if isinstance(agent_model, dict) else "",
+        "status": _compact_status(status),
+        "failed_targets": list(agent_model.get("failed_targets", []) or [])[:8] if isinstance(agent_model, dict) else [],
+        "local_intervention": {
+            "method": intervention.get("method", ""),
+            "status": intervention.get("status", ""),
+            "action_count": intervention.get("action_count"),
+            "ok_action_count": intervention.get("ok_action_count"),
+            "base_violation_vector": intervention.get("base_violation_vector", {}),
+            "evidence_location": intervention.get("evidence_location", ""),
+        },
+        "constrained_action_optimizer": {
+            "status": optimizer.get("status", ""),
+            "model_source": optimizer.get("model_source", ""),
+            "objective_before": optimizer.get("objective_before"),
+            "objective_after": optimizer.get("objective_after"),
+            "selected_actions": optimizer.get("selected_actions", [])[:5],
+        },
+        "tuning_failures": [
+            {
+                "metric": item.get("metric"),
+                "strategy": item.get("strategy"),
+                "actions": item.get("actions", [])[:2],
+            }
+            for item in (agent_model.get("tuning_failures", []) if isinstance(agent_model, dict) else [])[:6]
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _compact_status(status: Any) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        return {}
+    keep = (
+        "spec_pass",
+        "failed_targets",
+        "measured_violation_score",
+        "dc_gain_db",
+        "unity_gain_bandwidth",
+        "phase_margin",
+        "slew_rate",
+        "output_swing",
+        "total_power",
+        "saturation_margin",
+    )
+    return {key: status[key] for key in keep if key in status}
+
+
+def _compact_action_for_planner(action: dict[str, Any]) -> dict[str, Any]:
+    optimizer = action.get("optimizer", {}) if isinstance(action.get("optimizer"), dict) else {}
+    admissibility = (
+        action.get("action_admissibility", {})
+        if isinstance(action.get("action_admissibility"), dict)
+        else {}
+    )
+    evidence_gate = action.get("evidence_gate", {}) if isinstance(action.get("evidence_gate"), dict) else {}
+    out = {
+        "action_id": action.get("action_id"),
+        "decision_scope": "schema_action_candidate",
+        "priority": action.get("priority"),
+        "metric": action.get("metric"),
+        "action_class": action.get("action_class") or action.get("class"),
+        "knob": action.get("knob"),
+        "apply_to": action.get("apply_to"),
+        "direction": action.get("direction"),
+        "current_value": action.get("current_value"),
+        "suggested_next_value": action.get("suggested_next_value"),
+        "per_knob_values": action.get("per_knob_values"),
+        "range_update": action.get("range_update"),
+        "optimizer_selected": bool(
+            action.get("optimizer_selected")
+            or optimizer.get("optimizer_selected")
+            or optimizer.get("selected")
+        ),
+        "admissibility": _compact_gate(admissibility),
+        "optimizer": {
+            "status": optimizer.get("status"),
+            "objective_delta": optimizer.get("objective_delta"),
+            "model_source": optimizer.get("model_source") or optimizer.get("local_model_source"),
+        },
+        "evidence_gate": _compact_gate(evidence_gate),
+        "expected_effect": _compact_expected_effect(action.get("expected_effect", {})),
+        "reason": _short_text(action.get("rationale") or action.get("reason") or ""),
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})}
+
+
+def _compact_gate(gate: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(gate, dict):
+        return {}
+    out = {
+        key: gate[key]
+        for key in ("passed", "objective_delta", "formal_rule", "status")
+        if key in gate
+    }
+    conditions = gate.get("conditions")
+    if isinstance(conditions, dict):
+        out["conditions"] = {
+            key: conditions.get(key)
+            for key in (
+                "physical_gate",
+                "optimizer_selected",
+                "objective_delta_negative",
+                "objective_delta_source_trusted",
+                "guarded_evidence_passed",
+            )
+            if key in conditions
+        }
+    reasons = gate.get("reasons")
+    if isinstance(reasons, list):
+        out["reasons"] = [_short_text(str(item), 160) for item in reasons[:3]]
+    return out
+
+
+def _compact_expected_effect(effect: Any) -> dict[str, Any]:
+    if not isinstance(effect, dict):
+        return {}
+    return {
+        key: effect[key]
+        for key in ("improves", "may_hurt", "target_metric", "polarity")
+        if key in effect
+    }
+
+
+def _compact_selected_actions(actions: Any) -> list[dict[str, Any]]:
+    if not isinstance(actions, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in actions[:8]:
+        if isinstance(item, dict):
+            out.append(
+                {
+                    key: item[key]
+                    for key in ("action_id", "decision", "reason", "overrides")
+                    if key in item
+                }
+            )
+    return out
+
+
+def _compact_editable_fields(fields: Any) -> dict[str, Any]:
+    if not isinstance(fields, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("globals", "devices"):
+        value = fields.get(key)
+        if isinstance(value, list):
+            out[key] = value[:16]
+        elif isinstance(value, dict):
+            out[key] = {str(k): v for k, v in list(value.items())[:16]}
+    return out
+
+
+def _short_text(value: Any, limit: int = 220) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    return text[:limit]
+
+
+def _as_float(value: Any, *, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _completion_url(base_url: str) -> str:

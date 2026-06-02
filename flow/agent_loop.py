@@ -213,7 +213,7 @@ class DiagnosticAgentLoop:
             stop_reason = "spec satisfied"
         elif int(state.get("round_index", 1)) >= int(state.get("max_rounds", 1)):
             stop_reason = "maximum iterations reached"
-        elif self._runtime_stagnation_detected(state.get("rounds", [])):
+        elif self._runtime_stagnation_detected(state.get("rounds", [])) and not self._should_force_postprocess_rescue(state):
             stop_reason = "runtime stagnation: measured violations stopped improving"
         self.emit(f"       [timing] agent.read_schema_diagnostics: {time.perf_counter() - node_started:.2f}s")
         return {
@@ -448,18 +448,14 @@ class DiagnosticAgentLoop:
         rounds = state.get("rounds", []) or []
         if not rounds or rounds[-1].get("spec_pass"):
             return False
-        if str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast":
-            failed = set(rounds[-1].get("failed_targets", []) or [])
-            repair_sensitive = {"phase_margin", "slew_rate", "slew_rate_pos", "slew_rate_neg", "output_swing"}
-            try:
-                measured_score = float(rounds[-1].get("measured_violation_score"))
-            except (TypeError, ValueError):
-                measured_score = float("inf")
-            if 0.0 < measured_score <= 0.02:
-                repair_sensitive.add("dc_gain")
-            if not failed.intersection(repair_sensitive):
-                return False
-        return int(rounds[-1].get("postprocess_event_count", 0) or 0) == 0
+        latest = rounds[-1]
+        fast_profile = str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast"
+        if fast_profile and not self._repair_sensitive_failure(latest, max_score=1.5):
+            return False
+        postprocess_count = int(latest.get("postprocess_event_count", 0) or 0)
+        if postprocess_count == 0:
+            return True
+        return self._repair_sensitive_failure(latest, max_score=0.03)
 
     def _should_prefer_postprocess_before_schema_edit(self, state: AgentGraphState) -> bool:
         if str(self.config.postprocess_policy or "fallback").lower() != "fallback":
@@ -473,17 +469,40 @@ class DiagnosticAgentLoop:
         rounds = state.get("rounds", []) or []
         if not rounds or rounds[-1].get("spec_pass"):
             return False
-        if int(rounds[-1].get("postprocess_event_count", 0) or 0) != 0:
-            return False
+        latest = rounds[-1]
+        postprocess_count = int(latest.get("postprocess_event_count", 0) or 0)
         try:
-            measured_score = float(rounds[-1].get("measured_violation_score"))
+            measured_score = float(latest.get("measured_violation_score"))
         except (TypeError, ValueError):
             return False
-        if not (0.0 < measured_score <= 0.02):
+        fast_profile = str(getattr(self.config, "runtime_profile", "standard") or "standard") == "ablation_fast"
+        max_score = 1.5 if fast_profile and postprocess_count == 0 else 0.03
+        if not (0.0 < measured_score <= max_score):
             return False
-        failed = set(rounds[-1].get("failed_targets", []) or [])
-        repair_sensitive = {"dc_gain", "phase_margin", "slew_rate", "slew_rate_pos", "slew_rate_neg", "output_swing"}
-        return bool(failed.intersection(repair_sensitive))
+        return self._repair_sensitive_failure(latest, max_score=max_score)
+
+    @staticmethod
+    def _repair_sensitive_failure(summary: dict[str, Any], *, max_score: float) -> bool:
+        try:
+            measured_score = float(summary.get("measured_violation_score"))
+        except (TypeError, ValueError):
+            return False
+        if not (0.0 < measured_score <= max_score):
+            return False
+        failed = set(summary.get("failed_targets", []) or [])
+        if not failed:
+            return False
+        repair_sensitive = {
+            "dc_gain",
+            "unity_gain_bandwidth",
+            "phase_margin",
+            "slew_rate",
+            "slew_rate_pos",
+            "slew_rate_neg",
+            "output_swing",
+            "saturation_margin",
+        }
+        return bool(failed) and failed.issubset(repair_sensitive)
 
     def _load_design_state(self, path: Path) -> DesignState:
         schema_state = DesignState.from_yaml(path)
