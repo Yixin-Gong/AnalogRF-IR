@@ -136,6 +136,38 @@ def tune_cascode_ota_operating_point(
         candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
         max_candidates=max_width_refinement_candidates,
     )
+    best = _refine_folded_reference_geometry_bias(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        original_widths,
+        original_lengths,
+        started=started,
+        time_budget_sec=max(
+            float(time_budget_sec),
+            float(refinement_time_budget_sec or 0.0),
+            90.0,
+        ),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+    )
+    best = _refine_telescopic_reference_geometry_bias(
+        state,
+        sim,
+        tune_dir,
+        best,
+        original_globals,
+        original_widths,
+        original_lengths,
+        started=started,
+        time_budget_sec=max(
+            float(time_budget_sec),
+            float(refinement_time_budget_sec or 0.0),
+            90.0,
+        ),
+        candidate_timeout_sec=max(candidate_timeout_sec, 3.0),
+    )
     best = _refine_telescopic_close_gain_bias(
         state,
         sim,
@@ -185,6 +217,8 @@ def tune_cascode_ota_operating_point(
         "candidate_count": evaluated,
         "current_refinement_count": int(best.get("current_refinement_count", 0)),
         "width_refinement_count": int(best.get("width_refinement_count", 0)),
+        "folded_reference_refinement_count": int(best.get("folded_reference_refinement_count", 0)),
+        "telescopic_reference_refinement_count": int(best.get("telescopic_reference_refinement_count", 0)),
         "new_current_values": {
             name: float(best[name])
             for name in ("I_tail",)
@@ -692,6 +726,289 @@ def _refine_widths_for_speed(
     return selected
 
 
+def _refine_folded_reference_geometry_bias(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    base_widths: dict[str, float],
+    base_lengths: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    if _topology_family(state) != "folded_cascode_ota":
+        return best
+    if best.get("spec_pass", False):
+        return best
+
+    targets = state.targets
+    gain_min = float(targets.get("dc_gain", Target()).min or 0.0)
+    bw_min = float(targets.get("unity_gain_bandwidth", Target()).min or 0.0)
+    sr_min = float(targets.get("slew_rate", Target()).min or 0.0)
+    meas = best.get("measurements", {}) or {}
+    needs_refine = (
+        (gain_min > 0.0 and float(meas.get("dc_gain_db", 0.0) or 0.0) < gain_min)
+        or (bw_min > 0.0 and float(meas.get("unity_gain_bandwidth", 0.0) or 0.0) < bw_min)
+        or (sr_min > 0.0 and float(meas.get("slew_rate", 0.0) or 0.0) < sr_min)
+    )
+    if not needs_refine:
+        return best
+
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    ptail_low, ptail_high = _bias_range(state, "vbias_ptail", vdd)
+    ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+    current_range = _global_variable_range(state, "I_tail")
+    references: list[dict[str, Any]] = [
+        {
+            "geometry": {
+                "__role_min_widths__": {
+                    "input_pair": 120.0e-6,
+                    "tail_current_source": 120.0e-6,
+                    "current_mirror_load": 12.0e-6,
+                    "folded_cascode": 12.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.00e-6,
+                    "tail_current_source": 1.40e-6,
+                    "current_mirror_load": 1.00e-6,
+                    "folded_cascode": 0.85e-6,
+                },
+            },
+            "vbias_ptail": 0.770,
+            "vbias_ncas": 0.460,
+            "I_tail": 40.0e-6,
+        },
+        {
+            "geometry": {
+                "__role_min_widths__": {
+                    "input_pair": 140.0e-6,
+                    "tail_current_source": 140.0e-6,
+                    "current_mirror_load": 14.0e-6,
+                    "folded_cascode": 12.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.00e-6,
+                    "tail_current_source": 1.45e-6,
+                    "current_mirror_load": 1.00e-6,
+                    "folded_cascode": 0.85e-6,
+                },
+            },
+            "vbias_ptail": 0.770,
+            "vbias_ncas": 0.460,
+            "I_tail": 44.0e-6,
+        },
+        {
+            "geometry": {
+                "__role_min_widths__": {
+                    "input_pair": 140.0e-6,
+                    "tail_current_source": 130.0e-6,
+                    "current_mirror_load": 18.0e-6,
+                    "folded_cascode": 16.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.00e-6,
+                    "tail_current_source": 1.60e-6,
+                    "current_mirror_load": 1.50e-6,
+                    "folded_cascode": 1.20e-6,
+                },
+            },
+            "vbias_ptail": 0.760,
+            "vbias_ncas": 0.440,
+            "I_tail": 45.0e-6,
+        },
+    ]
+
+    records: list[dict[str, Any]] = []
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        for idx, reference in enumerate(references, start=1):
+            if time.time() - started > time_budget_sec:
+                break
+            _restore_globals(state, original_globals)
+            _restore_widths(state, base_widths)
+            _restore_lengths(state, base_lengths)
+            _apply_candidate(state, best)
+            if not _apply_role_geometry_template(state, base_widths, base_lengths, reference["geometry"]):
+                continue
+            candidate = dict(best)
+            candidate["phase"] = f"{best.get('phase', '')}+folded_reference_geometry_bias"
+            candidate["vbias_ptail"] = _snap_voltage(_clip(reference["vbias_ptail"], ptail_low, ptail_high))
+            candidate["vbias_ncas"] = _snap_voltage(_clip(reference["vbias_ncas"], ncas_low, ncas_high))
+            if current_range is not None:
+                candidate["I_tail"] = _clip(reference["I_tail"], current_range[0], current_range[1])
+            candidate["_widths"] = _capture_widths(state)
+            candidate["_lengths"] = _capture_lengths(state)
+            candidate["width_scales"] = reference["geometry"]
+            _apply_candidate(state, candidate)
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            item = _score_candidate(state, trial, candidate)
+            item["folded_reference_refinement_count"] = idx
+            item["_widths"] = candidate["_widths"]
+            item["_lengths"] = candidate["_lengths"]
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["folded_reference_refinement_count"] = len(records)
+    return selected
+
+
+def _refine_telescopic_reference_geometry_bias(
+    state: DesignState,
+    sim: NgspiceSimulator,
+    tune_dir: Path,
+    best: dict[str, Any],
+    original_globals: dict[str, float],
+    base_widths: dict[str, float],
+    base_lengths: dict[str, float],
+    *,
+    started: float,
+    time_budget_sec: float,
+    candidate_timeout_sec: float,
+) -> dict[str, Any]:
+    if _topology_family(state) != "telescopic_cascode_ota":
+        return best
+    if best.get("spec_pass", False):
+        return best
+
+    vdd = float(state.simulation.supply.get("vdd", 1.2) or 1.2)
+    tail_low, tail_high = _bias_range(state, "vbias_tail", vdd)
+    ncas_low, ncas_high = _bias_range(state, "vbias_ncas", vdd)
+    pcas_low, pcas_high = _bias_range(state, "vbias_pcas", vdd)
+    current_range = _global_variable_range(state, "I_tail")
+
+    def exact_geometry(widths: dict[str, float], lengths: dict[str, float]) -> dict[str, Any]:
+        return {
+            "__role_min_widths__": widths,
+            "__role_max_widths__": widths,
+            "__role_min_lengths__": lengths,
+            "__role_max_lengths__": lengths,
+        }
+
+    references: list[dict[str, Any]] = [
+        {
+            "geometry": exact_geometry(
+                {
+                    "input_pair": 60.0e-6,
+                    "tail_current_source": 7.0e-6,
+                    "input_cascode": 4.1e-6,
+                    "current_mirror_load": 36.0e-6,
+                    "load_cascode": 140.0e-6,
+                },
+                {
+                    "input_pair": 0.65e-6,
+                    "tail_current_source": 0.58e-6,
+                    "input_cascode": 0.72e-6,
+                    "current_mirror_load": 1.80e-6,
+                    "load_cascode": 1.20e-6,
+                },
+            ),
+            "vbias_tail": 0.320,
+            "vbias_ncas": 0.900,
+            "vbias_pcas": 0.350,
+            "I_tail": 14.0e-6,
+        },
+        {
+            "geometry": exact_geometry(
+                {
+                    "input_pair": 55.0e-6,
+                    "tail_current_source": 8.0e-6,
+                    "input_cascode": 4.5e-6,
+                    "current_mirror_load": 40.0e-6,
+                    "load_cascode": 150.0e-6,
+                },
+                {
+                    "input_pair": 0.86e-6,
+                    "tail_current_source": 0.60e-6,
+                    "input_cascode": 0.50e-6,
+                    "current_mirror_load": 1.70e-6,
+                    "load_cascode": 1.17e-6,
+                },
+            ),
+            "vbias_tail": 0.320,
+            "vbias_ncas": 0.870,
+            "vbias_pcas": 0.350,
+            "I_tail": 37.0e-6,
+        },
+        {
+            "geometry": exact_geometry(
+                {
+                    "input_pair": 60.0e-6,
+                    "tail_current_source": 7.0e-6,
+                    "input_cascode": 4.2e-6,
+                    "current_mirror_load": 36.0e-6,
+                    "load_cascode": 140.0e-6,
+                },
+                {
+                    "input_pair": 1.02e-6,
+                    "tail_current_source": 0.30e-6,
+                    "input_cascode": 0.84e-6,
+                    "current_mirror_load": 1.16e-6,
+                    "load_cascode": 1.17e-6,
+                },
+            ),
+            "vbias_tail": 0.337,
+            "vbias_ncas": 0.855,
+            "vbias_pcas": 0.378,
+            "I_tail": 21.0e-6,
+        },
+    ]
+
+    records: list[dict[str, Any]] = []
+    original_timeout = getattr(sim, "timeout_sec", None)
+    if original_timeout is not None and candidate_timeout_sec > 0:
+        sim.timeout_sec = min(float(original_timeout), float(candidate_timeout_sec))
+    try:
+        for idx, reference in enumerate(references, start=1):
+            if time.time() - started > time_budget_sec and records:
+                break
+            _restore_globals(state, original_globals)
+            _restore_widths(state, base_widths)
+            _restore_lengths(state, base_lengths)
+            _apply_candidate(state, best)
+            if not _apply_role_geometry_template(state, base_widths, base_lengths, reference["geometry"]):
+                continue
+            candidate = dict(best)
+            candidate["phase"] = f"{best.get('phase', '')}+telescopic_reference_geometry_bias"
+            candidate["vbias_tail"] = _snap_voltage(_clip(reference["vbias_tail"], tail_low, tail_high))
+            candidate["vbias_ncas"] = _snap_voltage(_clip(reference["vbias_ncas"], ncas_low, ncas_high))
+            candidate["vbias_pcas"] = _snap_voltage(_clip(reference["vbias_pcas"], pcas_low, pcas_high))
+            if current_range is not None:
+                candidate["I_tail"] = _clip(reference["I_tail"], current_range[0], current_range[1])
+            candidate["_widths"] = _capture_widths(state)
+            candidate["_lengths"] = _capture_lengths(state)
+            candidate["width_scales"] = reference["geometry"]
+            _apply_candidate(state, candidate)
+            trial = sim.run(generate_netlist(state), work_dir=str(tune_dir), include_transient=True)
+            item = _score_candidate(state, trial, candidate)
+            item["telescopic_reference_refinement_count"] = idx
+            item["_widths"] = candidate["_widths"]
+            item["_lengths"] = candidate["_lengths"]
+            records.append(item)
+            if item.get("spec_pass", False):
+                break
+    finally:
+        if original_timeout is not None:
+            sim.timeout_sec = original_timeout
+
+    selected = _select_candidate([best, *records])
+    if selected is None:
+        return best
+    selected["telescopic_reference_refinement_count"] = len(records)
+    return selected
+
+
 def _refine_telescopic_close_gain_bias(
     state: DesignState,
     sim: NgspiceSimulator,
@@ -966,6 +1283,34 @@ def _width_speed_templates(state: DesignState) -> list[dict[str, Any]]:
         ]
     if family == "folded_cascode_ota":
         return [
+            {
+                "__role_min_widths__": {
+                    "input_pair": 120.0e-6,
+                    "tail_current_source": 120.0e-6,
+                    "current_mirror_load": 12.0e-6,
+                    "folded_cascode": 12.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.00e-6,
+                    "tail_current_source": 1.40e-6,
+                    "current_mirror_load": 1.00e-6,
+                    "folded_cascode": 0.85e-6,
+                },
+            },
+            {
+                "__role_min_widths__": {
+                    "input_pair": 140.0e-6,
+                    "tail_current_source": 130.0e-6,
+                    "current_mirror_load": 18.0e-6,
+                    "folded_cascode": 16.0e-6,
+                },
+                "__role_min_lengths__": {
+                    "input_pair": 1.00e-6,
+                    "tail_current_source": 1.60e-6,
+                    "current_mirror_load": 1.50e-6,
+                    "folded_cascode": 1.20e-6,
+                },
+            },
             {
                 "__role_min_lengths__": {
                     "input_pair": 1.50e-6,

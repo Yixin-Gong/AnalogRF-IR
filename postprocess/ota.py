@@ -166,6 +166,10 @@ def _candidate_points(state: DesignState, old_vbias: float, vdd: float) -> list[
         _point(old_vbias, 1.0, 1.0, 1.0, 1.0, 1.0, phase="baseline"),
     ]
     focused = [
+        (old_vbias - 0.05, 4.00, 4.50, 1.75, 1.00, 2.50, "gain_speed"),
+        (old_vbias - 0.04, 4.00, 4.50, 2.00, 1.00, 2.50, "gain_speed"),
+        (old_vbias - 0.03, 4.00, 4.50, 2.00, 1.20, 2.00, "gain_speed"),
+        (0.42 * vdd, 4.00, 4.50, 2.00, 1.00, 2.50, "gain_speed"),
         (old_vbias + 0.09, 1.75, 1.50, 1.50, 1.40, 1.50, "bandwidth"),
         (old_vbias + 0.12, 2.30, 2.00, 1.75, 1.40, 2.00, "bandwidth"),
         (old_vbias + 0.16, 3.00, 2.00, 2.30, 2.00, 2.00, "bandwidth"),
