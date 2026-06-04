@@ -101,18 +101,23 @@ counting it as a full-spec pass target.
 For the IHP two-stage Miller OTA, `Cc` is emitted as the SG13G2 `cap_cmim` MIM
 capacitor and `Rz` as the SG13G2 `rhigh` PDK resistor.
 
+Priority 1-2 targets define pass/fail in the reference regressions. Lower
+priority quantities, including power budget and saturation-margin diagnostics,
+are still measured, reported, and available to the objective/diagnosis layers.
+
 ## Verified OTA Runs
 
-The following seed-10 full-flow runs were measured with ngspice and checked
-against the targets above.
+The following 10-seed LLM-assisted full-flow runs were measured with ngspice
+and checked against the priority 1-2 targets above. Reported values are median
+measurements across the passing seeds.
 
 | Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | pass | 3 | 27.09 dB | 44.92 MHz | 86.3 deg | 36.20 V/us | 0.778 V | 44.55 uW |
-| Current-mirror OTA | pass | 8 | 28.16 dB | 30.84 MHz | 83.3 deg | 31.95 V/us | 0.653 V | 42.71 uW |
-| Folded-cascode OTA | pass | 1 | 45.62 dB | 27.33 MHz | 63.9 deg | 19.17 V/us | 0.812 V | 25.01 uW |
-| Telescopic OTA | pass | 6 | 51.96 dB | 9.33 MHz | 60.6 deg | 6.09 V/us | 0.836 V | 20.31 uW |
-| Two-stage Miller OTA | pass | 7 | 57.75 dB | 26.46 MHz | 62.7 deg | 13.02 V/us | 0.592 V | 140.37 uW |
+| 5T OTA | 10/10 | 1 | 26.6 dB | 57.67 MHz | 84.5 deg | 50.15 V/us | 0.745 V | 63.9 uW |
+| Current-mirror OTA | 10/10 | 2 | 28.8 dB | 46.11 MHz | 68.1 deg | 53.21 V/us | 0.694 V | 81.0 uW |
+| Folded-cascode OTA | 10/10 | 2 | 46.3 dB | 50.15 MHz | 63.8 deg | 29.64 V/us | 0.868 V | 38.6 uW |
+| Telescopic OTA | 10/10 | 1 | 48.1 dB | 12.47 MHz | 63.9 deg | 6.91 V/us | 0.871 V | 18.5 uW |
+| Two-stage Miller OTA | 10/10 | 2 | 57.0 dB | 36.71 MHz | 71.7 deg | 30.09 V/us | 0.663 V | 372.4 uW |
 
 | Target achievement | Measured metrics |
 | --- | --- |
@@ -123,6 +128,22 @@ SPICE probes record whether proposed actions reduce failed violations, and the
 evidence gate records which actions are admitted.
 
 ![Diagnosis validation from local SPICE probes and objective-gated actions](docs/assets/diagnosis_validation.png)
+
+## Method Ablation
+
+The current unified ablation manifest contains 5 OTA topologies, 10 seeds, and
+4 method variants. The non-LLM methods are run independently from the LLM
+reference data and all rows are re-scored with the same priority 1-2 target
+definition.
+
+| Method | 5T | Current mirror | Folded cascode | Telescopic | Two-stage | Total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Optimizer | 3/10 | 0/10 | 0/10 | 0/10 | 0/10 | 3/50 |
+| Opt + fallback PP | 5/10 | 1/10 | 1/10 | 3/10 | 1/10 | 11/50 |
+| Diagnosis + PP | 10/10 | 7/10 | 5/10 | 10/10 | 9/10 | 41/50 |
+| LLM + fallback PP | 10/10 | 10/10 | 10/10 | 10/10 | 10/10 | 50/50 |
+
+![Ablation pass rate by method and topology](docs/assets/success_rate_by_method_topology.png)
 
 ## Installation
 
@@ -193,8 +214,17 @@ python scripts/run_ablation.py \
 Regenerate the README figures:
 
 ```bash
-python scripts/plot_full_flow_results.py --out-dir docs/assets
-python scripts/plot_diagnosis_validation.py --out-dir docs/assets
+python scripts/plot_ablation_results.py \
+  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --out-dir docs/assets --format png
+
+python scripts/plot_full_flow_results.py \
+  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --out-dir docs/assets --format png
+
+python scripts/plot_diagnosis_validation.py \
+  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --out-dir docs/assets --format png
 ```
 
 Run tests:

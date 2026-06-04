@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 import pandas as pd
 import seaborn as sns
 import yaml
@@ -56,6 +57,19 @@ TOPOLOGY_LABELS = {
     "two_stage_miller_ota": "Two-stage Miller",
     "source_follower_boosted_ota": "Source follower",
 }
+
+PLOT_TOPOLOGY_LABELS = {
+    "Current mirror": "Current\nmirror",
+    "Five transistor": "5T",
+    "Folded cascode": "Folded\ncascode",
+    "Telescopic": "Telescopic",
+    "Two-stage Miller": "Two-stage\nMiller",
+}
+
+BLUE_CMAP = LinearSegmentedColormap.from_list(
+    "analogdiag_ablation_blue",
+    ["#f7fbff", "#d7e9fb", "#8bbce0", "#357db7", "#113b75"],
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -111,7 +125,7 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
         topology = _topology_name(schema, schema_path)
         measurements = result.get("measurements", {}) or {}
         status = result.get("status", {}) or {}
-        target_status = _evaluate_targets(measurements, schema.get("targets", {}) or {})
+        target_status = _evaluate_targets(measurements, schema.get("targets", {}) or {}, max_priority=2)
         llm = _llm_usage(runs_dir)
         postprocess_events = _postprocess_events(runs_dir)
         record = {
@@ -149,11 +163,18 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)
 
 
-def _evaluate_targets(measurements: dict[str, Any], targets: dict[str, Any]) -> dict[str, Any]:
+def _evaluate_targets(
+    measurements: dict[str, Any],
+    targets: dict[str, Any],
+    *,
+    max_priority: int,
+) -> dict[str, Any]:
     failed: list[str] = []
     for target_name, target in targets.items():
         metric_name = METRIC_MAP.get(target_name)
         if not metric_name or not isinstance(target, dict):
+            continue
+        if int(target.get("priority", 1) or 1) > max_priority:
             continue
         measured = _to_float(measurements.get(metric_name))
         target_min = _to_float(target.get("min"))
@@ -248,11 +269,33 @@ def summarize_runs(runs: pd.DataFrame, specs: pd.DataFrame) -> pd.DataFrame:
 def plot_success_heatmap(summary: pd.DataFrame, out_dir: Path, formats: list[str], dpi: int) -> None:
     data = summary.pivot_table(index="method", columns="topology_label", values="success_rate", aggfunc="mean")
     data = _ordered(data)
-    fig, ax = plt.subplots(figsize=(9.0, 5.2))
-    sns.heatmap(data, annot=True, fmt=".0%", cmap="crest", vmin=0, vmax=1, linewidths=0.8, linecolor="white", cbar_kws={"label": "Full spec pass rate"}, ax=ax)
-    ax.set_title("Ablation Success Rate by Method and Topology")
+    data = data.rename(columns=PLOT_TOPOLOGY_LABELS)
+    fig, ax = plt.subplots(figsize=(7.2, 3.55), constrained_layout=True)
+    sns.heatmap(
+        data,
+        annot=True,
+        fmt=".0%",
+        cmap=BLUE_CMAP,
+        vmin=0,
+        vmax=1,
+        linewidths=0.7,
+        linecolor="white",
+        annot_kws={"fontsize": 8.0, "color": "#0f172a"},
+        cbar_kws={"label": "pass rate", "shrink": 0.82},
+        ax=ax,
+    )
     ax.set_xlabel("")
     ax.set_ylabel("")
+    ax.tick_params(axis="x", rotation=0, labelsize=8)
+    ax.tick_params(axis="y", rotation=0, labelsize=8.5)
+    ax.collections[0].colorbar.ax.tick_params(labelsize=7.5)
+    ax.collections[0].colorbar.ax.yaxis.label.set_size(8)
+    for text, value in zip(ax.texts, data.to_numpy().ravel()):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = 0.0
+        text.set_color("white" if numeric >= 0.65 else "#0f172a")
     _save(fig, out_dir / "success_rate_by_method_topology", formats, dpi)
 
 
