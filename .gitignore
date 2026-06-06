@@ -11,4 +11,6 @@ runs/feasibility_*/
 runs/ihp_*/
 runs/tmp_*/
 runs/tmp_probe_*/
+
+# Local manuscript drafts and submission assets are intentionally not published.
 paper/

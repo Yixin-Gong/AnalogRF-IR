@@ -1,31 +1,21 @@
-Proprietary License
+MIT License
 
-Copyright (c) 2026 AnalogRF-IR Authors. All Rights Reserved.
+Copyright (c) 2026 AnalogRF-IR Authors
 
-This repository and all files, source code, documentation, data, schemas,
-examples, models, scripts, workflows, and other materials contained in it
-are proprietary and confidential unless a separate written agreement states
-otherwise.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-No license or permission is granted to any person or entity to use, copy,
-modify, merge, publish, distribute, sublicense, sell, lease, host, deploy,
-train models on, create derivative works from, or otherwise exploit this
-software or any portion of it.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-Access to the repository, whether public or private, does not grant any
-right, license, covenant, or permission under copyright, patent, trademark,
-trade secret, database right, or any other intellectual property right.
-
-Any permitted use requires prior express written authorization from the
-copyright holder and must comply with the terms of that authorization.
-
-THE SOFTWARE AND MATERIALS ARE PROVIDED "AS IS" ONLY TO PERSONS WHO HAVE
-EXPRESS WRITTEN PERMISSION TO ACCESS THEM. TO THE MAXIMUM EXTENT PERMITTED
-BY LAW, THE COPYRIGHT HOLDER DISCLAIMS ALL WARRANTIES, WHETHER EXPRESS,
-IMPLIED, STATUTORY, OR OTHERWISE, INCLUDING WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
-
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE COPYRIGHT
-HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM
-OR RELATED TO THIS SOFTWARE OR THESE MATERIALS, WHETHER IN CONTRACT, TORT,
-STRICT LIABILITY, OR OTHERWISE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

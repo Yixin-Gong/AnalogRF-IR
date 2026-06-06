@@ -35,13 +35,13 @@ def main() -> None:
 
 
 def draw_architecture() -> plt.Figure:
-    fig, ax = base_fig(9.9, 4.7)
+    fig, ax = base_fig(10.2, 5.0)
 
-    # Outer diagnosis loop.
+    # Outer agent loop.
     loop = FancyBboxPatch(
-        (0.45, 0.42),
-        9.02,
-        3.82,
+        (0.38, 0.38),
+        9.44,
+        4.22,
         boxstyle="round,pad=0.10,rounding_size=0.20",
         linewidth=1.2,
         edgecolor=LINE,
@@ -50,34 +50,52 @@ def draw_architecture() -> plt.Figure:
     )
     ax.add_patch(loop)
 
-    draw_person(ax, 1.12, 2.98, "Human")
-    draw_person(ax, 1.12, 1.30, "LLM")
+    draw_person(ax, 1.05, 3.38, "Human\nreview")
+    draw_person(ax, 1.05, 1.62, "LLM\nplanner")
 
-    draw_file(ax, 4.35, 1.84, 1.28, 1.66, "Schema\nstate", [r"$G,\theta,\tau$", r"$\mathcal{D},\mathcal{E}$"])
+    flow_node(ax, 3.20, 4.02, 2.12, 0.44, "LangGraph\nagent loop")
+    draw_file(
+        ax,
+        3.55,
+        1.70,
+        1.58,
+        1.92,
+        "ASIR/YAML\nstate",
+        [r"$G,\theta,\tau$", r"$\mathcal{D},\mathcal{E}$", "write policy"],
+    )
 
-    cycle_center = (7.55, 2.56)
-    draw_cycle(ax, cycle_center, 0.92, ["surrogate", "search", "SPICE", "repair"])
+    cycle_center = (7.38, 3.08)
+    draw_cycle(ax, cycle_center, 0.92, ["gm/ID", "NSGA-II", "ngspice", "PP\nrepair"])
     ax.text(cycle_center[0], cycle_center[1], "execute", ha="center", va="center", fontsize=7.0, color=INK)
 
-    arrow(ax, 1.78, 3.06, 4.06, 3.10)
-    arrow(ax, 4.05, 2.90, 1.85, 2.82)
-    arrow(ax, 1.78, 1.46, 4.05, 2.22)
-    arrow(ax, 4.05, 2.03, 1.88, 1.21)
-    arrow(ax, 5.72, 2.64, 6.18, 2.64)
-    arrow(ax, 6.35, 1.78, 5.68, 1.86, rad=-0.10)
+    panel(ax, 5.02, 0.62, 1.34, 0.72, "Causal graph", ["typed failures", "ranked actions"])
+    panel(ax, 6.62, 0.62, 1.42, 0.72, "Action opt.", ["combo_coarse_fine", r"$C^\star,\Delta J$"])
+    panel(ax, 8.30, 0.62, 1.24, 0.72, "Apply gate", ["admissibility", "skip notes"])
+
+    arrow(ax, 1.66, 3.42, 3.16, 4.12)
+    arrow(ax, 3.45, 3.28, 1.78, 3.05)
+    arrow(ax, 1.66, 1.77, 3.36, 2.30)
+    arrow(ax, 3.45, 2.05, 1.80, 1.40)
+    arrow(ax, 4.82, 4.02, 5.98, 3.55)
+    arrow(ax, 5.25, 2.86, 6.12, 2.94)
+    arrow(ax, 6.55, 2.28, 5.16, 2.10, rad=-0.12)
+    arrow(ax, 6.98, 2.18, 5.78, 1.36, rad=-0.06)
+    arrow(ax, 6.36, 0.98, 6.58, 0.98)
+    arrow(ax, 8.04, 0.98, 8.26, 0.98)
     return fig
 
 
 def draw_schema_state() -> plt.Figure:
     fig, ax = base_fig(9.8, 3.7)
-    draw_file(ax, 0.62, 0.95, 1.45, 1.95, "design\nstate", ["YAML"])
+    draw_file(ax, 0.62, 0.95, 1.45, 1.95, "ASIR/YAML\nstate", ["roles", "knobs", "evidence"])
 
     items = [
-        (2.60, 2.60, "Topology", r"$G$"),
-        (6.10, 2.60, "Variables", r"$\theta$"),
-        (2.60, 1.47, "Targets", r"$\tau,J_{\rm spec}$"),
-        (6.10, 1.47, "Dependencies", r"$\mathcal{D}$"),
-        (4.28, 0.36, "Evidence", r"$\mathcal{E}$"),
+        (2.45, 2.55, "Topology roles", r"$G$: devices, stages, paths"),
+        (6.05, 2.55, "Writable knobs", r"$\theta$: gm/ID, W/L, bias, $C_c$"),
+        (2.45, 1.45, "Targets", r"$\tau,J_{\rm spec}$: priority + loss"),
+        (6.05, 1.45, "Diagnostics", r"$\mathcal{D}$: typed causal edges"),
+        (2.45, 0.35, "Evidence", r"$\mathcal{E}$: ngspice + probes"),
+        (6.05, 0.35, "Write policy", "bounds, symmetry, admissibility"),
     ]
     for x, y, heading, body in items:
         small_panel(ax, x, y, 2.85, 0.78, heading, body)
@@ -87,7 +105,7 @@ def draw_schema_state() -> plt.Figure:
 def draw_optimization_loop() -> plt.Figure:
     fig, ax = base_fig(9.6, 4.9)
     center = (4.72, 2.38)
-    radius = 1.58
+    radius = 1.68
     ax.add_patch(
         Circle(
             center,
@@ -100,11 +118,12 @@ def draw_optimization_loop() -> plt.Figure:
         )
     )
     nodes = [
-        (90, "gm/ID\nsurrogate"),
-        (18, "NSGA-II"),
-        (-54, "SPICE"),
-        (-126, "archive"),
-        (162, "bounds"),
+        (90, "schema\nprofile"),
+        (30, "gm/ID\npriors"),
+        (-30, "NSGA-II\nbounded"),
+        (-90, "ngspice\nmeasure"),
+        (-150, "archive\nbest"),
+        (150, "PP repair\nfallback"),
     ]
     for (a1, _), (a2, _) in zip(nodes, nodes[1:] + nodes[:1]):
         circular_arrow(ax, center, radius, a1, a2, node_radius=0.43)
@@ -119,8 +138,8 @@ def draw_optimization_loop() -> plt.Figure:
         1.64,
         1.88,
         1.02,
-        "Objective",
-        [r"$J_{\rm spec}=\sum w_kv_k^2$", "physical checks", "remain hard gates"],
+        "Authority",
+        [r"$J_{\rm spec}=\sum w_kv_k^2$", "simulator result wins", "schema gates remain hard"],
     )
     return fig
 
@@ -133,12 +152,12 @@ def draw_diagnosis_loop() -> plt.Figure:
     y = 2.55
     xs = [0.42, 2.02, 3.62, 5.22, 6.82, 8.42]
     labels = [
-        "failed\nmetrics",
-        "typed\ncauses",
-        "local\nprobes",
-        "candidate\nactions",
-        "evidence\ngate",
-        "schema\nedit",
+        "failed\nspecs",
+        "typed causal\ngraph",
+        "local SPICE\nprobes",
+        "combo_coarse\n_fine opt.",
+        "formal apply\ngate",
+        "schema\ncommand",
     ]
     for i, (x, label) in enumerate(zip(xs, labels)):
         flow_node(ax, x, y, stage_w, stage_h, label)
@@ -148,18 +167,18 @@ def draw_diagnosis_loop() -> plt.Figure:
     cards = [
         (
             0.58,
-            "diagnostic edge",
-            [r"$e=(u,v,t,\rho,\omega,\epsilon)$", "gain  bias  pole", "symmetry  headroom"],
+            "intervention model",
+            [r"$A_{k,j}=v_k(s\oplus\delta a_j)-v_k(s)$", "small ngspice perturbations", "not a hidden global sweep"],
         ),
         (
             3.72,
-            "local evidence",
-            [r"$A_{k,j}=v_k(s\oplus\delta a_j)-v_k(s)$", r"$E(s,a)$ requires SPICE support"],
+            "action optimizer",
+            ["bounded compatible sets", r"$C^\star=\arg\min J_{\rm act}(C)$", "duplicate writes rejected"],
         ),
         (
             6.86,
-            "admission rule",
-            [r"$g_{\rm phys}(s,a)=1$", r"$a\in C^\star$ or $\Delta J_{\rm act}<0$", r"guarded $\Rightarrow E(s,a)=1$"],
+            "apply rule",
+            ["optimizer_selected or", r"trusted $\Delta J<0$", r"guarded $\Rightarrow$ evidence_gate"],
         ),
     ]
     for x, heading, lines in cards:

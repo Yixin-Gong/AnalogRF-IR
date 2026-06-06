@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use AnalogRF-IR in academic work, cite the repository for now and update to the manuscript or preprint citation when available."
+type: software
+title: "AnalogRF-IR: Evidence-Gated Causal Diagnosis for Simulator-Backed OTA Optimization"
+authors:
+  - name: "AnalogRF-IR Authors"
+repository-code: "https://github.com/Yixin-Gong/AnalogRF-IR"
+abstract: "AnalogRF-IR is a simulator-backed analog circuit optimization framework for topology-aware OTA sizing using typed YAML schemas, gm/ID-guided surrogate search, NSGA-II exploration, ngspice validation, causal diagnosis, and evidence-gated LLM-assisted action selection."
+keywords:
+  - analog-circuit-design
+  - open-pdk
+  - ihp-sg13g2
+  - llm-eda
+  - gm-id
+  - nsga-ii
+  - ngspice
+preferred-citation:
+  type: article
+  title: "AnalogRF-IR: Evidence-Gated Causal Diagnosis for Simulator-Backed OTA Optimization"
+  authors:
+    - name: "AnalogRF-IR Authors"
+  year: 2026
+  notes: "Manuscript in preparation"
