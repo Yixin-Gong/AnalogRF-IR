@@ -29,7 +29,7 @@ iteration while still separating topology effects from method effects.
 | `optimizer_only` | lower baseline | off | no | no | no |
 | `optimizer_postprocess_fallback` | repair value under the fallback policy | fallback | no | no | no |
 | `diagnosis_spice_postprocess_fallback` | causal diagnosis and admissible local actions without LLM planning | fallback | yes | SPICE | deterministic |
-| `llm_diagnosis_postprocess_fallback` | full diagnosis system with planner, evidence gate, and fallback repair | fallback | yes | SPICE | yes |
+| `llm_diagnosis_postprocess_fallback` | LLM-guided diagnosis with planner, evidence gate, and repair policy | fallback | yes | SPICE | yes |
 
 ## Recommended Reporting
 

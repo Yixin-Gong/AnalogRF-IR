@@ -15,7 +15,7 @@ The runner executes these stages:
 2. Load YAML or import SPICE and build `DesignState`.
 3. Select the IR profile, capabilities, and spec model.
 4. Validate the input schema.
-5. Load gm/ID lookup data or compact fallback support.
+5. Load $G_m/I_D$ lookup data or compact fallback support.
 6. Run the optimizer and compact evaluator.
 7. Apply optimizer metadata back to the schema state.
 8. Generate SPICE.
@@ -35,7 +35,7 @@ netlist/      DesignState-to-SPICE generation
 optimizer/    Problem model, evaluator registry, and NSGA-II
 outputs/      Run artifact writers
 postprocess/  ngspice-guided repair and compensation tuning
-pygmid/       gm/ID adapter and lookup-table helpers
+pygmid/       $G_m/I_D$ adapter and lookup-table helpers
 schemas/      Dataclasses for the design state schema
 simulator/    ngspice execution and measurement extraction
 specs/        Circuit-family spec models
@@ -72,7 +72,7 @@ global optimizer with small budget
   -> constrained action optimizer / LLM planner
   -> validation-gated schema edit
   -> short re-optimization
-  -> postprocess fallback only if stuck or near-feasible
+  -> postprocess repair only if stuck or near-feasible
 ```
 
 The causal graph ranks structural root causes. Local intervention modeling uses
@@ -81,9 +81,8 @@ specification violation. The constrained action optimizer then selects schema
 edits under duplicate-write, uncertainty, tradeoff, and evidence-gate
 constraints.
 
-The main strategy is `combo_coarse_fine`. Large violations use coarse schema
-steps to move toward the feasible basin. Near-feasible states use smaller fine
-steps to limit cross-metric regressions. The optimizer searches bounded
+The compatible-action strategy uses coarse schema steps for large violations
+and smaller fine steps near the feasible basin. The optimizer searches bounded
 combinations of compatible actions instead of requiring the LLM to tune one
 knob per round.
 
@@ -95,14 +94,17 @@ constrained action vocabulary instead of being hidden in postprocess repair.
 Action application is formalized by an executor-side predicate:
 
 ```text
-apply_allowed := optimizer_selected OR objective_delta < 0
-guarded actions additionally require evidence_gate.passed
+admissible(s, a) :=
+  physical gate passes
+  AND (optimizer selects a OR trusted local SPICE evidence decreases J_act)
+guarded actions additionally require the local evidence gate.
 ```
 
 The LLM may explain, skip, or choose among available actions, but it cannot
 override this predicate with a custom direct edit. When the constrained
-optimizer reports `no_improving_combination`, LLM apply requests become skipped
-notes unless a candidate action still has negative optimizer objective delta.
+optimizer reports no improving compatible action, LLM apply requests become
+skipped notes unless a candidate action still has negative objective delta from
+trusted local SPICE evidence.
 
 Guarded actions are not applied just because they look plausible. They require
 passing local SPICE evidence that predicts a sufficient decrease in the weighted
@@ -153,7 +155,7 @@ When `--agent-rounds` is greater than 1, `flow.agent_loop.DiagnosticAgentLoop`
 runs iterative schema tuning. Each round reads the previous `design_state.yaml`,
 asks an OpenAI-compatible planner for schema actions when configured, applies
 approved actions, and starts the next run. If the LLM key is missing, the flow
-records fallback status and keeps deterministic artifacts usable for tests.
+records LLM-disabled status and keeps deterministic artifacts usable for tests.
 
 The planner only writes tool commands. The executor enforces the schema write
 policy and rejects invalid fields, missing evidence gates, duplicate writes, and

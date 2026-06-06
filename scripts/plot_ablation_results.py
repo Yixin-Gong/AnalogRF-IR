@@ -39,14 +39,14 @@ SPEC_LABELS = {
 
 CASE_LABELS = {
     "optimizer_only": "Optimizer",
-    "optimizer_postprocess_fallback": "Opt + fallback PP",
-    "optimizer_postprocess_always": "Opt + always PP",
+    "optimizer_postprocess_fallback": "Optimizer + repair",
+    "optimizer_postprocess_always": "Optimizer + repair",
     "diagnosis_surrogate_no_postprocess": "Diagnosis",
     "diagnosis_spice_intervention_no_postprocess": "Diagnosis + SPICE",
-    "diagnosis_spice_postprocess_fallback": "Diagnosis + PP",
-    "llm_diagnosis_no_postprocess": "LLM diagnosis",
-    "llm_diagnosis_postprocess_fallback": "LLM + fallback PP",
-    "llm_diagnosis_postprocess_always": "LLM + always PP",
+    "diagnosis_spice_postprocess_fallback": "Diagnosis + repair",
+    "llm_diagnosis_no_postprocess": "LLM-guided diagnosis",
+    "llm_diagnosis_postprocess_fallback": "LLM diagnosis + repair",
+    "llm_diagnosis_postprocess_always": "LLM diagnosis + repair",
 }
 
 TOPOLOGY_LABELS = {
@@ -281,7 +281,7 @@ def plot_success_heatmap(summary: pd.DataFrame, out_dir: Path, formats: list[str
         linewidths=0.7,
         linecolor="white",
         annot_kws={"fontsize": 8.0, "color": "#0f172a"},
-        cbar_kws={"label": "pass rate", "shrink": 0.82},
+        cbar_kws={"label": "required pass rate", "shrink": 0.82},
         ax=ax,
     )
     ax.set_xlabel("")

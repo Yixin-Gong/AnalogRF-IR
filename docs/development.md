@@ -114,14 +114,16 @@ Guarded actions must remain evidence-gated:
 All LLM-requested applies must also pass the formal action admissibility gate:
 
 ```text
-apply_allowed := optimizer_selected OR objective_delta < 0
+admissible(s, a) :=
+  physical gate passes
+  AND (optimizer selects a OR trusted local SPICE evidence decreases J_act)
 ```
 
 If constrained optimizer evidence is present, custom LLM edits are not an escape
 hatch. They should be skipped or recorded as notes unless represented as an
-optimizer candidate with admissible objective math. Keep OP/headroom/balance and
-compensation moves typed with `action_class` and visible to the constrained
-optimizer.
+optimizer candidate with admissible objective math from trusted local SPICE
+evidence. Keep OP/headroom/balance and compensation moves typed with
+`action_class` and visible to the constrained optimizer.
 
 When changing action planning, add tests for both the selected action and the
 rejected unsafe path.

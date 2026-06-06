@@ -24,8 +24,6 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
     figures = {
         "analogdiag_architecture.png": draw_architecture(),
-        "analogdiag_schema_state.png": draw_schema_state(),
-        "analogdiag_optimization_loop.png": draw_optimization_loop(),
         "analogdiag_diagnosis_loop.png": draw_diagnosis_loop(),
     }
     for name, fig in figures.items():
@@ -35,53 +33,40 @@ def main() -> None:
 
 
 def draw_architecture() -> plt.Figure:
-    fig, ax = base_fig(10.2, 5.0)
+    fig, ax = base_fig(10.2, 4.4)
 
-    # Outer agent loop.
-    loop = FancyBboxPatch(
-        (0.38, 0.38),
-        9.44,
-        4.22,
-        boxstyle="round,pad=0.10,rounding_size=0.20",
-        linewidth=1.2,
-        edgecolor=LINE,
-        facecolor="none",
-        linestyle=(0, (5, 4)),
-    )
-    ax.add_patch(loop)
+    flow_node(ax, 0.56, 2.58, 1.26, 0.58, "Human\nreview")
+    flow_node(ax, 0.56, 1.34, 1.26, 0.58, "LLM\nguidance")
 
-    draw_person(ax, 1.05, 3.38, "Human\nreview")
-    draw_person(ax, 1.05, 1.62, "LLM\nplanner")
-
-    flow_node(ax, 3.20, 4.02, 2.12, 0.44, "LangGraph\nagent loop")
     draw_file(
         ax,
-        3.55,
-        1.70,
-        1.58,
-        1.92,
+        2.28,
+        1.34,
+        1.64,
+        1.82,
         "ASIR/YAML\nstate",
         [r"$G,\theta,\tau$", r"$\mathcal{D},\mathcal{E}$", "write policy"],
     )
 
-    cycle_center = (7.38, 3.08)
-    draw_cycle(ax, cycle_center, 0.92, ["gm/ID", "NSGA-II", "ngspice", "PP\nrepair"])
-    ax.text(cycle_center[0], cycle_center[1], "execute", ha="center", va="center", fontsize=7.0, color=INK)
+    flow_node(ax, 4.72, 3.03, 1.22, 0.56, "$G_m/I_D$\npriors")
+    flow_node(ax, 6.34, 3.03, 1.22, 0.56, "NSGA-II\nsearch")
+    flow_node(ax, 7.96, 3.03, 1.22, 0.56, "ngspice\nmeasure")
 
-    panel(ax, 5.02, 0.62, 1.34, 0.72, "Causal graph", ["typed failures", "ranked actions"])
-    panel(ax, 6.62, 0.62, 1.42, 0.72, "Action opt.", ["combo_coarse_fine", r"$C^\star,\Delta J$"])
-    panel(ax, 8.30, 0.62, 1.24, 0.72, "Apply gate", ["admissibility", "skip notes"])
+    flow_node(ax, 4.72, 1.00, 1.22, 0.56, "causal\ngraph")
+    flow_node(ax, 6.34, 1.00, 1.22, 0.56, "local SPICE\nprobes")
+    flow_node(ax, 7.96, 1.00, 1.22, 0.56, "formal\napply gate")
 
-    arrow(ax, 1.66, 3.42, 3.16, 4.12)
-    arrow(ax, 3.45, 3.28, 1.78, 3.05)
-    arrow(ax, 1.66, 1.77, 3.36, 2.30)
-    arrow(ax, 3.45, 2.05, 1.80, 1.40)
-    arrow(ax, 4.82, 4.02, 5.98, 3.55)
-    arrow(ax, 5.25, 2.86, 6.12, 2.94)
-    arrow(ax, 6.55, 2.28, 5.16, 2.10, rad=-0.12)
-    arrow(ax, 6.98, 2.18, 5.78, 1.36, rad=-0.06)
-    arrow(ax, 6.36, 0.98, 6.58, 0.98)
-    arrow(ax, 8.04, 0.98, 8.26, 0.98)
+    arrow(ax, 1.94, 2.86, 2.20, 2.78)
+    arrow(ax, 1.94, 1.62, 2.20, 1.72)
+    arrow(ax, 3.96, 2.82, 4.64, 3.30)
+    arrow(ax, 5.98, 3.31, 6.28, 3.31)
+    arrow(ax, 7.60, 3.31, 7.90, 3.31)
+    arrow(ax, 3.96, 1.66, 4.64, 1.28)
+    arrow(ax, 5.98, 1.28, 6.28, 1.28)
+    arrow(ax, 7.60, 1.28, 7.90, 1.28)
+
+    ax.text(6.95, 3.88, "optimization and validation", ha="center", va="center", fontsize=7.2, color=MUTED)
+    ax.text(6.95, 0.56, "diagnosis and admissible repair", ha="center", va="center", fontsize=7.2, color=MUTED)
     return fig
 
 
@@ -91,7 +76,7 @@ def draw_schema_state() -> plt.Figure:
 
     items = [
         (2.45, 2.55, "Topology roles", r"$G$: devices, stages, paths"),
-        (6.05, 2.55, "Writable knobs", r"$\theta$: gm/ID, W/L, bias, $C_c$"),
+        (6.05, 2.55, "Writable knobs", r"$\theta$: $G_m/I_D$, W/L, bias, $C_c$"),
         (2.45, 1.45, "Targets", r"$\tau,J_{\rm spec}$: priority + loss"),
         (6.05, 1.45, "Diagnostics", r"$\mathcal{D}$: typed causal edges"),
         (2.45, 0.35, "Evidence", r"$\mathcal{E}$: ngspice + probes"),
@@ -119,7 +104,7 @@ def draw_optimization_loop() -> plt.Figure:
     )
     nodes = [
         (90, "schema\nprofile"),
-        (30, "gm/ID\npriors"),
+        (30, "$G_m/I_D$\npriors"),
         (-30, "NSGA-II\nbounded"),
         (-90, "ngspice\nmeasure"),
         (-150, "archive\nbest"),
@@ -155,7 +140,7 @@ def draw_diagnosis_loop() -> plt.Figure:
         "failed\nspecs",
         "typed causal\ngraph",
         "local SPICE\nprobes",
-        "combo_coarse\n_fine opt.",
+        "action\nselection",
         "formal apply\ngate",
         "schema\ncommand",
     ]
@@ -178,7 +163,7 @@ def draw_diagnosis_loop() -> plt.Figure:
         (
             6.86,
             "apply rule",
-            ["optimizer_selected or", r"trusted $\Delta J<0$", r"guarded $\Rightarrow$ evidence_gate"],
+            ["optimizer selected", r"or trusted $\Delta J<0$", r"guarded $\Rightarrow$ evidence check"],
         ),
     ]
     for x, heading, lines in cards:

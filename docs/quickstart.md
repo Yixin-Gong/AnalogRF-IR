@@ -5,7 +5,7 @@
 - Python 3.10 or newer.
 - Packages from `requirements.txt`.
 - `ngspice` for simulator-backed validation.
-- Process model files or gm/ID lookup tables for the target process.
+- Process model files or $G_m/I_D$ lookup tables for the target process.
 
 On Ubuntu or WSL:
 
@@ -178,10 +178,9 @@ For research runs, compare the same seed set across:
 
 ```text
 optimizer only
-optimizer + postprocess
-optimizer + diagnosis
-LLM + optimizer + diagnosis
-LLM + optimizer + diagnosis + postprocess
+optimizer + repair
+diagnosis + repair
+LLM-guided diagnosis + repair
 ```
 
 Track success rate, total ngspice calls, wall time, final loss, final metrics,

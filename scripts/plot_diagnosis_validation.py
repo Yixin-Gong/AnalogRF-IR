@@ -20,8 +20,8 @@ DEFAULT_OUTPUT_DIRS = [
 ]
 
 METHOD_LABELS = {
-    "diagnosis_spice_postprocess_fallback": "Diagnosis + PP",
-    "llm_diagnosis_postprocess_fallback": "LLM + fallback PP",
+    "diagnosis_spice_postprocess_fallback": "Diagnosis + repair",
+    "llm_diagnosis_postprocess_fallback": "LLM diagnosis + repair",
 }
 
 TOPOLOGY_LABELS = {
@@ -241,8 +241,8 @@ def plot_validation(actions: pd.DataFrame, selected: pd.DataFrame, overlaps: pd.
         data = selected.dropna(subset=["objective_delta"]).copy()
         sns.stripplot(data=data, x="objective_delta", y="method", hue="method", dodge=False, legend=False, size=4.8, alpha=0.72, ax=ax)
         ax.axvline(0, color="#b91c1c", linewidth=1.0, linestyle="--")
-        ax.set_title("Selected action Delta J", fontsize=10)
-        ax.set_xlabel("Objective delta")
+        ax.set_title(r"Selected action $\Delta J$", fontsize=10)
+        ax.set_xlabel("Objective change")
         ax.set_ylabel("")
         ax.tick_params(axis="y", labelsize=8)
         if not data.empty:

@@ -26,8 +26,6 @@ the root README and the local manuscript draft:
 
 - `analogdiag_architecture.png`
 - `analogdiag_diagnosis_loop.png`
-- `analogdiag_optimization_loop.png`
-- `analogdiag_schema_state.png`
 - `full_flow_ota_achievement.png`
 - `full_flow_ota_summary.png`
 - `diagnosis_validation.png`

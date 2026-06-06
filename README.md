@@ -5,9 +5,9 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 AnalogRF-IR is a simulator-backed analog circuit optimization framework for
-topology-aware OTA sizing. It combines a typed YAML design schema, gm/ID-guided
+topology-aware OTA sizing. It combines a typed YAML design schema, $G_m/I_D$-guided
 surrogate search, NSGA-II exploration, ngspice validation, causal diagnosis,
-and evidence-gated LLM-assisted action selection.
+LLM-guided diagnosis, and evidence-gated action application.
 
 The central contract is that humans, deterministic diagnosis, optimizer logic,
 and optional LLM planning all operate through the same typed schema. A proposed
@@ -23,7 +23,7 @@ optimizer-side or local SPICE evidence.
   targets, evaluations, process setup, and compact diagnostics.
 - ASIR semantic extraction for roles, symmetry groups, gain stages, bias paths,
   compensation networks, and typed dependencies.
-- gm/ID-guided surrogate sizing with bounded NSGA-II exploration.
+- $G_m/I_D$-guided surrogate sizing with bounded NSGA-II exploration.
 - ngspice validation for AC gain, UGBW, phase margin, transient slew rate,
   output swing, power, operating point, and headroom.
 - Causal diagnosis over failed metrics, topology roles, bias paths, pole/gain
@@ -48,8 +48,8 @@ pad, cable, low-resistance, extracted-layout, or 50 ohm load signoff.
 | Telescopic OTA | 48 dB | 7 MHz | 60 deg | 6 V/us | 0.55 V | 300 uW |
 | Two-stage Miller OTA | 57 dB | 20 MHz | 60 deg | 10 V/us | 0.49 V | 1000 uW |
 
-Ten-seed full-flow ngspice runs pass the priority 1-2 targets for all five
-maintained OTA topologies under the LLM-assisted diagnosis flow:
+Ten-seed ngspice runs pass the priority 1-2 targets for all five maintained OTA
+topologies under the LLM-guided diagnosis and repair flow:
 
 | Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -66,13 +66,13 @@ definition:
 | Method | 5T | Current mirror | Folded cascode | Telescopic | Two-stage | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Optimizer | 3/10 | 0/10 | 0/10 | 0/10 | 0/10 | 3/50 |
-| Opt + fallback PP | 5/10 | 1/10 | 1/10 | 3/10 | 1/10 | 11/50 |
-| Diagnosis + PP | 10/10 | 7/10 | 5/10 | 10/10 | 9/10 | 41/50 |
-| LLM + fallback PP | 10/10 | 10/10 | 10/10 | 10/10 | 10/10 | 50/50 |
+| Optimizer + repair | 5/10 | 1/10 | 1/10 | 3/10 | 1/10 | 11/50 |
+| Diagnosis + repair | 10/10 | 7/10 | 5/10 | 10/10 | 9/10 | 41/50 |
+| LLM diagnosis + repair | 10/10 | 10/10 | 10/10 | 10/10 | 10/10 | 50/50 |
 
 | Target achievement | Measured metrics |
 | --- | --- |
-| ![Full-flow OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![Full-flow OTA measured metrics](docs/assets/full_flow_ota_summary.png) |
+| ![OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![OTA measured metrics](docs/assets/full_flow_ota_summary.png) |
 
 ![Ablation pass rate by method and topology](docs/assets/success_rate_by_method_topology.png)
 
@@ -99,13 +99,17 @@ J_spec(s) = Phi(v(s))
 
 An action is admissible only if it passes the physical gate and is either part
 of the constrained optimizer's compatible action set or independently reduces
-the action objective. Guarded actions also require local evidence:
+the action objective with trusted local SPICE evidence. Guarded actions also
+require local evidence:
 
 ```text
 admissible(a, s) :=
   physical_gate(s, a)
-  and (a in optimizer_selected_set or delta_J_act(s, a) < 0)
-  and (not guarded(a) or evidence_gate(s, a))
+  and (
+    optimizer selects a
+    or trusted local SPICE evidence decreases J_act
+  )
+  and (not guarded(a) or local evidence gate passes)
 ```
 
 ## Installation
@@ -131,7 +135,7 @@ python3 -m pip install -r requirements.txt
 
 ## Quick Start
 
-Run one IHP130 OTA optimization:
+Run one IHP SG13G2 130 nm OTA optimization:
 
 ```bash
 python main.py \
@@ -143,7 +147,7 @@ python main.py \
   --seed 10
 ```
 
-Run the LLM-assisted diagnosis flow with a local, gitignored config:
+Run the LLM-guided diagnosis flow with a local, gitignored config:
 
 ```bash
 mkdir -p ~/.config/analogrf-ir
@@ -162,7 +166,7 @@ python main.py \
   --seed 10
 ```
 
-If no LLM key is configured, the flow records fallback status and keeps
+If no LLM key is configured, the flow records LLM-disabled status and keeps
 deterministic artifacts usable for tests and non-LLM experiments.
 
 ## Reproducibility
@@ -173,7 +177,7 @@ Run tests:
 python -m pytest -q
 ```
 
-Dry-run the method-comparison matrix:
+Dry-run the controlled ablation matrix:
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
