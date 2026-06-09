@@ -42,6 +42,7 @@ def stage2_vout_from_result(state: DesignState, result) -> float | None:
 def stage2_headroom_from_result(state: DesignState, result) -> dict:
     gain_id, sink_id = get_stage2_device_ids(state)
     out: dict[str, float] = {}
+    factor = float(getattr(state.process, "VDSAT_headroom_factor", 1.0) or 1.0)
     for key, device_id in (("gain", gain_id), ("sink", sink_id)):
         if not device_id:
             continue
@@ -52,7 +53,7 @@ def stage2_headroom_from_result(state: DesignState, result) -> dict:
         vdsat = abs(float(op.get("vdsat", 0.0) or 0.0))
         out[f"{key}_vds"] = vds
         out[f"{key}_vdsat"] = vdsat
-        out[f"{key}_margin"] = vds - vdsat
+        out[f"{key}_margin"] = vds - factor * vdsat
     return out
 
 
@@ -313,6 +314,7 @@ def improve_tail_headroom(
 
     best = {"scale": 1.0, "margin": float("-inf"), "vds": None, "vdsat": None}
     chosen = None
+    factor = float(getattr(state.process, "VDSAT_headroom_factor", 1.0) or 1.0)
     def clip_width(width: float) -> float:
         return min(max(_snap_to_grid(width, w_grid), min_w), max_w)
 
@@ -325,7 +327,7 @@ def improve_tail_headroom(
             continue
         vds = abs(float(op.get("vds", 0.0)))
         vdsat = abs(float(op.get("vdsat", 0.0)))
-        margin = vds - vdsat
+        margin = vds - factor * vdsat
         if margin > best["margin"]:
             best.update({"scale": scale, "margin": margin, "vds": vds, "vdsat": vdsat})
         if margin >= required_margin:

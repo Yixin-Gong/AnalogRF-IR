@@ -18,6 +18,7 @@ DEFAULT_CLI_CONFIG = "configs/default.yaml"
 
 
 def _parse_args(argv=None):
+    explicit_args = list(sys.argv[1:] if argv is None else argv)
     defaults = _config_defaults(argv)
 
     def default(name: str, fallback):
@@ -38,6 +39,17 @@ def _parse_args(argv=None):
         type=int,
         default=default("agent_rounds", DEFAULT_AGENT_MAX_ITERATIONS),
         help="Maximum diagnosis-guided schema tuning iterations; stops early when all specs pass",
+    )
+    parser.add_argument(
+        "--llm-policy",
+        choices=("auto", "residual", "residual_escape", "shadow"),
+        default=default("llm_policy", "auto"),
+        help=(
+            "LLM use policy for diagnosis rounds. auto preserves the legacy flow; "
+            "residual calls the LLM only when deterministic evidence paths have no executable command; "
+            "residual_escape lets LLM custom actions act as SPICE-validated exploratory patches; "
+            "shadow records an LLM audit while executing the deterministic command."
+        ),
     )
     parser.add_argument("--llm-provider", default=default("llm_provider", "deepseek"), help="LLM planner provider for LangGraph rounds")
     parser.add_argument("--llm-model", default=default("llm_model", ""), help="LLM planner model, defaults to deepseek-v4-flash")
@@ -177,7 +189,17 @@ def _parse_args(argv=None):
         default=bool(default("no_asir", False)),
         help="Disable ASIR semantic enrichment on schema/SPICE input",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if "--llm-api-key" in explicit_args:
+        args.llm_api_key_file = ""
+        args.llm_api_key_stdin = False
+    elif "--llm-api-key-file" in explicit_args:
+        args.llm_api_key = ""
+        args.llm_api_key_stdin = False
+    elif "--llm-api-key-stdin" in explicit_args:
+        args.llm_api_key = ""
+        args.llm_api_key_file = ""
+    return args
 
 
 def _config_defaults(argv=None) -> dict[str, object]:
@@ -185,6 +207,11 @@ def _config_defaults(argv=None) -> dict[str, object]:
     parser.add_argument("--config", default=DEFAULT_CLI_CONFIG)
     known, _unknown = parser.parse_known_args(argv)
     defaults = load_cli_config(known.config)
+    local_defaults = load_cli_config("configs/local/llm.yaml")
+    defaults.update(local_defaults)
+    if local_defaults.get("llm_api_key_file"):
+        defaults["llm_api_key"] = ""
+        defaults["llm_api_key_stdin"] = False
     defaults["config"] = known.config
     return defaults
 
@@ -233,6 +260,7 @@ def main(argv=None) -> int:
             action_strategy=args.action_strategy,
             runtime_profile=args.runtime_profile,
             force_postprocess_after_schema_edit=bool(args.force_postprocess_after_schema_edit),
+            llm_policy=args.llm_policy,
         )
         if args.agent_rounds > 1:
             DiagnosticAgentLoop(

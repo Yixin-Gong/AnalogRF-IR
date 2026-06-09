@@ -166,6 +166,7 @@ def _build_dependency_graph(
     input_nets = _port_nets(state, "input")
     output_nets = _port_nets(state, "output")
     bias_nets = _port_nets(state, "bias")
+    vdsat_factor = _vdsat_headroom_factor(state)
     for net_name in sorted(input_nets | output_nets | bias_nets | _shared_internal_nets(state)):
         net_role = "internal"
         if net_name in input_nets:
@@ -206,7 +207,7 @@ def _build_dependency_graph(
             ("Vov", p.vdsat, "V", {"source": "vdsat_proxy"}),
             ("capacitance", cap, "F", {"components": {"cgg": p.cgg, "cgs": p.cgs, "cgd": p.cgd, "cdd": p.cdd}}),
             ("bias_current", p.id, "A", {}),
-            ("headroom", p.vds - p.vdsat, "V", {"vds": p.vds, "vdsat": p.vdsat}),
+            ("headroom", p.vds - vdsat_factor * p.vdsat, "V", {"vds": p.vds, "vdsat": p.vdsat, "vdsat_factor": vdsat_factor}),
         ):
             node_id = f"device.{dev.id}.{param}"
             nodes.append(
@@ -381,7 +382,7 @@ def _metric_edges(capabilities) -> list[dict[str, Any]]:
         _edge("block.bias_network", "behavior.large_signal_charge", "medium", "Available bias current limits large-signal charging current."),
         _edge("behavior.large_signal_charge", "metric.slew_rate", "high", "Slew rate is available current over effective capacitance."),
         _edge("constraint.headroom", "metric.output_swing", "high", "Headroom loss clips the output range."),
-        _edge("constraint.headroom", "metric.saturation_margin", "high", "Saturation margin is the measured VDS-VDSAT headroom of the limiting device."),
+        _edge("constraint.headroom", "metric.saturation_margin", "high", "Saturation margin is the measured VDS-factor*VDSAT headroom of the limiting device."),
         _edge("constraint.headroom", "metric.dc_gain", "medium", "Devices leaving saturation reduce effective ro and gain."),
         _edge("constraint.stability_margin", "metric.phase_margin", "high", "Pole-zero separation directly determines phase margin."),
         _edge("constraint.linearity", "metric.output_swing", "medium", "Linearity range limits usable output excursion."),
@@ -754,7 +755,7 @@ def _headroom_impact(state: DesignState, dev_id: str) -> float:
     if ts is None:
         return 0.0
     p = ts.parameters
-    margin = p.vds - p.vdsat - _required_margin(state, dev_id)
+    margin = p.vds - _vdsat_headroom_factor(state) * p.vdsat - _required_margin(state, dev_id)
     if margin < 0.0:
         return min(1.0, 0.70 + abs(margin) / 0.15)
     return max(0.0, min(0.65, (0.12 - margin) / 0.12))
@@ -1826,25 +1827,76 @@ def _stack_balance_tuning_actions(
     required = ("vbias_tail", "vbias_ncas", "vbias_pcas")
     if not all(_primary_design_variable(state, "", name) for name in required):
         return []
-    candidate_quantiles = [
-        {"vbias_tail": 0.03, "vbias_ncas": 0.90, "vbias_pcas": 0.05},
-        {"vbias_tail": 0.08, "vbias_ncas": 0.90, "vbias_pcas": 0.05},
-        {"vbias_tail": 0.03, "vbias_ncas": 1.00, "vbias_pcas": 0.05},
-        {"vbias_tail": 0.16, "vbias_ncas": 0.90, "vbias_pcas": 0.14},
-        {"vbias_tail": 0.08, "vbias_ncas": 0.82, "vbias_pcas": 0.14},
-        {"vbias_tail": 0.16, "vbias_ncas": 0.82, "vbias_pcas": 0.28},
-        {"vbias_tail": 0.32, "vbias_ncas": 0.70, "vbias_pcas": 0.28},
-    ]
     actions: list[dict[str, Any]] = []
     current = {
         f"global.{name}": _current_variable_value(state, "", name)
         for name in required
     }
-    for index, candidate in enumerate(candidate_quantiles, start=1):
-        per_knob_values = {
-            f"global.{name}": round(_range_quantile(state, name, quantile), 4)
-            for name, quantile in candidate.items()
-        }
+    candidate_points: list[dict[str, float]] = []
+
+    def current_or_quantile(name: str, quantile: float) -> float:
+        value = current.get(f"global.{name}")
+        return float(value) if value is not None else _range_quantile(state, name, quantile)
+
+    def clipped_global(name: str, value: float) -> float:
+        return round(_clip_to_bounds(float(value), _variable_range(state, "", name)), _value_precision(name))
+
+    # Near-feasible telescopic failures are usually a narrow stack-allocation
+    # problem. Spend the first SPICE probes around the actual postprocess
+    # operating point rather than jumping back to schema initial quantiles.
+    tail0 = current_or_quantile("vbias_tail", 0.03)
+    ncas0 = current_or_quantile("vbias_ncas", 1.00)
+    pcas0 = current_or_quantile("vbias_pcas", 0.05)
+    local_bias_deltas = [
+        (-0.006, 0.000, 0.012),
+        (-0.010, 0.000, 0.018),
+        (0.000, 0.000, 0.016),
+    ]
+    for tail_delta, ncas_delta, pcas_delta in local_bias_deltas:
+        candidate_points.append(
+            {
+                "global.vbias_tail": clipped_global("vbias_tail", tail0 + tail_delta),
+                "global.vbias_ncas": clipped_global("vbias_ncas", ncas0 + ncas_delta),
+                "global.vbias_pcas": clipped_global("vbias_pcas", pcas0 + pcas_delta),
+            }
+        )
+    current_range = _variable_range(state, "", "I_tail")
+    current_i = _current_variable_value(state, "", "I_tail")
+    if current_range is not None and current_i is not None and current_i > 0.0:
+        candidate_points.insert(
+            1,
+            {
+                "global.I_tail": _clip_to_bounds(float(current_i) * 0.96, current_range),
+                "global.vbias_tail": clipped_global("vbias_tail", tail0 - 0.006),
+                "global.vbias_ncas": clipped_global("vbias_ncas", ncas0),
+                "global.vbias_pcas": clipped_global("vbias_pcas", pcas0 + 0.014),
+            },
+        )
+
+    candidate_quantiles = [
+        {"vbias_tail": 0.03, "vbias_ncas": 1.00, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.03, "vbias_ncas": 0.94, "vbias_pcas": 0.045},
+        {"vbias_tail": 0.08, "vbias_ncas": 1.00, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.08, "vbias_ncas": 0.90, "vbias_pcas": 0.05},
+        {"vbias_tail": 0.16, "vbias_ncas": 0.90, "vbias_pcas": 0.14},
+        {"vbias_tail": 0.08, "vbias_ncas": 0.82, "vbias_pcas": 0.14},
+        {"vbias_tail": 0.16, "vbias_ncas": 0.82, "vbias_pcas": 0.28},
+        {"vbias_tail": 0.32, "vbias_ncas": 0.70, "vbias_pcas": 0.28},
+    ]
+    for candidate in candidate_quantiles:
+        candidate_points.append(
+            {
+                f"global.{name}": round(_range_quantile(state, name, quantile), 4)
+                for name, quantile in candidate.items()
+            }
+        )
+
+    seen_points: set[tuple[tuple[str, float], ...]] = set()
+    for index, per_knob_values in enumerate(candidate_points, start=1):
+        dedupe_key = tuple(sorted((knob, round(float(value), 12)) for knob, value in per_knob_values.items()))
+        if dedupe_key in seen_points:
+            continue
+        seen_points.add(dedupe_key)
         if all(
             current.get(knob) is not None and abs(float(current[knob]) - float(value)) < 0.005
             for knob, value in per_knob_values.items()
@@ -1860,13 +1912,13 @@ def _stack_balance_tuning_actions(
                 "knob": "global.vbias_tail",
                 "apply_to": list(per_knob_values),
                 "direction": "set",
-                "current_value": current,
+                "current_value": {
+                    knob: _current_variable_value(state, *_parse_knob_name(knob))
+                    for knob in per_knob_values
+                },
                 "suggested_next_value": None,
                 "per_knob_values": per_knob_values,
-                "range": {
-                    f"global.{name}": _variable_range(state, "", name)
-                    for name in required
-                },
+                "range": {knob: _variable_range(state, *_parse_knob_name(knob)) for knob in per_knob_values},
                 "limit_status": "topology_guided_bias_search",
                 "step_hint": "set the telescopic tail, NMOS cascode, and PMOS cascode biases as one stack-balance candidate",
                 "rationale": "The telescopic stack is strongly coupled; local evidence must evaluate the bias triple together instead of optimizing each bias port independently.",
@@ -2403,9 +2455,14 @@ def _required_margin(state: DesignState, dev_id: str) -> float:
     }.get(role, 0.05)
 
 
+def _vdsat_headroom_factor(state: DesignState) -> float:
+    return float(getattr(state.process, "VDSAT_headroom_factor", 1.0) or 1.0)
+
+
 def _weakest_headroom_device(state: DesignState) -> str | None:
     best = None
     best_margin = float("inf")
+    factor = _vdsat_headroom_factor(state)
     for dev in state.topology.devices:
         ts = state.transistors.get(dev.id)
         if ts is None:
@@ -2413,7 +2470,7 @@ def _weakest_headroom_device(state: DesignState) -> str | None:
         p = ts.parameters
         if p.vds <= 0 or p.vdsat <= 0:
             continue
-        margin = p.vds - p.vdsat - _required_margin(state, dev.id)
+        margin = p.vds - factor * p.vdsat - _required_margin(state, dev.id)
         if margin < best_margin:
             best = dev.id
             best_margin = margin
@@ -2528,7 +2585,7 @@ def _device_support(state: DesignState, dev_id: str) -> str:
     p = ts.parameters
     ro = 1.0 / p.gds if p.gds > 0 else 0.0
     cap = _device_capacitance(p)
-    margin = p.vds - p.vdsat - _required_margin(state, dev_id)
+    margin = p.vds - _vdsat_headroom_factor(state) * p.vdsat - _required_margin(state, dev_id)
     return (
         f"{dev_id} role={dev.role if dev else ''}, gm={p.gm:.4e}, ro={ro:.4e}, "
         f"cap={cap:.4e}, id={p.id:.4e}, headroom_margin={margin:.4e}, region={p.region}"

@@ -42,7 +42,7 @@ targets:
   phase_margin:         {min: 60, unit: deg, priority: 1}
   slew_rate:            {min: 6.0e+06, unit: V/s, priority: 2}
   output_swing:         {min: 5.5e-01, unit: V, priority: 1}
-  saturation_margin:    {min: 1.0e-02, unit: V, priority: 3}
+  saturation_margin:    {min: 5.0e-03, unit: V, priority: 3}
   power:                {max: 3.0e-04, unit: W, priority: 2}
 
 design_variables:

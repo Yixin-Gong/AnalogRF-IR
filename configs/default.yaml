@@ -14,6 +14,7 @@ optimizer:
 
 agent:
   rounds: 20
+  llm_policy: auto
 
 llm:
   provider: deepseek

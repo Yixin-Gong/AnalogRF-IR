@@ -29,7 +29,7 @@ iteration while still separating topology effects from method effects.
 | `optimizer_only` | lower baseline | off | no | no | no |
 | `optimizer_postprocess_fallback` | repair value under the fallback policy | fallback | no | no | no |
 | `diagnosis_spice_postprocess_fallback` | causal diagnosis and admissible local actions without LLM planning | fallback | yes | SPICE | deterministic |
-| `llm_diagnosis_postprocess_fallback` | LLM-guided diagnosis with planner, evidence gate, and repair policy | fallback | yes | SPICE | yes |
+| `llm_full_residual_escape_postprocess_fallback` | LLM-guided diagnosis with residual-escape hypotheses, evidence gate, and repair policy | fallback | yes | SPICE | yes |
 
 ## Recommended Reporting
 
@@ -64,18 +64,36 @@ Run one smoke case:
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
 ```
 
-Run the full matrix:
+Run the non-LLM control matrix:
 
 ```bash
 python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --run --keep-going
 ```
 
-Generate comparison tables and plots:
+Run the LLM full-flow matrix:
 
 ```bash
+python scripts/run_ablation.py \
+  --config configs/ablation_ihp130_ota_llm_full_residual_escape_seed1_10.yaml \
+  --run --keep-going --jobs 1 --skip-existing
+```
+
+Build the unified 200-cell manifest and generate comparison tables and plots:
+
+```bash
+python scripts/build_200cell_manifest.py
+
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/manifest.json \
-  --out-dir runs/ablations_ihp130_ota_calibrated_mim_cl1pf_maxiter20/figures
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --out-dir docs/assets --format png
+
+python scripts/plot_full_flow_results.py \
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --out-dir docs/assets --format png --write-csv
+
+python scripts/plot_diagnosis_validation.py \
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --out-dir docs/assets --format png --write-csv
 ```
 
 After a design passes its baseline targets, run a progressive target ladder to
@@ -102,5 +120,5 @@ Outputs:
   usage, and postprocess event counts.
 - `figures/spec_records.csv`: per-run per-spec values and normalized margins.
 - `figures/method_topology_summary.csv`: method-by-topology aggregate table.
-- `figures/*.png` and `figures/*.pdf`: success-rate, spec heatmap, metric
+- `figures/*.png`: success-rate, spec heatmap, metric
   distribution, gain-bandwidth-power tradeoff, and traceability plots.

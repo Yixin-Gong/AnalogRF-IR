@@ -47,6 +47,7 @@ CASE_LABELS = {
     "llm_diagnosis_no_postprocess": "LLM-guided diagnosis",
     "llm_diagnosis_postprocess_fallback": "LLM diagnosis + repair",
     "llm_diagnosis_postprocess_always": "LLM diagnosis + repair",
+    "llm_full_residual_escape_postprocess_fallback": "LLM diagnosis + repair",
 }
 
 TOPOLOGY_LABELS = {
@@ -144,6 +145,7 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
             "spec_pass": target_status["spec_pass"],
             "artifact_spec_pass": bool(status.get("spec_pass", False)),
             "ngspice_success": bool(status.get("ngspice_success", False)),
+            "required_targets_verified": _required_targets_verified(result),
             "best_loss": _to_float(status.get("best_loss")),
             "failed_targets": "|".join(target_status["failed_targets"]),
             "artifact_failed_targets": "|".join(str(item) for item in status.get("failed_targets", []) or []),
@@ -255,6 +257,7 @@ def summarize_runs(runs: pd.DataFrame, specs: pd.DataFrame) -> pd.DataFrame:
             n_runs=("job", "count"),
             success_rate=("spec_pass", "mean"),
             ngspice_success_rate=("ngspice_success", "mean"),
+            required_verified_rate=("required_targets_verified", "mean"),
             median_best_loss=("best_loss", "median"),
             llm_used_rate=("llm_used", "mean"),
             postprocess_rate=("postprocess_event_count", lambda values: (values > 0).mean()),
@@ -310,7 +313,7 @@ def plot_spec_achievement(specs: pd.DataFrame, out_dir: Path, formats: list[str]
     )
     data = _ordered(data)
     fig, ax = plt.subplots(figsize=(10.5, 5.2))
-    sns.heatmap(data, annot=True, fmt=".2f", cmap="rocket_r", vmin=0, vmax=1.5, linewidths=0.8, linecolor="white", cbar_kws={"label": "Median target achievement, capped at 1.5"}, ax=ax)
+    sns.heatmap(data, annot=True, fmt=".2f", cmap=BLUE_CMAP, vmin=0, vmax=1.5, linewidths=0.8, linecolor="white", cbar_kws={"label": "Median target achievement, capped at 1.5"}, ax=ax)
     ax.axhline(0, color="#222222", linewidth=0.8)
     ax.set_title("Spec Achievement Across Methods")
     ax.set_xlabel("")
@@ -396,28 +399,40 @@ def plot_method_traceability(runs: pd.DataFrame, out_dir: Path, formats: list[st
         .agg(
             llm_used_rate=("llm_used", "mean"),
             postprocess_rate=("postprocess_event_count", lambda values: (values > 0).mean()),
-            ngspice_success_rate=("ngspice_success", "mean"),
+            required_verified_rate=("required_targets_verified", "mean"),
         )
         .reset_index()
     )
-    long = data.melt(id_vars="method", var_name="trace", value_name="rate")
-    long["trace"] = long["trace"].map(
-        {
-            "llm_used_rate": "LLM planner ok",
-            "postprocess_rate": "Postprocess ran",
-            "ngspice_success_rate": "ngspice ok",
+    data = data.set_index("method")[
+        ["llm_used_rate", "postprocess_rate", "required_verified_rate"]
+    ].rename(
+        columns={
+            "llm_used_rate": "LLM planner",
+            "postprocess_rate": "Repair ran",
+            "required_verified_rate": "Required targets",
         }
     )
-    fig, ax = plt.subplots(figsize=(10.5, 5.8))
-    sns.barplot(data=long, x="method", y="rate", hue="trace", palette=["#4c78a8", "#f58518", "#54a24b"], ax=ax)
-    ax.set_ylim(0, 1.02)
-    ax.set_ylabel("Rate")
+    data = _ordered(data)
+    fig, ax = plt.subplots(figsize=(5.9, 2.55), constrained_layout=True)
+    sns.heatmap(
+        data,
+        annot=True,
+        fmt=".0%",
+        cmap=BLUE_CMAP,
+        vmin=0,
+        vmax=1,
+        linewidths=0.7,
+        linecolor="white",
+        cbar=False,
+        annot_kws={"fontsize": 8.0, "color": "#0f172a"},
+        ax=ax,
+    )
     ax.set_xlabel("")
-    ax.set_title("Method Traceability: LLM, Postprocess, and Simulation")
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda value, _pos: f"{value:.0%}"))
-    ax.tick_params(axis="x", rotation=20)
-    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.30))
-    fig.tight_layout(rect=(0, 0.22, 1, 1))
+    ax.set_ylabel("")
+    ax.tick_params(axis="x", rotation=0, labelsize=8)
+    ax.tick_params(axis="y", rotation=0, labelsize=8)
+    for text, value in zip(ax.texts, data.to_numpy().ravel()):
+        text.set_color("white" if float(value) >= 0.65 else "#0f172a")
     _save(fig, out_dir / "method_traceability", formats, dpi)
 
 
@@ -460,6 +475,15 @@ def _llm_usage(runs_dir: Path) -> dict[str, Any]:
     }
 
 
+def _required_targets_verified(result: dict[str, Any]) -> bool:
+    alignment = result.get("data_alignment", {}) if isinstance(result, dict) else {}
+    if not isinstance(alignment, dict):
+        return False
+    missing_required = alignment.get("missing_required_measurements", []) or []
+    unverified = alignment.get("unverified_targets", []) or []
+    return bool(alignment.get("aligned", False)) and not missing_required and not unverified
+
+
 def _llm_planner_blocks(path: Path) -> list[dict[str, str]]:
     blocks: list[dict[str, str]] = []
     try:
@@ -497,7 +521,10 @@ def _topology_name(schema: dict[str, Any], schema_path: str) -> str:
 
 
 def _ordered(data: pd.DataFrame) -> pd.DataFrame:
-    method_order = [label for key, label in CASE_LABELS.items() if label in data.index]
+    method_order = []
+    for _key, label in CASE_LABELS.items():
+        if label in data.index and label not in method_order:
+            method_order.append(label)
     rest = [item for item in data.index if item not in method_order]
     return data.loc[method_order + rest]
 

@@ -61,7 +61,11 @@ def main(argv: list[str] | None = None) -> int:
     plan = _load_yaml(ROOT / args.config if not Path(args.config).is_absolute() else Path(args.config))
     output_dir = ROOT / (args.output_dir or plan.get("output_dir", "runs/ablations"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    local_overrides = [_load_yaml(_resolve_project_path(path)) for path in args.local_config]
+    local_config_paths = list(args.local_config)
+    default_local_llm = ROOT / "configs" / "local" / "llm.yaml"
+    if not local_config_paths and default_local_llm.exists():
+        local_config_paths.append(str(default_local_llm))
+    local_overrides = [_load_yaml(_resolve_project_path(path)) for path in local_config_paths]
     llm_api_key_file = _normalize_optional_path(args.llm_api_key_file)
     jobs = build_jobs(
         plan,
@@ -147,7 +151,7 @@ def _execute_job(
     started = time.perf_counter()
     record["started_at"] = datetime.now().isoformat()
     existing_summary = _latest_result_summary(job["runs_dir"]) if skip_existing else {}
-    if existing_summary:
+    if existing_summary and existing_summary.get("spec_pass") is True:
         record["return_code"] = 0
         record["status"] = "skipped_existing"
         record["summary"] = existing_summary

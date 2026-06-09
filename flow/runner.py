@@ -56,6 +56,7 @@ class FlowConfig:
     action_strategy: str = "combo_coarse_fine"
     runtime_profile: str = "standard"
     force_postprocess_after_schema_edit: bool = False
+    llm_policy: str = "auto"
 
 
 @dataclass
@@ -198,7 +199,7 @@ class AnalogRFIRFlowRunner:
 
         self.emit("\n[8/8] Running ngspice simulation ...")
         ngspice_bin = cfg.ngspice_bin or (env.get("tools", {}) or {}).get("ngspice_bin", "ngspice")
-        sim = NgspiceSimulator(timeout_sec=30, ngspice_bin=ngspice_bin)
+        sim = NgspiceSimulator(ngspice_bin=ngspice_bin)
         flow_meta = {
             "environment": str(env_path),
             "schema": str(design_input.schema_path),
@@ -285,6 +286,13 @@ class AnalogRFIRFlowRunner:
         include_transient = _requires_transient_validation(state)
         stage_started = time.perf_counter()
         sim_result = sim.run(netlist_str, work_dir=str(output_dir), include_transient=include_transient)
+        self._retry_missing_required_transient(
+            sim=sim,
+            netlist_str=netlist_str,
+            output_dir=output_dir,
+            sim_result=sim_result,
+            flow_meta=flow_meta,
+        )
         self._record_timing(
             timing,
             "ngspice_validation",
@@ -298,6 +306,68 @@ class AnalogRFIRFlowRunner:
         backfill_state_from_ngspice(state, sim_result)
         self._validate_or_raise(state, "post_ngspice")
         self._record_timing(timing, "backfill_and_validate_ngspice", stage_started)
+        measured_post_decision = self._measured_postprocess_decision(state, sim_result, spec_model)
+        flow_meta["measured_postprocess_decision"] = measured_post_decision
+        if measured_post_decision["run"]:
+            flow_meta["pre_ngspice_postprocess_decision"] = flow_meta.get("postprocess_decision", {})
+            flow_meta["postprocess_decision"] = measured_post_decision
+            self.emit(f"       Postprocess fallback: {measured_post_decision['reason']}")
+            stage_started = time.perf_counter()
+            post_context = PostprocessContext(
+                state=state,
+                sim=sim,
+                work_dir=output_dir,
+                config=PostprocessConfig(
+                    skip_dc_repair=cfg.skip_dc_repair,
+                    skip_comp_tune=cfg.skip_comp_tune,
+                    runtime_profile=cfg.runtime_profile,
+                ),
+                profile=problem.profile,
+                capabilities=problem.capabilities,
+            )
+            post_events = PostprocessRegistry().run(post_context)
+            flow_meta["postprocess"] = post_events
+            self._record_timing(
+                timing,
+                "postprocess_measured_run",
+                stage_started,
+                event_count=len(post_events),
+            )
+            for event in post_events:
+                self._print_postprocess_event(event)
+            if post_events:
+                stage_started = time.perf_counter()
+                netlist_str = generate_netlist(state)
+                best_meta.setdefault("decoded", {})["__global__"] = dict(state.global_parameters)
+                if has_miller_capacitive_compensation(state):
+                    best_meta.setdefault("performance", {})["Cc"] = state.global_parameters.get("Cc", 0.0)
+                if has_miller_rc_compensation(state):
+                    best_meta.setdefault("performance", {})["Rz"] = state.global_parameters.get("Rz", 0.0)
+                self._validate_or_raise(state, "measured_postprocess")
+                self._record_timing(timing, "measured_postprocess_validate_and_regen", stage_started)
+
+                stage_started = time.perf_counter()
+                sim_result = sim.run(netlist_str, work_dir=str(output_dir), include_transient=include_transient)
+                self._retry_missing_required_transient(
+                    sim=sim,
+                    netlist_str=netlist_str,
+                    output_dir=output_dir,
+                    sim_result=sim_result,
+                    flow_meta=flow_meta,
+                )
+                self._record_timing(
+                    timing,
+                    "ngspice_validation_after_measured_postprocess",
+                    stage_started,
+                    include_transient=include_transient,
+                    simulator_elapsed_sec=getattr(sim_result, "elapsed_sec", None),
+                )
+                if "phase_margin" in sim_result.measurements and "phase_margin_from_curve" not in sim_result.measurements:
+                    sim_result.measurements["phase_margin"] = normalize_phase_margin(sim_result.measurements["phase_margin"])
+                stage_started = time.perf_counter()
+                backfill_state_from_ngspice(state, sim_result)
+                self._validate_or_raise(state, "post_measured_ngspice")
+                self._record_timing(timing, "backfill_and_validate_after_measured_postprocess", stage_started)
         self._print_simulation_summary(sim_result)
         self._maybe_build_local_intervention_model(
             state=state,
@@ -333,6 +403,58 @@ class AnalogRFIRFlowRunner:
         self._print_comparison(state, best_meta, sim_result, spec_model)
         self._print_timing_summary(timing, time.perf_counter() - run_started)
         return FlowResult(state, artifacts, best_meta, sim_result, self.validation_reports, flow_meta)
+
+    def _retry_missing_required_transient(
+        self,
+        *,
+        sim: NgspiceSimulator,
+        netlist_str: str,
+        output_dir: Path,
+        sim_result: SimulationResult,
+        flow_meta: dict[str, Any],
+    ) -> None:
+        tran_status = (sim_result.pass_status or {}).get("tran", {}) or {}
+        missing = set(tran_status.get("missing_measurements", []) or [])
+        if "slew_rate" not in missing or not tran_status.get("required_for_run"):
+            return
+
+        retry_started = time.perf_counter()
+        retry_sim = NgspiceSimulator(ngspice_bin=sim.ngspice_bin)
+        retry_dir = output_dir / "transient_retry"
+        retry_result = retry_sim._run_tran_pass(netlist_str, str(retry_dir))
+        retry_status = retry_sim._summarize_pass(
+            retry_result,
+            expected_measurements=("slew_rate",),
+            required_for_run=True,
+        )
+        recovered = "slew_rate" in (retry_result.measurements or {})
+        flow_meta["transient_retry"] = {
+            "schema_version": "analogrf_ir.transient_retry.v0_1",
+            "trigger": "required transient measurement missing",
+            "missing_measurements": sorted(missing),
+            "work_dir": str(retry_dir),
+            "recovered": bool(recovered),
+            "elapsed_sec": round(time.perf_counter() - retry_started, 6),
+            "measurements": dict(retry_result.measurements or {}),
+            "pass_status": retry_status,
+        }
+        if not recovered:
+            return
+
+        sim_result.measurements.update(retry_result.measurements or {})
+        sim_result.raw_stdout = (
+            (sim_result.raw_stdout or "")
+            + "\n--- transient_retry stdout ---\n"
+            + (retry_result.raw_stdout or "")
+        )
+        sim_result.raw_stderr = (
+            (sim_result.raw_stderr or "")
+            + "\n--- transient_retry stderr ---\n"
+            + (retry_result.raw_stderr or "")
+        )
+        sim_result.pass_status.setdefault("tran_initial", tran_status)
+        sim_result.pass_status["tran"] = retry_status
+        sim_result.elapsed_sec = float(sim_result.elapsed_sec or 0.0) + float(retry_result.elapsed_sec or 0.0)
 
     def _maybe_build_local_intervention_model(
         self,
@@ -474,6 +596,66 @@ class AnalogRFIRFlowRunner:
         }
         decision.update(near)
         return decision
+
+    def _measured_postprocess_decision(
+        self,
+        state: DesignState,
+        sim_result: SimulationResult,
+        spec_model,
+    ) -> dict[str, Any]:
+        policy = str(self.config.postprocess_policy or "fallback").lower()
+        if self.config.skip_dc_repair and self.config.skip_comp_tune:
+            return {
+                "policy": policy,
+                "run": False,
+                "reason": "all postprocess repair passes are disabled",
+            }
+        if policy != "fallback":
+            return {
+                "policy": policy,
+                "run": False,
+                "reason": "measured near-feasible fallback only applies to fallback policy",
+            }
+        statuses = {
+            name: spec_model.target_status(name, target, sim_result.measurements or {}, {})
+            for name, target in state.targets.items()
+        }
+        violations = {
+            name: self._normalized_status_violation(status)
+            for name, status in statuses.items()
+            if bool(status.get("counts_for_pass", int(state.targets[name].priority or 1) <= 2 or name == "saturation_margin"))
+        }
+        failed = [
+            name
+            for name, status in statuses.items()
+            if status.get("status") in {"fail", "unverified"}
+            and bool(status.get("counts_for_pass", int(state.targets[name].priority or 1) <= 2 or name == "saturation_margin"))
+        ]
+        max_violation = max((violations.get(name, 0.0) for name in failed), default=0.0)
+        saturation_only_close = failed == ["saturation_margin"] and max_violation <= 1.0
+        cascode_saturation_repair = self._is_biasable_cascode_ota(state) and "saturation_margin" in failed
+        near_feasible = bool(failed) and (
+            max_violation <= float(self.config.postprocess_near_feasible_ratio)
+            or saturation_only_close
+            or cascode_saturation_repair
+        )
+        return {
+            "policy": policy,
+            "run": near_feasible,
+            "reason": (
+                "ngspice-measured cascode saturation repair"
+                if cascode_saturation_repair
+                else
+                "ngspice-measured saturation-only fallback"
+                if saturation_only_close
+                else "ngspice-measured near-feasible fallback"
+                if near_feasible
+                else "ngspice result is not near-feasible for measured fallback"
+            ),
+            "max_normalized_violation": round(float(max_violation), 6),
+            "near_feasible_ratio": float(self.config.postprocess_near_feasible_ratio),
+            "measured_failed_or_unverified": failed,
+        }
 
     def _cascode_op_repair_fallback(self, state: DesignState, near: dict[str, Any]) -> dict[str, Any]:
         if not self._is_biasable_cascode_ota(state):

@@ -22,6 +22,7 @@ DEFAULT_OUTPUT_DIRS = [
 METHOD_LABELS = {
     "diagnosis_spice_postprocess_fallback": "Diagnosis + repair",
     "llm_diagnosis_postprocess_fallback": "LLM diagnosis + repair",
+    "llm_full_residual_escape_postprocess_fallback": "LLM diagnosis + repair",
 }
 
 TOPOLOGY_LABELS = {

@@ -39,7 +39,7 @@ class SimulationResult:
 class NgspiceSimulator:
     """AnalogRF-IR internal documentation."""
 
-    def __init__(self, ngspice_bin: str = "ngspice", timeout_sec: float = 60.0):
+    def __init__(self, ngspice_bin: str = "ngspice", timeout_sec: Optional[float] = None):
         self.ngspice_bin = ngspice_bin
         self.timeout_sec = timeout_sec
 
@@ -764,10 +764,11 @@ class NgspiceSimulator:
                 pass
 
         try:
+            timeout = self.timeout_sec if self.timeout_sec and self.timeout_sec > 0 else None
             proc = subprocess.run(
                 [self.ngspice_bin, "-b", cir_path],
                 capture_output=True, text=True,
-                timeout=self.timeout_sec,
+                timeout=timeout,
                 cwd=os.path.dirname(cir_path),
             )
             result.return_code = proc.returncode
@@ -1226,7 +1227,7 @@ class NgspiceSimulator:
             perf.update(output)
         icmr = self._icmr_from_op(devices, op, vdd, vss, factor)
         perf.update(icmr)
-        perf.update(self._saturation_margin_from_op(devices, op, required_margin=0.01))
+        perf.update(self._saturation_margin_from_op(devices, op, factor=factor, required_margin=0.01))
         return perf
 
     def _saturation_margin_from_op(
@@ -1234,6 +1235,7 @@ class NgspiceSimulator:
         devices: List[Dict[str, str]],
         op: Dict[str, Dict[str, float]],
         *,
+        factor: float,
         required_margin: float,
     ) -> Dict[str, float]:
         margins: List[float] = []
@@ -1242,7 +1244,7 @@ class NgspiceSimulator:
             vdsat = self._op_abs(op, dev["id"], "vdsat")
             if vds <= 0.0 or vdsat <= 0.0:
                 continue
-            margins.append(vds - vdsat)
+            margins.append(vds - factor * vdsat)
         if not margins:
             return {}
         margin = min(margins)

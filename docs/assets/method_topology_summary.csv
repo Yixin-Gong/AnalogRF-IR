@@ -1,0 +1,21 @@
+method,case,topology_label,n_runs,success_rate,ngspice_success_rate,required_verified_rate,median_best_loss,llm_used_rate,postprocess_rate,spec_pass_rate,median_spec_margin
+Diagnosis + repair,diagnosis_spice_postprocess_fallback,Current mirror,10,0.7,0.0,1.0,105.41826674021283,0.0,1.0,0.95,0.2491942099383881
+Diagnosis + repair,diagnosis_spice_postprocess_fallback,Five transistor,10,1.0,0.0,1.0,157.89656682649485,0.0,0.6,0.9833333333333333,0.4592063442001034
+Diagnosis + repair,diagnosis_spice_postprocess_fallback,Folded cascode,10,0.5,0.0,1.0,587.5317293249893,0.0,1.0,0.9166666666666666,0.45455878333333344
+Diagnosis + repair,diagnosis_spice_postprocess_fallback,Telescopic,10,1.0,0.0,1.0,3920.870238096705,0.0,1.0,1.0,0.407421573054993
+Diagnosis + repair,diagnosis_spice_postprocess_fallback,Two-stage Miller,10,0.9,0.0,0.9,799.8782000017432,0.0,1.0,0.9833333333333333,0.35407873469387746
+LLM diagnosis + repair,llm_full_residual_escape_postprocess_fallback,Current mirror,10,1.0,0.0,1.0,91.22659051447695,0.7,0.9,1.0,0.28032075152597047
+LLM diagnosis + repair,llm_full_residual_escape_postprocess_fallback,Five transistor,10,1.0,0.0,1.0,159.4732285126674,0.7,1.0,1.0,0.43396987778806106
+LLM diagnosis + repair,llm_full_residual_escape_postprocess_fallback,Folded cascode,10,1.0,0.0,1.0,589.5612976737393,0.0,1.0,1.0,0.5655540046914638
+LLM diagnosis + repair,llm_full_residual_escape_postprocess_fallback,Telescopic,10,1.0,0.0,1.0,3926.048617808593,0.0,1.0,1.0,0.5650315209380201
+LLM diagnosis + repair,llm_full_residual_escape_postprocess_fallback,Two-stage Miller,10,1.0,0.0,1.0,810.130592105952,0.9,1.0,1.0,0.6067481632653061
+Optimizer,optimizer_only,Current mirror,10,0.0,0.0,0.6,94.9130965768363,0.0,0.0,0.6,0.2773062794301025
+Optimizer,optimizer_only,Five transistor,10,0.3,0.0,0.4,157.6891489575878,0.0,0.0,0.7833333333333333,0.33269633289218564
+Optimizer,optimizer_only,Folded cascode,10,0.0,0.0,0.3,585.1616154501717,0.0,0.0,0.6166666666666667,0.4174947
+Optimizer,optimizer_only,Telescopic,10,0.0,0.0,0.0,3920.870238096705,0.0,0.0,0.25,-0.49808768665015424
+Optimizer,optimizer_only,Two-stage Miller,10,0.0,0.0,0.0,381.284887127498,0.0,0.0,0.5,0.27536399999999994
+Optimizer + repair,optimizer_postprocess_fallback,Current mirror,10,0.1,0.0,1.0,94.9130965768363,0.0,0.1,0.6833333333333333,0.24025875570079422
+Optimizer + repair,optimizer_postprocess_fallback,Five transistor,10,0.5,0.0,0.8,157.6891489575878,0.0,0.3,0.9,0.4361788196734985
+Optimizer + repair,optimizer_postprocess_fallback,Folded cascode,10,0.1,0.0,0.9,585.1616154501717,0.0,0.1,0.65,0.39691364166666665
+Optimizer + repair,optimizer_postprocess_fallback,Telescopic,10,0.3,0.0,0.8,3920.870238096705,0.0,1.0,0.7833333333333333,0.12117435957680801
+Optimizer + repair,optimizer_postprocess_fallback,Two-stage Miller,10,0.1,0.0,1.0,381.284887127498,0.0,0.1,0.7,0.3476982244897959

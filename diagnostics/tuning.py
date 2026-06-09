@@ -112,6 +112,7 @@ def write_tuning_tool_command(
         "round_index": round_index,
         "state_source": "design_state.yaml:diagnostics.causal_diagnostics.attribution_guided_tuning",
         "write_policy": agent_write_policy(),
+        "schema_context": _compact_schema_context(state),
         "args": {
             "max_primary_actions_per_failure": max_primary_actions_per_failure,
             "allowed_priorities": priorities,
@@ -156,6 +157,34 @@ def write_tuning_tool_command(
     commands = state.diagnostics.setdefault("agent_tool_commands", [])
     commands.append(command)
     return command
+
+
+def _compact_schema_context(state: DesignState) -> dict[str, Any]:
+    role_by_device = {dev.id: dev.role for dev in state.topology.devices}
+    variables = []
+    for dv in state.design_variables:
+        knob = f"{dv.device}.{dv.variable}" if dv.device else f"global.{dv.variable}"
+        variables.append(
+            {
+                "knob": knob,
+                "device": dv.device,
+                "variable": dv.variable,
+                "role": role_by_device.get(dv.device, "global" if not dv.device else ""),
+                "initial": dv.initial,
+                "range": {"min": dv.range.min, "max": dv.range.max},
+                "symmetry_label": dv.symmetry_label,
+                "unit": dv.unit,
+            }
+        )
+    return {
+        "topology": {
+            "name": state.topology.name,
+            "class": state.topology.class_,
+            "architecture": state.topology.architecture,
+        },
+        "writable_variables": variables[:80],
+        "global_parameters": dict(state.global_parameters),
+    }
 
 
 def execute_tuning_tool_commands(state: DesignState, *, round_index: int = 0) -> dict[str, Any]:
@@ -215,6 +244,7 @@ def apply_attribution_guided_tuning(
         if action.get("llm_decision", "apply") != "apply":
             application.skipped_actions.append({**_action_summary(action), "reason": action.get("llm_reason", "LLM skipped action")})
             continue
+        action = _expand_symmetric_action_targets(state, action)
         admissibility_error = _formal_action_admissibility_error(state, action)
         if admissibility_error:
             application.skipped_actions.append(
@@ -429,6 +459,62 @@ def _select_actions(plan: dict[str, Any], limit: int, allowed_priorities: list[s
     return selected
 
 
+def _expand_symmetric_action_targets(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
+    target_knobs = action.get("apply_to") or [action.get("knob")]
+    if not target_knobs:
+        return action
+    if not all(isinstance(knob, str) and knob.strip() for knob in target_knobs):
+        return action
+    if action.get("_custom_action") and not action.get("per_knob_values"):
+        return action
+
+    expanded = dict(action)
+    expanded_targets: list[str] = []
+    seen: set[str] = set()
+    per_knob_values = dict(action.get("per_knob_values") or {})
+    range_update = action.get("range_update")
+    if isinstance(range_update, dict):
+        range_update = dict(range_update)
+        if isinstance(range_update.get("per_knob"), dict):
+            range_update["per_knob"] = dict(range_update["per_knob"])
+
+    for raw_knob in target_knobs:
+        knob = str(raw_knob)
+        if knob not in seen:
+            expanded_targets.append(knob)
+            seen.add(knob)
+        device, variable = _parse_knob(knob)
+        design_var = _find_design_variable(state, device, variable)
+        symmetry_label = getattr(design_var, "symmetry_label", "") if design_var is not None else ""
+        if not device or not symmetry_label:
+            continue
+        for peer in state.design_variables:
+            if (
+                peer.device
+                and peer.device != device
+                and peer.variable == variable
+                and peer.symmetry_label == symmetry_label
+            ):
+                peer_knob = f"{peer.device}.{peer.variable}"
+                if peer_knob not in seen:
+                    expanded_targets.append(peer_knob)
+                    seen.add(peer_knob)
+                if knob in per_knob_values and peer_knob not in per_knob_values:
+                    per_knob_values[peer_knob] = per_knob_values[knob]
+                per_knob_update = range_update.get("per_knob") if isinstance(range_update, dict) else None
+                if isinstance(per_knob_update, dict) and knob in per_knob_update and peer_knob not in per_knob_update:
+                    per_knob_update[peer_knob] = per_knob_update[knob]
+
+    if expanded_targets == target_knobs and per_knob_values == (action.get("per_knob_values") or {}) and range_update == action.get("range_update"):
+        return action
+    expanded["apply_to"] = expanded_targets
+    if per_knob_values:
+        expanded["per_knob_values"] = per_knob_values
+    if range_update is not None:
+        expanded["range_update"] = range_update
+    return expanded
+
+
 def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
     target_knobs = action.get("apply_to") or [action.get("knob")]
     if not target_knobs:
@@ -440,7 +526,7 @@ def _apply_action(state: DesignState, action: dict[str, Any]) -> dict[str, Any]:
         design_var = _find_design_variable(state, device, variable)
         if design_var is None:
             return {**_action_summary(action), "applied": False, "reason": f"agent write policy rejected knob outside design_variables: {knob}"}
-        _apply_range_update(design_var, action)
+        _apply_range_update(design_var, action, knob)
         _apply_constraint_update(state, device, variable, design_var.range)
         next_value = _value_after_range_update(action, design_var.range, knob)
         if next_value is None:
@@ -498,9 +584,12 @@ def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
         return "agent write policy rejected action with no target knobs"
     if not all(isinstance(knob, str) and knob.strip() for knob in target_knobs):
         return "agent write policy rejected non-string target knob"
-    update_error = _range_update_policy_error(action.get("range_update") or {})
+    update_error = _range_update_policy_error(action.get("range_update") or {}, target_knobs)
     if update_error:
         return update_error
+    value_error = _per_knob_values_policy_error(action, target_knobs)
+    if value_error:
+        return value_error
     for knob in target_knobs:
         device, variable = _parse_knob(knob)
         design_var = _find_design_variable(state, device, variable)
@@ -512,6 +601,25 @@ def _write_policy_error(state: DesignState, action: dict[str, Any]) -> str:
             return "agent write policy rejected folded-cascode tail L decrease while gain/headroom is failing"
         if _telescopic_input_gmid_increase_is_unsafe(state, action, device, variable):
             return "agent write policy rejected telescopic input-pair gm/ID increase in the high-gm/ID headroom-limited region"
+    return ""
+
+
+def _per_knob_values_policy_error(action: dict[str, Any], target_knobs: list[str]) -> str:
+    per_knob_values = action.get("per_knob_values")
+    if not isinstance(per_knob_values, dict) or not per_knob_values:
+        return ""
+    target_set = {str(knob) for knob in target_knobs}
+    value_set = {str(knob) for knob in per_knob_values}
+    unknown = sorted(value_set - target_set)
+    if unknown:
+        return f"agent write policy rejected per_knob_values targets outside action: {unknown}"
+    has_fallback_value = any(
+        action.get(key) is not None
+        for key in ("suggested_unclipped_value", "suggested_next_value", "target_value")
+    )
+    missing = sorted(target_set - value_set)
+    if missing and not has_fallback_value:
+        return f"agent write policy rejected per_knob_values missing target values: {missing}"
     return ""
 
 
@@ -585,12 +693,39 @@ def _optimizer_gate_is_active(state: DesignState) -> bool:
     return decision_model.get("type") == "constrained_local_action_optimizer"
 
 
-def _range_update_policy_error(update: dict[str, Any]) -> str:
+def _range_update_policy_error(update: dict[str, Any], target_knobs: list[str] | None = None) -> str:
     update_type = update.get("type")
     if not update_type:
         return ""
     if update_type not in AGENT_RANGE_UPDATE_TYPES:
         return f"agent write policy rejected range_update type: {update_type}"
+    target_set = {str(knob) for knob in (target_knobs or [])}
+    per_knob = update.get("per_knob")
+    if per_knob is not None:
+        if not isinstance(per_knob, dict):
+            return "agent write policy rejected range_update.per_knob must be a mapping"
+        unknown_targets = sorted(str(knob) for knob in per_knob if str(knob) not in target_set)
+        if unknown_targets:
+            return f"agent write policy rejected range_update.per_knob targets outside action: {unknown_targets}"
+        required_by_type = {
+            "expand_upper_bound": {"suggested_max", "max"},
+            "expand_lower_bound": {"suggested_min", "min"},
+            "set_range": {"min", "max"},
+        }[update_type]
+        allowed_by_type = {
+            "expand_upper_bound": {"suggested_max", "max"},
+            "expand_lower_bound": {"suggested_min", "min"},
+            "set_range": {"min", "max"},
+        }[update_type]
+        for knob, knob_update in per_knob.items():
+            if not isinstance(knob_update, dict):
+                return f"agent write policy rejected range_update.per_knob[{knob}] must be a mapping"
+            unknown = sorted(set(knob_update) - allowed_by_type)
+            if unknown:
+                return f"agent write policy rejected range_update.per_knob[{knob}] keys: {unknown}"
+            if not any(knob_update.get(key) is not None for key in required_by_type):
+                return f"agent write policy rejected range_update.per_knob[{knob}] without bounds"
+        return ""
     allowed_keys = {
         "expand_upper_bound": {"type", "suggested_max"},
         "expand_lower_bound": {"type", "suggested_min"},
@@ -650,12 +785,19 @@ def _find_design_variable(state: DesignState, device: str, variable: str):
     return None
 
 
-def _apply_range_update(design_var, action: dict[str, Any]) -> None:
+def _apply_range_update(design_var, action: dict[str, Any], knob: str = "") -> None:
     update = action.get("range_update") or {}
+    per_knob = update.get("per_knob")
+    if knob and isinstance(per_knob, dict) and isinstance(per_knob.get(knob), dict):
+        update = {"type": update.get("type"), **per_knob[knob]}
     if update.get("type") == "expand_upper_bound" and update.get("suggested_max") is not None:
         design_var.range.max = max(float(design_var.range.max), float(update["suggested_max"]))
+    elif update.get("type") == "expand_upper_bound" and update.get("max") is not None:
+        design_var.range.max = max(float(design_var.range.max), float(update["max"]))
     elif update.get("type") == "expand_lower_bound" and update.get("suggested_min") is not None:
         design_var.range.min = min(float(design_var.range.min), float(update["suggested_min"]))
+    elif update.get("type") == "expand_lower_bound" and update.get("min") is not None:
+        design_var.range.min = min(float(design_var.range.min), float(update["min"]))
     elif update.get("type") == "set_range":
         if update.get("min") is not None:
             design_var.range.min = float(update["min"])

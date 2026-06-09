@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
+import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -22,6 +25,8 @@ class LLMPlannerConfig:
     max_tokens: int = 1400
     thinking: str = "disabled"
     reasoning_effort: str = ""
+    max_retries: int = 2
+    retry_backoff_seconds: float = 1.0
 
     @classmethod
     def from_env(
@@ -68,6 +73,8 @@ class LLMPlannerConfig:
             ),
             thinking=thinking or os.environ.get("ANALOGRF_IR_LLM_THINKING", "disabled"),
             reasoning_effort=reasoning_effort or os.environ.get("ANALOGRF_IR_LLM_REASONING_EFFORT", ""),
+            max_retries=max(0, int(os.environ.get("ANALOGRF_IR_LLM_MAX_RETRIES", "2"))),
+            retry_backoff_seconds=max(0.0, float(os.environ.get("ANALOGRF_IR_LLM_RETRY_BACKOFF_SECONDS", "1.0"))),
         )
 
 
@@ -99,6 +106,7 @@ class DeepSeekSchemaPlanner:
 
         try:
             planner_payload = self._call_planner(command, agent_model or {}, api_key)
+            transport = planner_payload.pop("_planner_transport", None)
             self._apply_planner_payload(command, planner_payload)
             command["llm_planner"] = {
                 "provider": self.config.provider,
@@ -110,8 +118,17 @@ class DeepSeekSchemaPlanner:
                 "status": "ok",
                 "reason": planner_payload.get("rationale", "LLM returned a schema tuning command."),
             }
+            if isinstance(transport, dict) and transport:
+                command["llm_planner"]["transport"] = transport
             return LLMPlannerResult(command=command, used_llm=True, status="ok", reason="LLM command accepted")
-        except (ValueError, urllib.error.URLError, TimeoutError) as exc:
+        except (
+            ValueError,
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            http.client.HTTPException,
+        ) as exc:
             return self._mark_fallback(command, f"LLM planner failed: {exc}")
 
     def _call_planner(self, command: dict[str, Any], agent_model: dict[str, Any], api_key: str) -> dict[str, Any]:
@@ -119,39 +136,96 @@ class DeepSeekSchemaPlanner:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(_planner_context(command, agent_model), indent=2)},
         ]
+        body = self._request_body(messages, thinking=self.config.thinking, max_tokens=self.config.max_tokens)
+        data = self._post_chat_completion(body, api_key)
+        content = _completion_content(data)
+        try:
+            payload = _loads_json_object(content)
+            payload["_planner_transport"] = {
+                "retry": False,
+                "finish_reason": _completion_finish_reason(data),
+            }
+            return payload
+        except ValueError as first_exc:
+            if self.config.thinking == "enabled":
+                retry_body = self._request_body(
+                    messages,
+                    thinking="disabled",
+                    max_tokens=min(max(self.config.max_tokens, 1), 2048),
+                )
+                retry_data = self._post_chat_completion(retry_body, api_key)
+                retry_content = _completion_content(retry_data)
+                try:
+                    payload = _loads_json_object(retry_content)
+                    payload["_planner_transport"] = {
+                        "retry": True,
+                        "retry_reason": str(first_exc),
+                        "first_finish_reason": _completion_finish_reason(data),
+                        "retry_finish_reason": _completion_finish_reason(retry_data),
+                    }
+                    return payload
+                except ValueError as retry_exc:
+                    raise ValueError(
+                        f"{retry_exc}; first_completion={_completion_debug(data)}; "
+                        f"retry_completion={_completion_debug(retry_data)}"
+                    ) from retry_exc
+            raise ValueError(f"{first_exc}; completion={_completion_debug(data)}") from first_exc
+
+    def _request_body(self, messages: list[dict[str, str]], *, thinking: str, max_tokens: int) -> dict[str, Any]:
         body = {
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
             "stream": False,
             "response_format": {"type": "json_object"},
-            "thinking": {"type": self.config.thinking},
+            "thinking": {"type": thinking},
         }
-        if self.config.thinking == "enabled" and self.config.reasoning_effort:
+        if thinking == "enabled" and self.config.reasoning_effort:
             body["reasoning_effort"] = self.config.reasoning_effort
-        request = urllib.request.Request(
-            _completion_url(self.config.base_url),
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        return body
+
+    def _post_chat_completion(self, body: dict[str, Any], api_key: str) -> dict[str, Any]:
+        attempts = max(1, int(self.config.max_retries) + 1)
+        transient_errors: tuple[type[BaseException], ...] = (
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            socket.timeout,
+            urllib.error.URLError,
+            http.client.HTTPException,
         )
-        with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
-            raw = response.read().decode("utf-8")
-        data = json.loads(raw)
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError(f"unexpected chat completion response: {exc}") from exc
-        return _loads_json_object(content)
+        last_exc: BaseException | None = None
+        for attempt in range(1, attempts + 1):
+            request = urllib.request.Request(
+                _completion_url(self.config.base_url),
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+                    raw = response.read().decode("utf-8")
+                return json.loads(raw)
+            except transient_errors as exc:
+                last_exc = exc
+                if attempt >= attempts:
+                    break
+                time.sleep(self.config.retry_backoff_seconds * (2 ** (attempt - 1)))
+        assert last_exc is not None
+        raise last_exc
 
     def _apply_planner_payload(self, command: dict[str, Any], payload: dict[str, Any]) -> None:
         args = command.setdefault("args", {})
         if isinstance(payload.get("selected_actions"), list):
-            args["selected_actions"] = payload["selected_actions"]
+            args["selected_actions"] = [
+                item
+                for item in payload["selected_actions"]
+                if isinstance(item, dict) and str(item.get("decision", "apply")).lower() == "apply"
+            ]
         if isinstance(payload.get("custom_actions"), list):
             args["custom_actions"] = payload["custom_actions"]
         command["llm_notes"] = payload.get("notes", "")
@@ -174,19 +248,52 @@ class DeepSeekSchemaPlanner:
 def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> dict[str, Any]:
     args = command.get("args", {})
     actions = _rank_planner_actions(args.get("available_actions", []))
+    policy = str(agent_model.get("llm_policy", "auto") if isinstance(agent_model, dict) else "auto").strip().lower()
+    status = agent_model.get("status", {}) if isinstance(agent_model, dict) else {}
+    failed_targets = list(agent_model.get("failed_targets", []) or []) if isinstance(agent_model, dict) else []
+    unverified_targets = list(agent_model.get("unverified_targets", []) or []) if isinstance(agent_model, dict) else []
+    unresolved_targets = bool(not status.get("spec_pass", False) or failed_targets or unverified_targets)
+    residual_rules = []
+    if policy in {"residual", "residual_escape"}:
+        residual_rules = [
+            "You are in residual LLM audit mode: existing available_actions are evidence only; selected_actions for existing action_id values will be recorded as audit and ignored by the executor.",
+            "In residual mode, if spec_pass is false or any failed_targets/unverified_targets are present, return one or two custom_actions with decision='apply' unless schema_context.writable_variables has no relevant safe knob.",
+            "Do not return custom_actions: [] merely because available_actions look sufficient; express your incremental hypothesis as schema-context writable knobs with suggested_unclipped_value or per_knob_values.",
+            "Residual custom_actions must be locally testable hypotheses; the executor will run SPICE probes and apply them only if the formal objective improves.",
+        ]
+        if policy == "residual_escape":
+            residual_rules.extend(
+                [
+                    "You are in residual_escape mode: custom_actions are exploratory schema patches, not optimizer-selected actions.",
+                    "In residual_escape mode, you may propose an unusual but physically bounded multi-knob perturbation to escape a local optimum; the executor will reject it unless measured SPICE validation reduces J.",
+                    "Use per_knob_values for coupled escape moves so the patch is executable as one composite hypothesis.",
+                ]
+            )
     return {
         "task": "Write a schema-level tuning command for the next analog optimization round.",
-        "rules": [
+        "planner_mode": policy,
+        "residual_hypothesis_required": bool(policy in {"residual", "residual_escape"} and unresolved_targets),
+        "rules": residual_rules + [
             "Return JSON only.",
             "Use selected_actions for action_id values that already exist in available_actions.",
-            "Use custom_actions only as notes or when no constrained optimizer evidence is active; never use them to bypass the formal apply gate.",
-            "Every action must include decision='apply' or decision='skip'.",
+            "Use custom_actions as typed action hypotheses; they will be SPICE-probed and optimizer-gated before execution.",
+            "When available_actions is empty, all candidates are inadmissible, or existing actions address only part of the failed target tradeoff, propose at most two custom_actions using only knobs listed in schema_context.writable_variables.",
+            "When admissible existing actions are present, you may still add one custom_action as an alternative hypothesis if it targets a coupled gain-bandwidth-headroom or slew-headroom tradeoff not covered by the existing action set.",
+            "Custom action values must be local trust-region hypotheses: use roughly 10-30 mV moves for bias voltages, modest current changes, and small geometry/range moves. Do not jump bias ports to mid-range values unless the current value is already near that value.",
+            "For telescopic or folded cascode headroom failures, prefer one composite custom_action with per_knob_values over isolated single-knob hypotheses; include coupled bias and device-length knobs when they are writable.",
+            "For telescopic load-cascode saturation failures, a useful hypothesis may keep NMOS cascode bias near its current/high value, raise PMOS cascode bias only slightly to reduce PMOS overdrive, and adjust tail bias/current conservatively; do not propose only I_tail or a large vbias_pcas jump unless no coupled writable knobs exist.",
+            "If slew_rate is a target, assume every bias/current/geometry custom_action will be transient-probed; do not trade away slew_rate to fix headroom.",
+            "Treat unverified_targets as required unresolved specifications, even when failed_targets is empty.",
+            "If spec_pass is false and failed_targets is empty but unverified_targets is non-empty, propose a hypothesis for an unverified target instead of saying no tuning is required.",
+            "selected_actions must contain only entries with decision='apply'. Never include skipped existing actions.",
+            "If no existing action is admissible, return selected_actions: [] and explain briefly in rationale or notes.",
             "Prefer a small number of high-confidence actions per round.",
             "Prefer actions backed by causal_root_causes structural paths and intervention impact.",
             "Use the combo_coarse_fine strategy: coarse actions can take larger schema-safe steps when violations are large; fine actions should be small near feasibility.",
             "Favor compatible action combinations selected by the constrained_action_optimizer instead of hand-picking isolated knobs when optimizer evidence is available.",
             "An action may use decision='apply' only when action_admissibility.passed is true, or when optimizer_selected is true, or when optimizer.objective_delta < 0.",
             "If constrained_action_optimizer.status is no_improving_combination, apply only existing actions whose action_admissibility.passed is true or optimizer.objective_delta < 0; otherwise return skip decisions or notes.",
+            "When constrained_action_optimizer.status is no_improving_combination, do not copy any inadmissible available action into selected_actions.",
             "A priority='guarded' action may be selected with decision='apply' only when evidence_gate.passed is true.",
             "If a guarded action lacks a passing evidence_gate, skip it or mention it in notes; the executor rejects it without local SPICE intervention evidence.",
             "Do not use legacy_sensitivity_top as the final decision rule when it diverges from causal_top.",
@@ -196,7 +303,7 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "selected_actions": [
                 {
                     "action_id": "existing action_id",
-                    "decision": "apply | skip",
+                    "decision": "apply",
                     "reason": "short English reason",
                     "overrides": {
                         "suggested_unclipped_value": "optional number",
@@ -209,7 +316,11 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
                     "action_id": "stable custom id",
                     "decision": "apply | skip",
                     "knob": "device.variable or global.variable",
+                    "apply_to": ["optional list of symmetric writable knobs"],
+                    "metric": "failed metric the hypothesis targets",
+                    "direction": "increase | decrease | set",
                     "suggested_unclipped_value": "number",
+                    "per_knob_values": {"optional knob": "optional numeric value"},
                     "range_update": {"type": "set_range | expand_upper_bound | expand_lower_bound"},
                     "reason": "short English reason",
                 }
@@ -218,7 +329,8 @@ def _planner_context(command: dict[str, Any], agent_model: dict[str, Any]) -> di
             "notes": "optional English notes",
         },
         "design_state": _compact_agent_model(agent_model),
-        "available_actions": [_compact_action_for_planner(action) for action in actions[:10]],
+        "schema_context": command.get("schema_context", {}),
+        "available_actions": [_compact_action_for_planner(action) for action in actions[:5]],
         "default_selected_actions": _compact_selected_actions(args.get("selected_actions", [])),
         "formal_apply_gate": (command.get("write_policy", {}) or {}).get("action_admissibility", {}),
         "editable_scope": _compact_editable_fields(command.get("llm_editable_fields", {})),
@@ -266,8 +378,10 @@ def _compact_agent_model(agent_model: dict[str, Any]) -> dict[str, Any]:
     intervention = agent_model.get("local_intervention_model", {}) if isinstance(agent_model, dict) else {}
     return {
         "state_source": agent_model.get("state_source", "") if isinstance(agent_model, dict) else "",
+        "llm_policy": agent_model.get("llm_policy", "") if isinstance(agent_model, dict) else "",
         "status": _compact_status(status),
         "failed_targets": list(agent_model.get("failed_targets", []) or [])[:8] if isinstance(agent_model, dict) else [],
+        "unverified_targets": list(agent_model.get("unverified_targets", []) or [])[:8] if isinstance(agent_model, dict) else [],
         "local_intervention": {
             "method": intervention.get("method", ""),
             "status": intervention.get("status", ""),
@@ -301,6 +415,7 @@ def _compact_status(status: Any) -> dict[str, Any]:
     keep = (
         "spec_pass",
         "failed_targets",
+        "unverified_targets",
         "measured_violation_score",
         "dc_gain_db",
         "unity_gain_bandwidth",
@@ -437,8 +552,57 @@ def _completion_url(base_url: str) -> str:
     return f"{normalized}/chat/completions"
 
 
+def _completion_content(data: dict[str, Any]) -> str:
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError(f"unexpected chat completion response: {exc}") from exc
+    if not isinstance(message, dict):
+        raise ValueError("unexpected chat completion response: message is not an object")
+    content = message.get("content")
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+            elif item:
+                parts.append(str(item))
+        return "\n".join(parts).strip()
+    return str(content or "").strip()
+
+
+def _completion_finish_reason(data: dict[str, Any]) -> str:
+    try:
+        value = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+    return str(value or "")
+
+
+def _completion_debug(data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        choice = data["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return {"status": "malformed_completion", "top_level_keys": sorted(map(str, data.keys()))[:8]}
+    if not isinstance(choice, dict):
+        return {"status": "malformed_choice"}
+    message = choice.get("message")
+    message_keys = sorted(map(str, message.keys())) if isinstance(message, dict) else []
+    content = _completion_content(data)
+    return {
+        "finish_reason": choice.get("finish_reason"),
+        "message_keys": message_keys[:10],
+        "content_len": len(content),
+        "content_prefix": content[:120].replace("\n", "\\n"),
+    }
+
+
 def _loads_json_object(content: str) -> dict[str, Any]:
     text = content.strip()
+    if not text:
+        raise ValueError("LLM response content was empty")
     if text.startswith("```"):
         lines = text.splitlines()
         if lines and lines[0].startswith("```"):
@@ -459,6 +623,8 @@ def _loads_json_object(content: str) -> dict[str, Any]:
             prefix = extracted[:160].replace("\n", "\\n")
             raise ValueError(f"LLM JSON object extraction failed; prefix={prefix!r}") from nested_exc
     if not isinstance(data, dict):
+        if isinstance(data, str):
+            return _loads_json_object(data)
         raise ValueError("LLM response must be a JSON object")
     return data
 

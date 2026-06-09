@@ -1217,6 +1217,7 @@ class CircuitEvaluator:
     ) -> Tuple[float, float]:
         margins: list[float] = []
         required_gaps: list[float] = []
+        factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
         for p in tp.values():
             role = str(p.get("role", "") or "")
             if _optimizer_saturation_exempt(role):
@@ -1225,7 +1226,7 @@ class CircuitEvaluator:
             vdsat = abs(float(p.get("vdsat", 0.0) or 0.0))
             if vds <= 0.0 or vdsat <= 0.0:
                 continue
-            margin = vds - vdsat
+            margin = vds - factor * vdsat
             required = _optimizer_required_saturation_margin(role)
             margins.append(margin)
             required_gaps.append(margin - required)
@@ -1275,7 +1276,8 @@ class CircuitEvaluator:
             vdsats = [abs(float(item.get("vdsat", 0.0) or 0.0)) for item in items]
             if not vdsats:
                 continue
-            required += sum(vdsats) / len(vdsats) + _optimizer_required_saturation_margin(role)
+            factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+            required += factor * sum(vdsats) / len(vdsats) + _optimizer_required_saturation_margin(role)
         return required
 
     def _compute_loss(self, perf: Dict[str, float],
@@ -1350,7 +1352,8 @@ class CircuitEvaluator:
             # Internal implementation note.
             if not _optimizer_saturation_exempt(role) and vds > 0 and "vdsat" in p:
                 vdsat = abs(float(p.get("vdsat", 0.0) or 0.0))
-                margin = abs(float(vds)) - vdsat
+                factor = getattr(self.schema.process, "VDSAT_headroom_factor", 1.0)
+                margin = abs(float(vds)) - factor * vdsat
                 required = _optimizer_required_saturation_margin(role)
                 if vdsat > 0 and margin < required:
                     shortage = required - margin
@@ -1543,7 +1546,7 @@ def _hard_target_violation_summary(
     failures = 0
     weighted_score = 0.0
     for metric, target in targets.items():
-        if _target_priority(target) > max_priority:
+        if _target_priority(target) > max_priority and metric != "saturation_margin":
             continue
         value = _target_metric_value(perf, metric)
         if value is None:

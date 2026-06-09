@@ -46,7 +46,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--case",
-        default="llm_diagnosis_postprocess_fallback",
+        default="llm_full_residual_escape_postprocess_fallback",
         help="Case name to summarize from the manifest",
     )
     parser.add_argument("--out-dir", action="append", default=[], help="Output directory; may repeat")

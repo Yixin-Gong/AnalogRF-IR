@@ -54,7 +54,7 @@ class CircuitSpecModel:
         model_status = "unknown"
         margin_abs = None
         margin_rel = None
-        counts_for_pass = int(target.priority or 1) <= 2
+        counts_for_pass = int(target.priority or 1) <= 2 or target_name == "saturation_margin"
         requires_ngspice = require_ngspice and counts_for_pass
         if value is None and requires_ngspice:
             status = "unverified"

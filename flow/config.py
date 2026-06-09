@@ -20,6 +20,7 @@ CONFIG_KEY_ALIASES = {
     "optimizer.pop_size": "pop_size",
     "optimizer.seed": "seed",
     "agent.rounds": "agent_rounds",
+    "agent.llm_policy": "llm_policy",
     "llm.provider": "llm_provider",
     "llm.model": "llm_model",
     "llm.base_url": "llm_base_url",

@@ -14,3 +14,6 @@ runs/tmp_probe_*/
 
 # Local manuscript drafts and submission assets are intentionally not published.
 paper/
+
+# Local one-off LLM override files.
+configs/local_llm_*.yaml

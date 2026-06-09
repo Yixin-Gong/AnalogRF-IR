@@ -1,0 +1,51 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: 5-OTA 10-seed LLM full flow with residual-escape exploratory schema patches.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations_ihp130_ota_llm_full_residual_escape_seed1_10_20260609_r1
+schemas:
+  - inputs/ota/five_transistor/five_transistor_ota.yaml
+  - inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml
+  - inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml
+  - inputs/ota/telescopic/telescopic_ota_ihp130.yaml
+  - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+base_overrides:
+  input:
+    env: environment_ihp_sg13g2.yaml
+    topology: yaml
+  optimizer:
+    generations: 30
+    pop_size: 80
+  reoptimization:
+    generations: 8
+    pop_size: 64
+  agent:
+    rounds: 30
+  llm:
+    provider: deepseek
+    model: deepseek-v4-pro
+    thinking: enabled
+    timeout: 180
+    max_tokens: 12000
+    reasoning_effort: max
+    temperature: 0.0
+  intervention:
+    enable: true
+    max_actions: 8
+    transient_policy: targeted
+  actions:
+    strategy: combo_coarse_fine
+  postprocess:
+    policy: fallback
+  runtime:
+    profile: ablation_fast
+
+cases:
+  - name: llm_full_residual_escape_postprocess_fallback
+    family: llm_full
+    description: Full diagnosis flow with LLM residual-escape patches accepted only by measured SPICE objective improvement.
+    overrides:
+      agent:
+        llm_policy: residual_escape

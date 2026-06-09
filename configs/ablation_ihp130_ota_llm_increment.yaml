@@ -1,0 +1,69 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: LLM incremental audit over the existing IHP SG13G2 OTA evidence-gated flow.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations_ihp130_ota_llm_increment_seed1_10
+schemas:
+  - inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml
+  - inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml
+  - inputs/ota/two_stage_miller/two_stage_miller_ota.yaml
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+base_overrides:
+  input:
+    env: environment_ihp_sg13g2.yaml
+    topology: yaml
+  optimizer:
+    generations: 30
+    pop_size: 80
+  reoptimization:
+    generations: 8
+    pop_size: 64
+  llm:
+    model: deepseek-v4-pro
+    thinking: enabled
+    timeout: 180
+    max_tokens: 12000
+    reasoning_effort: max
+    temperature: 0.0
+  intervention:
+    enable: true
+    max_actions: 8
+    transient_policy: targeted
+  actions:
+    strategy: combo_coarse_fine
+  postprocess:
+    policy: fallback
+  runtime:
+    profile: ablation_fast
+
+cases:
+  - name: diagnosis_spice_postprocess_fallback
+    family: diagnosis_control
+    description: Existing deterministic evidence-gated flow without LLM calls.
+    overrides:
+      agent:
+        rounds: 30
+        llm_policy: auto
+      llm:
+        provider: deterministic
+
+  - name: llm_residual_postprocess_fallback
+    family: incremental_llm
+    description: Existing evidence-gated flow with LLM calls only when deterministic evidence paths have no executable command.
+    overrides:
+      agent:
+        rounds: 30
+        llm_policy: residual
+      llm:
+        provider: deepseek
+
+  - name: llm_shadow_postprocess_fallback
+    family: incremental_llm_audit
+    description: Existing evidence-gated flow with LLM shadow audits recorded while deterministic commands remain authoritative.
+    overrides:
+      agent:
+        rounds: 30
+        llm_policy: shadow
+      llm:
+        provider: deepseek

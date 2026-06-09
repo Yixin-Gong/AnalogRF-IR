@@ -289,14 +289,19 @@ def _candidate_result(
 def _minimum_margins(state: DesignState, operating_points: dict[str, dict[str, float]]) -> tuple[float, float]:
     margins = []
     required_margins = []
+    factor = _vdsat_headroom_factor(state)
     for dev in state.topology.devices:
         op = _lookup_op(operating_points, dev.id)
         if not op:
             continue
-        margin = float(op.get("vds", 0.0)) - float(op.get("vdsat", 0.0))
+        margin = float(op.get("vds", 0.0)) - factor * float(op.get("vdsat", 0.0))
         margins.append(margin)
         required_margins.append(margin - _required_saturation_margin(state, dev.role))
     return (min(margins), min(required_margins)) if margins else (-1.0, -1.0)
+
+
+def _vdsat_headroom_factor(state: DesignState) -> float:
+    return float(getattr(state.process, "VDSAT_headroom_factor", 1.0) or 1.0)
 
 
 def _required_saturation_margin(state: DesignState, role: str) -> float:

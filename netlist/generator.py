@@ -552,8 +552,8 @@ class NetlistGenerator:
             tstop = min(max(4.0 / gbw_target, 8.0e-8), 1.0e-6)
         else:
             tstop = 2.0e-7
-        tstep = max(tstop / 1200.0, 2.0e-11)
-        tmax = max(tstop / 2000.0, 2.0e-11)
+        tstep = max(tstop / 600.0, 5.0e-11)
+        tmax = max(tstop / 900.0, 5.0e-11)
         return tstep, tstop, tmax
 
     # Internal implementation note.

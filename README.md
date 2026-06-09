@@ -53,11 +53,11 @@ topologies under the LLM-guided diagnosis and repair flow:
 
 | Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | 10/10 | 1 | 26.6 dB | 57.67 MHz | 84.5 deg | 50.15 V/us | 0.745 V | 63.9 uW |
-| Current-mirror OTA | 10/10 | 2 | 28.8 dB | 46.11 MHz | 68.1 deg | 53.21 V/us | 0.694 V | 81.0 uW |
-| Folded-cascode OTA | 10/10 | 2 | 46.3 dB | 50.15 MHz | 63.8 deg | 29.64 V/us | 0.868 V | 38.6 uW |
-| Telescopic OTA | 10/10 | 1 | 48.1 dB | 12.47 MHz | 63.9 deg | 6.91 V/us | 0.871 V | 18.5 uW |
-| Two-stage Miller OTA | 10/10 | 2 | 57.0 dB | 36.71 MHz | 71.7 deg | 30.09 V/us | 0.663 V | 372.4 uW |
+| 5T OTA | 10/10 | 3 | 27.0 dB | 59.56 MHz | 84.1 deg | 49.26 V/us | 0.860 V | 61.8 uW |
+| Current-mirror OTA | 10/10 | 3 | 29.0 dB | 33.48 MHz | 69.1 deg | 37.41 V/us | 0.845 V | 53.4 uW |
+| Folded-cascode OTA | 10/10 | 1 | 45.8 dB | 33.32 MHz | 81.1 deg | 18.38 V/us | 0.959 V | 20.7 uW |
+| Telescopic OTA | 10/10 | 1 | 48.4 dB | 12.64 MHz | 83.3 deg | 6.26 V/us | 0.958 V | 16.5 uW |
+| Two-stage Miller OTA | 10/10 | 3 | 57.0 dB | 36.71 MHz | 71.7 deg | 30.09 V/us | 0.787 V | 372.4 uW |
 
 The current ablation matrix compares five OTA topologies, ten seeds, and four
 method variants. The rows are re-scored with the same priority 1-2 target
@@ -70,11 +70,21 @@ definition:
 | Diagnosis + repair | 10/10 | 7/10 | 5/10 | 10/10 | 9/10 | 41/50 |
 | LLM diagnosis + repair | 10/10 | 10/10 | 10/10 | 10/10 | 10/10 | 50/50 |
 
+The published project figures are regenerated from a unified 200-cell manifest
+that combines the 150 non-LLM control cells and the 50 LLM full-flow cells.
+The extracted data tables are written under `docs/assets/`.
+
 | Target achievement | Measured metrics |
 | --- | --- |
 | ![OTA target achievement](docs/assets/full_flow_ota_achievement.png) | ![OTA measured metrics](docs/assets/full_flow_ota_summary.png) |
 
-![Ablation pass rate by method and topology](docs/assets/success_rate_by_method_topology.png)
+| Ablation pass rate | Method traceability |
+| --- | --- |
+| ![Ablation pass rate by method and topology](docs/assets/success_rate_by_method_topology.png) | ![Method traceability](docs/assets/method_traceability.png) |
+
+| Diagnosis validation | Gain-bandwidth-power distribution |
+| --- | --- |
+| ![Diagnosis validation](docs/assets/diagnosis_validation.png) | ![Gain-bandwidth-power tradeoff](docs/assets/gain_bandwidth_power_tradeoff.png) |
 
 ## Method Summary
 
@@ -88,6 +98,8 @@ Failed metrics are mapped to typed causes, tested through local SPICE probes,
 converted into candidate schema actions, and filtered by an evidence gate.
 Unsupported LLM edits are recorded as skipped notes rather than executable
 changes.
+
+![Diagnosis and evidence-gated action flow](docs/assets/analogdiag_diagnosis_loop.png)
 
 For normalized violation vector `v`, local action response column `A_j`, and
 weights `w_i`, the specification objective is:
@@ -192,19 +204,21 @@ python scripts/run_ablation.py \
   --run --keep-going
 ```
 
-Regenerate README figures from a completed manifest:
+Regenerate README figures from the controlled 200-cell data set:
 
 ```bash
+python scripts/build_200cell_manifest.py
+
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
   --out-dir docs/assets --format png
 
 python scripts/plot_full_flow_results.py \
-  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
   --out-dir docs/assets --format png
 
 python scripts/plot_diagnosis_validation.py \
-  --manifest runs/ablations_ihp130_ota_unified_seed1_10/manifest.json \
+  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
   --out-dir docs/assets --format png
 ```
 

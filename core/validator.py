@@ -290,6 +290,9 @@ class PhysicalValidator:
         profile: CircuitProfile,
     ) -> List[DiagnosisResult]:
         results = []
+        factor = float(getattr(state.process, "VDSAT_headroom_factor", 1.0) or 1.0)
+        target = state.targets.get("saturation_margin")
+        required_margin = max(0.0, float(target.min)) if target is not None and target.min is not None else margin
         for tid, ts in state.transistors.items():
             p = ts.parameters
             if p.region == "unknown" or p.vds == 0:
@@ -299,20 +302,42 @@ class PhysicalValidator:
             if role in PhysicalValidator.SATURATION_EXEMPT_ROLES or profile.is_dynamic_role(role):
                 continue
 
-            if p.vds < p.vdsat + margin:
+            headroom = p.vds - factor * p.vdsat
+            required_vds = factor * p.vdsat + required_margin
+            if headroom < required_margin:
                 results.append(DiagnosisResult(
                     check_name="physical:saturation", passed=False,
                     severity="warning",
-                    message=f"{tid} ({role}): vds={p.vds:.3f}V < vdsat+margin={p.vdsat + margin:.3f}V",
+                    message=(
+                        f"{tid} ({role}): vds={p.vds:.3f}V < "
+                        f"{factor:.2f}*vdsat+margin={required_vds:.3f}V"
+                    ),
                     layer=4, device=tid,
-                    details={"vds": p.vds, "vdsat": p.vdsat, "margin": p.vds - p.vdsat}
+                    details={
+                        "vds": p.vds,
+                        "vdsat": p.vdsat,
+                        "factor": factor,
+                        "margin": headroom,
+                        "required_margin": required_margin,
+                    }
                 ))
             else:
                 results.append(DiagnosisResult(
                     check_name="physical:saturation", passed=True,
                     severity="info",
-                    message=f"{tid} ({role}): vds={p.vds:.3f}V >= vdsat={p.vdsat:.3f}V, margin={p.vds - p.vdsat:.3f}V",
-                    layer=4, device=tid
+                    message=(
+                        f"{tid} ({role}): vds={p.vds:.3f}V >= "
+                        f"{factor:.2f}*vdsat+margin={required_vds:.3f}V, "
+                        f"margin={headroom:.3f}V"
+                    ),
+                    layer=4, device=tid,
+                    details={
+                        "vds": p.vds,
+                        "vdsat": p.vdsat,
+                        "factor": factor,
+                        "margin": headroom,
+                        "required_margin": required_margin,
+                    }
                 ))
         return results
 

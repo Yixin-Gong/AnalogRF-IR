@@ -30,6 +30,10 @@ the root README and the local manuscript draft:
 - `full_flow_ota_summary.png`
 - `diagnosis_validation.png`
 - `success_rate_by_method_topology.png`
+- `method_traceability.png`
+- `gain_bandwidth_power_tradeoff.png`
+- `spec_achievement_heatmap.png`
+- `spec_margin_distributions.png`
 
 Regenerate figures from a completed ablation manifest with the plotting scripts
 described in [Method Comparisons](ablation_experiments.md).

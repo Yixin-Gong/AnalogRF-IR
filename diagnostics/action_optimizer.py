@@ -167,11 +167,10 @@ def _include_transient_for_action(action: dict[str, Any], policy: str) -> bool |
     normalized = str(policy or "targeted").strip().lower()
     if normalized in {"auto", "default", "ngspice"}:
         return None
+    if normalized in {"on", "true", "1", "tran", "transient"}:
+        return True
     if normalized in {"off", "false", "0", "dc_ac"}:
         return False
-    metric = str(action.get("metric") or "").lower()
-    if metric.startswith("slew_rate"):
-        return True
     return False
 
 

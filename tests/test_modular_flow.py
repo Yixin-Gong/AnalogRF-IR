@@ -4,6 +4,7 @@ import os
 import re
 
 import numpy as np
+import pytest
 
 from asir.capabilities import detect_circuit_capabilities
 from core.compensation import has_miller_rc_compensation
@@ -22,9 +23,9 @@ from diagnostics import (
     write_tuning_tool_command,
 )
 from diagnostics.action_optimizer import _candidate_actions, _target_status_with_measured_updates
-from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object
+from flow.llm_planner import DeepSeekSchemaPlanner, LLMPlannerConfig, _loads_json_object, _planner_context
 from flow.config import load_cli_config
-from flow.agent_loop import DiagnosticAgentLoop
+from flow.agent_loop import DiagnosticAgentLoop, _tuning_from_llm_hypotheses
 from flow.runner import AnalogRFIRFlowRunner, FlowConfig
 from feasibility import FeasibilityConfig, TwoStageMillerFeasibilityChecker
 from main import DEFAULT_AGENT_MAX_ITERATIONS, _configure_llm_api_key, _parse_args
@@ -48,7 +49,7 @@ from postprocess.two_stage import set_symmetric_width, tune_two_stage_compensati
 from pygmid.adapter import create_pygmid_adapter
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
-from scripts.run_ablation import _latest_result_summary, build_jobs
+from scripts.run_ablation import _execute_job, _latest_result_summary, build_jobs
 from scripts.run_progressive_pareto import pareto_frontier, tighten_schema_targets
 
 
@@ -762,8 +763,8 @@ def test_priority_target_without_ngspice_measurement_is_unverified():
     assert estimate_only["model_status"] == "pass"
     assert estimate_only["source"] == "optimizer_estimate"
     assert diagnostic["status"] == "fail"
-    assert diagnostic["counts_for_pass"] is False
-    assert diagnostic["requires_ngspice"] is False
+    assert diagnostic["counts_for_pass"] is True
+    assert diagnostic["requires_ngspice"] is True
 
 
 def test_compact_telescopic_stack_balance_action_remains_executable():
@@ -830,6 +831,150 @@ def test_compact_telescopic_stack_balance_action_remains_executable():
     applied = application["applied_actions"][0]["applied_knobs"]
     assert {item["knob"]: item["new_initial"] for item in applied} == action["per_knob_values"]
     assert state.global_parameters["vbias_ncas"] == 0.8880
+
+
+def test_composite_action_accepts_per_knob_range_update():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"),
+        default_environment(),
+    )
+    action = {
+        "action_id": "llm_hypothesis_001_custom_escape_gain_headroom_01",
+        "metric": "dc_gain",
+        "priority": "guarded",
+        "action_class": "llm_exploratory_schema_patch",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "set",
+        "per_knob_values": {"M3.L": 8.0e-7, "M4.L": 8.0e-7},
+        "range_update": {
+            "type": "set_range",
+            "per_knob": {
+                "M3.L": {"min": 1.3e-7, "max": 1.0e-6},
+                "M4.L": {"min": 1.3e-7, "max": 1.0e-6},
+            },
+        },
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.1},
+        "evidence_gate": {"passed": True, "objective_delta": -0.1},
+        "rationale": "Validated LLM composite escape patch.",
+    }
+    state.diagnostics = {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
+        "causal_diagnostics": {
+            "constrained_action_optimizer": {
+                "candidate_actions": [action],
+                "selected_actions": [action],
+            },
+            "attribution_guided_tuning": {
+                "decision_model": {"type": "constrained_local_action_optimizer"},
+                "by_failure": [{"metric": "dc_gain", "actions": [action]}],
+            },
+        },
+    }
+
+    command = write_tuning_tool_command(state, round_index=1, allowed_priorities=["guarded", "primary"])
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert command["args"]["selected_actions"][0]["action_id"] == action["action_id"]
+    assert application["applied_actions"]
+    applied = application["applied_actions"][0]["applied_knobs"]
+    assert {item["knob"]: item["new_initial"] for item in applied} == action["per_knob_values"]
+    m3_l = next(item for item in state.design_variables if item.device == "M3" and item.variable == "L")
+    assert m3_l.range.max == pytest.approx(1.0e-6)
+    assert m3_l.initial == pytest.approx(8.0e-7)
+
+
+def test_composite_action_copies_symmetric_per_knob_targets():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        default_environment(),
+    )
+    action = {
+        "action_id": "llm_hypothesis_001_residual_escape_composite_01",
+        "metric": "saturation_margin",
+        "priority": "guarded",
+        "action_class": "llm_residual_escape_schema_patch",
+        "knob": "M7.L",
+        "apply_to": ["M7.L"],
+        "direction": "set",
+        "per_knob_values": {"M7.L": 1.5e-6},
+        "range_update": {
+            "type": "set_range",
+            "per_knob": {"M7.L": {"min": 1.3e-7, "max": 1.5e-6}},
+        },
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.1},
+        "evidence_gate": {"passed": True, "objective_delta": -0.1},
+        "rationale": "Validated residual escape patch should preserve matched output-bias devices.",
+    }
+    state.diagnostics = {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
+        "causal_diagnostics": {
+            "constrained_action_optimizer": {
+                "candidate_actions": [action],
+                "selected_actions": [action],
+            },
+            "attribution_guided_tuning": {
+                "decision_model": {"type": "constrained_local_action_optimizer"},
+                "by_failure": [{"metric": "saturation_margin", "actions": [action]}],
+            },
+        },
+    }
+
+    command = write_tuning_tool_command(state, round_index=1, allowed_priorities=["guarded", "primary"])
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert command["args"]["selected_actions"][0]["action_id"] == action["action_id"]
+    assert application["applied_actions"]
+    applied = application["applied_actions"][0]["applied_knobs"]
+    applied_values = {item["knob"]: item["new_initial"] for item in applied}
+    assert set(applied_values) == {"M7.L", "M9.L"}
+    assert applied_values["M7.L"] == pytest.approx(1.5e-6)
+    assert applied_values["M9.L"] == pytest.approx(1.5e-6)
+    m7_l = next(item for item in state.design_variables if item.device == "M7" and item.variable == "L")
+    m9_l = next(item for item in state.design_variables if item.device == "M9" and item.variable == "L")
+    assert m7_l.initial == pytest.approx(m9_l.initial)
+    assert m7_l.range.max == pytest.approx(m9_l.range.max)
+
+
+def test_composite_action_rejects_missing_per_knob_values_without_fallback():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        default_environment(),
+    )
+    action = {
+        "action_id": "llm_hypothesis_001_partial_composite",
+        "metric": "saturation_margin",
+        "priority": "guarded",
+        "action_class": "llm_residual_escape_schema_patch",
+        "knob": "M6.gm_id",
+        "apply_to": ["M6.gm_id", "M3.gm_id", "M4.gm_id"],
+        "direction": "increase",
+        "per_knob_values": {"M3.gm_id": 8.0, "M4.gm_id": 8.0},
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.1},
+        "evidence_gate": {"passed": True, "objective_delta": -0.1},
+    }
+    state.diagnostics = {
+        "schema_version": "analogrf_ir.state_diagnostics.v0_3",
+        "causal_diagnostics": {
+            "constrained_action_optimizer": {
+                "candidate_actions": [action],
+                "selected_actions": [action],
+            },
+            "attribution_guided_tuning": {
+                "decision_model": {"type": "constrained_local_action_optimizer"},
+                "by_failure": [{"metric": "saturation_margin", "actions": [action]}],
+            },
+        },
+    }
+
+    write_tuning_tool_command(state, round_index=1, allowed_priorities=["guarded", "primary"])
+    application = execute_tuning_tool_commands(state, round_index=1)
+
+    assert not application["applied_actions"]
+    assert "per_knob_values missing target values" in application["skipped_actions"][0]["reason"]
 
 
 def test_causal_diagnostics_rank_testable_root_causes_in_schema(tmp_path):
@@ -1515,7 +1660,7 @@ def test_constrained_optimizer_downweights_advisory_targets_for_action_authority
             "priority": 1,
             "counts_for_pass": True,
         },
-        "saturation_margin": {
+        "advisory_margin": {
             "status": "fail",
             "value": -0.02,
             "min": 0.01,
@@ -1544,13 +1689,13 @@ def test_constrained_optimizer_downweights_advisory_targets_for_action_authority
         ]
     }
     intervention_model = {
-        "base_violation_vector": {"dc_gain": 0.08, "saturation_margin": 3.0},
+        "base_violation_vector": {"dc_gain": 0.08, "advisory_margin": 3.0},
         "action_effects": [
             {
                 "action_id": "gain_L_probe",
                 "status": "ok",
                 "source": "spice_small_perturbation",
-                "delta_violation_vector": {"dc_gain": -0.06, "saturation_margin": 0.5},
+                "delta_violation_vector": {"dc_gain": -0.06, "advisory_margin": 0.5},
                 "uncertainty": 0.1,
             }
         ],
@@ -2196,6 +2341,804 @@ def test_agent_fast_path_uses_negative_objective_candidate_when_combo_status_is_
     assert command["args"]["allowed_priorities"] == ["primary"]
 
 
+def test_llm_shadow_audit_preserves_optimizer_fast_path(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    action = {
+        "action_id": "dc_gain_01_M3_L_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "increase",
+        "suggested_next_value": 5.0e-7,
+        "objective_delta": -0.001,
+        "local_model_source": "spice_small_perturbation",
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.001},
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "ok",
+            "selected_actions": [action],
+            "candidate_actions": [action],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": [action]}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    calls = {"count": 0}
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            calls["count"] += 1
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:shadow-test",
+                selected_actions=[
+                    {
+                        "action_id": "dc_gain_01_M3_L_increase",
+                        "decision": "apply",
+                        "reason": "Shadow planner agrees with the optimizer-backed action.",
+                        "overrides": {},
+                    }
+                ],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "shadow audit",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="shadow")
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 1,
+            "agent_model": {"failed_targets": ["dc_gain"]},
+        }
+    )
+
+    assert calls["count"] == 1
+    assert output["last_tool_command"]["author"] == "optimizer_evidence_fast_path"
+    assert output["last_tool_command"]["llm_planner"]["status"] == "skipped"
+    assert output["last_tool_command"]["llm_planner"]["policy"] == "shadow"
+    assert output["last_tool_command"]["llm_shadow"]["used_llm"] is True
+    assert output["last_tool_command"]["llm_shadow"]["source"] == "optimizer_evidence_fast_path"
+    assert output["last_tool_command"]["llm_shadow"]["shadow_selected_action_ids"] == ["dc_gain_01_M3_L_increase"]
+
+
+def test_residual_llm_audits_before_optimizer_fast_path(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    action = {
+        "action_id": "dc_gain_01_M3_L_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "increase",
+        "suggested_next_value": 5.0e-7,
+        "objective_delta": -0.001,
+        "local_model_source": "spice_small_perturbation",
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.001},
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "ok",
+            "selected_actions": [action],
+            "candidate_actions": [action],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": [action]}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    calls = {"count": 0}
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            calls["count"] += 1
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:residual-audit-test",
+                selected_actions=[],
+                custom_actions=[],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "audit found no better action",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual")
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 1,
+            "agent_model": {"failed_targets": ["dc_gain"]},
+        }
+    )
+
+    assert calls["count"] == 1
+    assert output["last_tool_command"]["author"] == "optimizer_evidence_fast_path"
+    assert output["last_tool_command"]["llm_increment"]["status"] == "no_validated_llm_hypothesis_use_optimizer_fast_path"
+    assert output["last_tool_command"]["llm_increment"]["used_llm"] is True
+    assert output["last_tool_command"]["llm_planner"]["policy"] == "residual"
+    assert output["last_tool_command"]["args"]["selected_actions"][0]["action_id"] == "dc_gain_01_M3_L_increase"
+
+
+def test_residual_llm_existing_action_selection_is_audit_only(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    action = {
+        "action_id": "dc_gain_01_M3_L_increase",
+        "metric": "dc_gain",
+        "rank": 1,
+        "priority": "primary",
+        "knob": "M3.L",
+        "apply_to": ["M3.L", "M4.L"],
+        "direction": "increase",
+        "suggested_next_value": 5.0e-7,
+        "objective_delta": -0.001,
+        "local_model_source": "spice_small_perturbation",
+        "optimizer_selected": True,
+        "action_admissibility": {"passed": True, "objective_delta": -0.001},
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "ok",
+            "selected_actions": [action],
+            "candidate_actions": [action],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": [action]}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:residual-existing-test",
+                selected_actions=[
+                    {
+                        "action_id": "dc_gain_01_M3_L_increase",
+                        "decision": "apply",
+                        "reason": "Existing action selected by LLM audit.",
+                        "overrides": {},
+                    }
+                ],
+                custom_actions=[],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "existing action audit",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual")
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 1,
+            "agent_model": {"failed_targets": ["dc_gain"]},
+        }
+    )
+
+    command = output["last_tool_command"]
+    assert command["author"] == "optimizer_evidence_fast_path"
+    assert command["llm_increment"]["ignored_existing_action_ids"] == ["dc_gain_01_M3_L_increase"]
+    assert command["args"]["selected_actions"][0]["action_id"] == "dc_gain_01_M3_L_increase"
+
+
+def test_residual_llm_repair_sensitive_no_hypothesis_prefers_postprocess(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_candidate_actions",
+            "selected_actions": [],
+            "candidate_actions": [],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "saturation_margin", "actions": []}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:residual-repair-test",
+                selected_actions=[],
+                custom_actions=[],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "audit found no custom hypothesis",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual", postprocess_policy="fallback")
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "round_index": 1,
+            "max_rounds": 3,
+            "rounds": [
+                {
+                    "spec_pass": False,
+                    "failed_targets": ["saturation_margin"],
+                    "measured_violation_score": 0.01,
+                    "postprocess_event_count": 0,
+                }
+            ],
+            "agent_model": {"failed_targets": ["saturation_margin"]},
+        }
+    )
+
+    command = output["last_tool_command"]
+    assert command["author"] == "llm:deepseek:residual-repair-test"
+    assert command["args"]["selected_actions"] == []
+    assert command["llm_increment"]["status"] == "no_validated_llm_hypothesis_use_postprocess_rescue"
+    assert command["llm_increment"]["used_llm"] is True
+
+
+def test_residual_llm_selection_runs_before_repair_fast_path(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    calls = {"execute": 0}
+
+    def fake_execute(_schema_state, *, round_index):
+        calls["execute"] += 1
+        return {
+            "round_index": round_index,
+            "command_id": "tuning_round_001",
+            "applied_actions": [{"action_id": "llm_hypothesis_001_bias"}],
+            "skipped_actions": [],
+        }
+
+    monkeypatch.setattr("flow.agent_loop.execute_tuning_tool_commands", fake_execute)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual", postprocess_policy="fallback")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+
+    output = loop._execute_schema_command_node(
+        {
+            "current_schema": str(state_path),
+            "last_design_state": str(state_path),
+            "loop_dir": str(tmp_path),
+            "round_index": 1,
+            "max_rounds": 3,
+            "rounds": [
+                {
+                    "spec_pass": False,
+                    "failed_targets": ["dc_gain"],
+                    "measured_violation_score": 0.01,
+                    "postprocess_event_count": 0,
+                }
+            ],
+            "last_tool_command": {
+                "args": {
+                    "selected_actions": [
+                        {
+                            "action_id": "llm_hypothesis_001_bias",
+                            "decision": "apply",
+                            "reason": "validated residual hypothesis",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    assert calls["execute"] == 1
+    assert output["round_index"] == 2
+    assert output["force_postprocess_once"] is False
+    assert output["last_tuning_application"]["applied_actions"]
+
+
+def test_residual_llm_validates_custom_hypothesis_before_apply(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_candidate_actions",
+            "selected_actions": [],
+            "candidate_actions": [],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": []}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    calls = {"planner": 0, "probe": 0}
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            calls["planner"] += 1
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:hypothesis-test",
+                selected_actions=[],
+                custom_actions=[
+                    {
+                        "action_id": "raise_load_length",
+                        "decision": "apply",
+                        "knob": "M3.L",
+                        "metric": "dc_gain",
+                        "direction": "increase",
+                        "suggested_unclipped_value": 7.0e-7,
+                        "reason": "Increase load length as a gain hypothesis.",
+                    }
+                ],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "custom hypothesis",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    def fake_intervention_model(**kwargs):
+        calls["probe"] += 1
+        tuning = kwargs["tuning"]
+        action = tuning["by_failure"][0]["actions"][0]
+        return {
+            "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+            "method": "spice_small_perturbation",
+            "status": "ok",
+            "base_violation_vector": {"dc_gain": 0.40},
+            "action_effects": [
+                {
+                    "action_id": action["action_id"],
+                    "metric": "dc_gain",
+                    "knob": action["knob"],
+                    "apply_to": action["apply_to"],
+                    "direction": action["direction"],
+                    "per_knob_values": action["per_knob_values"],
+                    "source": "spice_small_perturbation",
+                    "status": "ok",
+                    "delta_violation_vector": {"dc_gain": -0.25},
+                    "violation_reduction": 0.25,
+                    "uncertainty": 0.10,
+                }
+            ],
+        }
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    monkeypatch.setattr("flow.agent_loop.build_spice_intervention_model", fake_intervention_model)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual", env="environment.yaml", intervention_max_actions=2)
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+    loop._final_result = argparse.Namespace(
+        sim_result=SimulationResult(success=True, measurements={"dc_gain_db": 0.0}),
+        best_meta={"performance": {}},
+    )
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "last_artifact_dir": str(tmp_path),
+            "round_index": 1,
+            "agent_model": {"failed_targets": ["dc_gain"]},
+        }
+    )
+
+    command = output["last_tool_command"]
+    assert calls == {"planner": 1, "probe": 1}
+    assert command["llm_increment"]["status"] == "applied"
+    assert command["args"]["custom_actions"] == []
+    assert command["args"]["selected_actions"][0]["action_id"].startswith("llm_hypothesis_")
+    assert command["args"]["selected_actions"][0]["decision"] == "apply"
+
+
+def test_residual_escape_accepts_measured_custom_patch_without_optimizer_preselection(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_improving_combination",
+            "selected_actions": [],
+            "candidate_actions": [],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "dc_gain", "actions": []}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    calls = {"planner": 0, "probe": 0, "optimizer": 0}
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            calls["planner"] += 1
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:escape-test",
+                selected_actions=[],
+                custom_actions=[
+                    {
+                        "action_id": "escape_load_length",
+                        "decision": "apply",
+                        "knob": "M3.L",
+                        "apply_to": ["M3.L", "M4.L"],
+                        "metric": "dc_gain",
+                        "direction": "set",
+                        "per_knob_values": {"M3.L": 4.5e-7, "M4.L": 4.5e-7},
+                        "reason": "Try a coupled load-length escape patch.",
+                    }
+                ],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "escape hypothesis",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    def fake_intervention_model(**kwargs):
+        calls["probe"] += 1
+        tuning = kwargs["tuning"]
+        action = tuning["by_failure"][0]["actions"][0]
+        return {
+            "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+            "method": "spice_small_perturbation",
+            "status": "ok",
+            "base_violation_vector": {"dc_gain": 0.50},
+            "action_effects": [
+                {
+                    "action_id": action["action_id"],
+                    "metric": "dc_gain",
+                    "knob": action["knob"],
+                    "apply_to": action["apply_to"],
+                    "direction": action["direction"],
+                    "per_knob_values": action["per_knob_values"],
+                    "source": "spice_small_perturbation",
+                    "status": "ok",
+                    "base_violation_vector": {"dc_gain": 0.50},
+                    "after_violation_vector": {"dc_gain": 0.10},
+                    "delta_violation_vector": {"dc_gain": -0.40},
+                    "violation_reduction": 0.24,
+                    "uncertainty": 0.10,
+                }
+            ],
+        }
+
+    def fake_optimizer(*_args, **_kwargs):
+        calls["optimizer"] += 1
+        raise AssertionError("residual_escape must not call the constrained action optimizer")
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    monkeypatch.setattr("flow.agent_loop.build_spice_intervention_model", fake_intervention_model)
+    monkeypatch.setattr("flow.agent_loop.optimize_tuning_actions", fake_optimizer)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual_escape", env="environment.yaml", intervention_max_actions=2)
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+    loop._final_result = argparse.Namespace(
+        sim_result=SimulationResult(success=True, measurements={"dc_gain_db": 0.0}),
+        best_meta={"performance": {}},
+    )
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "last_artifact_dir": str(tmp_path),
+            "round_index": 1,
+            "agent_model": {"llm_policy": "residual_escape", "failed_targets": ["dc_gain"]},
+        }
+    )
+
+    command = output["last_tool_command"]
+    assert calls == {"planner": 1, "probe": 1, "optimizer": 0}
+    assert command["llm_increment"]["status"] == "applied_escape"
+    selected = command["args"]["selected_actions"][0]
+    assert selected["action_id"].startswith("llm_hypothesis_")
+
+    updated_state = loop._load_design_state(state_path)
+    application = execute_tuning_tool_commands(updated_state, round_index=1)
+    assert application["applied_actions"]
+    assert not application["skipped_actions"]
+    assert {item["knob"]: item["new_initial"] for item in application["applied_actions"][0]["applied_knobs"]} == {
+        "M3.L": 4.5e-7,
+        "M4.L": 4.5e-7,
+    }
+
+
+def test_residual_llm_validates_unverified_target_hypothesis(monkeypatch, tmp_path):
+    state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"), default_environment())
+    state.diagnostics["result"] = {
+        "status": {
+            "spec_pass": False,
+            "failed_targets": [],
+            "unverified_targets": ["slew_rate"],
+            "best_loss": 1.0,
+        }
+    }
+    state.diagnostics["causal_diagnostics"] = {
+        "constrained_action_optimizer": {
+            "status": "no_candidate_actions",
+            "selected_actions": [],
+            "candidate_actions": [],
+        },
+        "attribution_guided_tuning": {"by_failure": [{"metric": "slew_rate", "actions": []}]},
+    }
+    state_path = tmp_path / "design_state.yaml"
+    state.to_yaml(state_path)
+    captured = {}
+
+    class FakePlanner:
+        def __init__(self, _config):
+            pass
+
+        def write_command(self, schema_state, *, round_index, agent_model):
+            command = write_tuning_tool_command(
+                schema_state,
+                round_index=round_index,
+                author="llm:deepseek:unverified-test",
+                selected_actions=[],
+                custom_actions=[
+                    {
+                        "action_id": "raise_tail_for_slew",
+                        "decision": "apply",
+                        "knob": "global.I_tail",
+                        "metric": "slew_rate",
+                        "direction": "increase",
+                        "suggested_unclipped_value": 5.0e-5,
+                        "reason": "Raise bias current to verify slew-rate recovery.",
+                    }
+                ],
+            )
+            command["llm_planner"] = {
+                "provider": "deepseek",
+                "model": "unit-test",
+                "status": "ok",
+                "reason": "unverified slew hypothesis",
+                "used_llm": True,
+            }
+            return argparse.Namespace(command=command, used_llm=True, status="ok", reason="ok")
+
+    def fake_intervention_model(**kwargs):
+        captured["target_status"] = kwargs["target_status"]
+        tuning = kwargs["tuning"]
+        action = tuning["by_failure"][0]["actions"][0]
+        return {
+            "schema_version": "analogrf_ir.local_intervention_model.v0_1",
+            "method": "spice_small_perturbation",
+            "status": "ok",
+            "base_violation_vector": {"slew_rate": 0.15},
+            "action_effects": [
+                {
+                    "action_id": action["action_id"],
+                    "metric": "slew_rate",
+                    "knob": action["knob"],
+                    "apply_to": action["apply_to"],
+                    "direction": action["direction"],
+                    "per_knob_values": action["per_knob_values"],
+                    "source": "spice_small_perturbation",
+                    "status": "ok",
+                    "delta_violation_vector": {"slew_rate": -0.15},
+                    "violation_reduction": 0.15,
+                    "uncertainty": 0.10,
+                }
+            ],
+        }
+
+    monkeypatch.setattr("flow.agent_loop.DeepSeekSchemaPlanner", FakePlanner)
+    monkeypatch.setattr("flow.agent_loop.build_spice_intervention_model", fake_intervention_model)
+    loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
+    loop.config = FlowConfig(llm_policy="residual", env="environment.yaml", intervention_max_actions=2)
+    loop.llm_config = LLMPlannerConfig(provider="deepseek", model="unit-test")
+    loop.emit = lambda _msg: None
+    loop._environment = default_environment()
+    loop._final_result = argparse.Namespace(
+        sim_result=SimulationResult(success=True, measurements={}),
+        best_meta={"performance": {"slew_rate": 2.0e7}},
+    )
+
+    output = loop._llm_write_schema_command_node(
+        {
+            "last_design_state": str(state_path),
+            "last_artifact_dir": str(tmp_path),
+            "round_index": 1,
+            "agent_model": {
+                "failed_targets": [],
+                "unverified_targets": ["slew_rate"],
+            },
+        }
+    )
+
+    command = output["last_tool_command"]
+    assert captured["target_status"]["slew_rate"]["status"] == "unverified"
+    assert captured["target_status"]["slew_rate"]["value"] is None
+    assert captured["target_status"]["slew_rate"]["optimizer_value"] == 2.0e7
+    assert command["llm_increment"]["status"] == "applied"
+    assert command["llm_increment"]["model_status"] == "ok"
+    assert command["args"]["selected_actions"][0]["action_id"].startswith("llm_hypothesis_")
+
+
+def test_residual_llm_voltage_hypotheses_are_trust_region_clipped():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        default_environment(),
+    )
+    for dv in state.design_variables:
+        if not dv.device and dv.variable == "vbias_ncas":
+            dv.initial = 0.90
+        if not dv.device and dv.variable == "vbias_pcas":
+            dv.initial = 0.35
+    state.global_parameters["vbias_ncas"] = 0.90
+    state.global_parameters["vbias_pcas"] = 0.35
+    tuning = _tuning_from_llm_hypotheses(
+        state,
+        [
+            {
+                "action_id": "large_bad_bias_jump",
+                "decision": "apply",
+                "knob": "global.vbias_ncas",
+                "apply_to": ["global.vbias_ncas", "global.vbias_pcas"],
+                "direction": "set",
+                "metric": "saturation_margin",
+                "per_knob_values": {
+                    "global.vbias_ncas": 0.70,
+                    "global.vbias_pcas": 0.50,
+                },
+            }
+        ],
+        {
+            "saturation_margin": {
+                "status": "fail",
+                "counts_for_pass": True,
+            }
+        },
+    )
+
+    action = tuning["by_failure"][0]["actions"][0]
+    assert action["per_knob_values"]["global.vbias_ncas"] == pytest.approx(0.87)
+    assert action["per_knob_values"]["global.vbias_pcas"] == pytest.approx(0.38)
+
+
+def test_residual_llm_voltage_hypotheses_anchor_to_current_globals():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/telescopic/telescopic_ota_ihp130.yaml"),
+        default_environment(),
+    )
+    for dv in state.design_variables:
+        if not dv.device and dv.variable == "vbias_tail":
+            dv.initial = 0.405
+    state.global_parameters["vbias_tail"] = 0.320
+    tuning = _tuning_from_llm_hypotheses(
+        state,
+        [
+            {
+                "action_id": "tail_bias_jump",
+                "decision": "apply",
+                "knob": "global.vbias_tail",
+                "direction": "set",
+                "metric": "saturation_margin",
+                "per_knob_values": {"global.vbias_tail": 0.405},
+            }
+        ],
+        {
+            "saturation_margin": {
+                "status": "fail",
+                "counts_for_pass": True,
+            }
+        },
+    )
+
+    action = tuning["by_failure"][0]["actions"][0]
+    assert action["per_knob_values"]["global.vbias_tail"] == pytest.approx(0.35)
+
+
+def test_residual_llm_hypothesis_drops_targets_without_per_knob_values():
+    state = build_design_state_from_yaml(
+        load_yaml_mapping("inputs/ota/two_stage_miller/two_stage_miller_ota.yaml"),
+        default_environment(),
+    )
+    tuning = _tuning_from_llm_hypotheses(
+        state,
+        [
+            {
+                "action_id": "partial_composite_gmid",
+                "decision": "apply",
+                "knob": "M6.gm_id",
+                "apply_to": ["M6.gm_id", "M3.gm_id", "M4.gm_id"],
+                "direction": "increase",
+                "metric": "saturation_margin",
+                "per_knob_values": {
+                    "M3.gm_id": 8.0,
+                    "M4.gm_id": 8.0,
+                },
+                "range_update": {
+                    "type": "set_range",
+                    "per_knob": {
+                        "M6.gm_id": {"min": 6.0, "max": 12.0},
+                        "M3.gm_id": {"min": 6.0, "max": 12.0},
+                        "M4.gm_id": {"min": 6.0, "max": 12.0},
+                    },
+                },
+            }
+        ],
+        {
+            "saturation_margin": {
+                "status": "fail",
+                "counts_for_pass": True,
+            }
+        },
+    )
+
+    action = tuning["by_failure"][0]["actions"][0]
+    assert action["knob"] == "M3.gm_id"
+    assert action["apply_to"] == ["M3.gm_id", "M4.gm_id"]
+    assert set(action["per_knob_values"]) == {"M3.gm_id", "M4.gm_id"}
+    assert set(action["range_update"]["per_knob"]) == {"M3.gm_id", "M4.gm_id"}
+
+
 def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "unit-test-key")
     state = build_design_state_from_yaml(load_yaml_mapping("inputs/ota/five_transistor/five_transistor_ota.yaml"), default_environment())
@@ -2265,8 +3208,124 @@ def test_deepseek_schema_planner_accepts_llm_selected_and_custom_actions(monkeyp
     assert command["llm_planner"]["reasoning_effort"] == "max"
     assert command["llm_planner"]["temperature"] == 0.2
     assert command["llm_planner"]["max_tokens"] == 2048
-    assert command["args"]["selected_actions"][0]["decision"] == "skip"
+    assert command["args"]["selected_actions"] == []
     assert command["args"]["custom_actions"][0]["knob"] == "global.I_tail"
+
+
+def test_residual_planner_context_requires_custom_hypothesis():
+    context = _planner_context(
+        {
+            "args": {"available_actions": []},
+            "schema_context": {"writable_variables": {"global.I_tail": {"variable": "I_tail"}}},
+            "write_policy": {"action_admissibility": {"formal_rule": "optimizer_selected OR objective_delta < 0"}},
+        },
+        {
+            "llm_policy": "residual",
+            "status": {"spec_pass": False},
+            "failed_targets": ["unity_gain_bandwidth"],
+            "unverified_targets": [],
+        },
+    )
+
+    assert context["planner_mode"] == "residual"
+    assert context["residual_hypothesis_required"] is True
+    rules = "\n".join(context["rules"])
+    assert "existing available_actions are evidence only" in rules
+    assert "return one or two custom_actions" in rules
+    assert "Do not return custom_actions: []" in rules
+
+
+def test_deepseek_schema_planner_retries_empty_thinking_content(monkeypatch):
+    planner = DeepSeekSchemaPlanner(
+        LLMPlannerConfig(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key_env="DEEPSEEK_API_KEY",
+            thinking="enabled",
+            reasoning_effort="max",
+            max_tokens=12000,
+        )
+    )
+    responses = [
+        {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "", "reasoning_content": "reasoning consumed the budget"},
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": (
+                            '{"selected_actions": [], "custom_actions": [], '
+                            '"rationale": "retry produced compact JSON"}'
+                        )
+                    },
+                }
+            ]
+        },
+    ]
+    bodies = []
+
+    def fake_post(body, api_key):
+        bodies.append(body)
+        return responses.pop(0)
+
+    monkeypatch.setattr(planner, "_post_chat_completion", fake_post)
+
+    payload = planner._call_planner({"args": {}, "schema_context": {}}, {}, "unit-test-key")
+
+    assert payload["rationale"] == "retry produced compact JSON"
+    assert payload["_planner_transport"]["retry"] is True
+    assert payload["_planner_transport"]["first_finish_reason"] == "length"
+    assert payload["_planner_transport"]["retry_finish_reason"] == "stop"
+    assert bodies[0]["thinking"]["type"] == "enabled"
+    assert bodies[1]["thinking"]["type"] == "disabled"
+    assert bodies[1]["max_tokens"] == 2048
+
+
+def test_deepseek_schema_planner_retries_remote_disconnected(monkeypatch):
+    import http.client
+
+    planner = DeepSeekSchemaPlanner(
+        LLMPlannerConfig(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_key_env="DEEPSEEK_API_KEY",
+            max_retries=1,
+            retry_backoff_seconds=0.0,
+        )
+    )
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+    def fake_urlopen(_request, *, timeout):
+        calls["count"] += 1
+        assert timeout == planner.config.timeout_seconds
+        if calls["count"] == 1:
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return FakeResponse()
+
+    monkeypatch.setattr("flow.llm_planner.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("flow.llm_planner.time.sleep", lambda _seconds: None)
+
+    data = planner._post_chat_completion({"messages": []}, "unit-test-key")
+
+    assert calls["count"] == 2
+    assert data["choices"][0]["message"]["content"] == "{}"
 
 
 def test_langgraph_llm_ai_options_are_configurable_from_cli():
@@ -2316,6 +3375,7 @@ def test_cli_config_file_loads_defaults_and_cli_overrides(tmp_path):
           seed: 123
         agent:
           rounds: 2
+          llm_policy: shadow
         features:
           run_asir: false
         postprocess:
@@ -2335,6 +3395,7 @@ def test_cli_config_file_loads_defaults_and_cli_overrides(tmp_path):
     assert args.generations == 9
     assert args.pop_size == 11
     assert args.agent_rounds == 2
+    assert args.llm_policy == "shadow"
     assert args.no_asir is False
     assert args.postprocess_policy == "off"
     assert args.runs_dir == "runs/from_config"
@@ -2382,6 +3443,77 @@ def test_ngspice_run_marks_missing_required_transient_as_failed(monkeypatch):
     assert result.return_code == 1
     assert result.pass_status["tran"]["missing_measurements"] == ["slew_rate"]
     assert "Timeout after 30s" in result.pass_status["tran"]["stderr_tail"]
+
+
+def test_ngspice_default_exec_has_no_python_timeout(monkeypatch, tmp_path):
+    captured = []
+
+    class FakeProcess:
+        returncode = 0
+        stdout = "simulation executed\n"
+        stderr = ""
+
+    def fake_run(_cmd, capture_output, text, timeout, cwd):
+        captured.append(timeout)
+        return FakeProcess()
+
+    monkeypatch.setattr("simulator.ngspice.subprocess.run", fake_run)
+
+    NgspiceSimulator()._exec_ngspice("* ota\n.end", str(tmp_path), suffix="dc")
+    NgspiceSimulator(timeout_sec=12)._exec_ngspice("* ota\n.end", str(tmp_path), suffix="ac")
+
+    assert captured == [None, 12]
+
+
+def test_runner_retries_missing_required_transient(monkeypatch, tmp_path):
+    calls = {}
+
+    def fake_run_tran(self, netlist, work_dir):
+        calls["netlist"] = netlist
+        calls["work_dir"] = work_dir
+        return SimulationResult(
+            success=True,
+            return_code=0,
+            measurements={
+                "slew_rate": 6.2e7,
+                "slew_rate_pos": 6.8e7,
+                "slew_rate_neg": 6.2e7,
+            },
+            raw_stdout="simulation executed\n",
+        )
+
+    monkeypatch.setattr("simulator.ngspice.NgspiceSimulator._run_tran_pass", fake_run_tran)
+    runner = AnalogRFIRFlowRunner.__new__(AnalogRFIRFlowRunner)
+    sim_result = SimulationResult(
+        success=False,
+        return_code=1,
+        measurements={"dc_gain_db": 29.0},
+        pass_status={
+            "tran": {
+                "success": False,
+                "return_code": -1,
+                "missing_measurements": ["slew_rate"],
+                "required_for_run": True,
+                "stderr_tail": "Timeout after 30s",
+            }
+        },
+    )
+    flow_meta = {}
+
+    runner._retry_missing_required_transient(
+        sim=NgspiceSimulator(ngspice_bin="ngspice", timeout_sec=30),
+        netlist_str="* ota\n.tran 1n 10n\n.end",
+        output_dir=tmp_path,
+        sim_result=sim_result,
+        flow_meta=flow_meta,
+    )
+
+    assert calls["netlist"].startswith("* ota")
+    assert calls["work_dir"].endswith("transient_retry")
+    assert sim_result.measurements["slew_rate"] == 6.2e7
+    assert sim_result.pass_status["tran"]["missing_measurements"] == []
+    assert sim_result.pass_status["tran_initial"]["missing_measurements"] == ["slew_rate"]
+    assert flow_meta["transient_retry"]["recovered"] is True
 
 
 def test_ablation_plan_builds_case_seed_schema_jobs(tmp_path):
@@ -2721,12 +3853,14 @@ def test_agent_loop_final_log_outputs_result_summary():
 def test_agent_loop_tracks_best_verified_round():
     loop = DiagnosticAgentLoop.__new__(DiagnosticAgentLoop)
 
-    worse = {"spec_pass": False, "failed_targets": ["dc_gain", "output_swing"], "best_loss": 120.0}
-    better = {"spec_pass": False, "failed_targets": ["phase_margin"], "best_loss": 95.0}
-    passing = {"spec_pass": True, "failed_targets": [], "best_loss": 100.0}
+    worse = {"spec_pass": False, "failed_targets": ["dc_gain", "output_swing"], "unverified_targets": [], "best_loss": 120.0}
+    better = {"spec_pass": False, "failed_targets": ["phase_margin"], "unverified_targets": [], "best_loss": 95.0}
+    unverified = {"spec_pass": False, "failed_targets": [], "unverified_targets": ["slew_rate"], "best_loss": 1.0}
+    passing = {"spec_pass": True, "failed_targets": [], "unverified_targets": [], "best_loss": 100.0}
 
     assert loop._is_better_summary(worse, None) is True
     assert loop._is_better_summary(better, worse) is True
+    assert loop._is_better_summary(better, unverified) is True
     assert loop._is_better_summary(passing, better) is True
     assert loop._is_better_summary(worse, passing) is False
 
@@ -2760,6 +3894,50 @@ def test_ablation_summary_uses_best_verified_result_not_latest(tmp_path):
 
     assert summary["result_json"].endswith("iter_001/result.json")
     assert summary["failed_targets"] == ["phase_margin"]
+
+
+def test_ablation_skip_existing_reruns_failed_result(monkeypatch, tmp_path):
+    run_dir = tmp_path / "job"
+    failed = run_dir / "iter_001"
+    failed.mkdir(parents=True)
+    (failed / "result.json").write_text(
+        json.dumps(
+            {
+                "status": {"spec_pass": False, "failed_targets": ["dc_gain"], "best_loss": 100.0},
+                "measurements": {"dc_gain_db": 20.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run(command, *, cwd, check):
+        calls.append((command, cwd, check))
+        passed = run_dir / "iter_002"
+        passed.mkdir()
+        (passed / "result.json").write_text(
+            json.dumps(
+                {
+                    "status": {"spec_pass": True, "failed_targets": [], "best_loss": 0.0},
+                    "measurements": {"dc_gain_db": 30.0},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return argparse.Namespace(returncode=0)
+
+    monkeypatch.setattr("scripts.run_ablation.subprocess.run", fake_run)
+
+    record = _execute_job(
+        {"name": "job", "runs_dir": run_dir},
+        ["python", "main.py"],
+        {"name": "job"},
+        skip_existing=True,
+    )
+
+    assert calls
+    assert record["status"] == "passed"
+    assert record["summary"]["spec_pass"] is True
 
 
 def test_optimizer_update_keeps_inversion_region_out_of_spice_region():
@@ -3085,6 +4263,28 @@ Cload vout 0 200f
     assert perf["output_swing_low"] < perf["output_swing_high"]
     assert perf["icmr_min"] > 0
     assert perf["icmr_max"] >= perf["icmr_min"]
+
+
+def test_ngspice_saturation_margin_uses_configured_vdsat_factor():
+    netlist = """
+* VDSAT_headroom_factor: 1.3
+XM1 out vin tail gnd sg13_lv_nmos W=1u L=500n
+XM2 out bias vdd vdd sg13_lv_pmos W=1u L=500n
+XM3 tail vbias gnd gnd sg13_lv_nmos W=1u L=500n
+Vdd vdd 0 DC 1.2
+.end
+"""
+    op = {
+        "M1": {"vds": 0.22, "vdsat": 0.10},
+        "M2": {"vds": 0.50, "vdsat": 0.20},
+        "M3": {"vds": 0.245, "vdsat": 0.18},
+    }
+
+    perf = NgspiceSimulator()._extract_headroom_performance(netlist, op)
+
+    expected_margin = 0.245 - 1.3 * 0.18
+    assert np.isclose(perf["saturation_margin"], expected_margin)
+    assert np.isclose(perf["saturation_required_gap"], expected_margin - 0.01)
 
 
 def test_ngspice_icmr_sweep_extracts_common_mode_range():
