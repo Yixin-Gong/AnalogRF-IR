@@ -117,24 +117,18 @@ class NgspiceSimulator:
             for name, result, expected, required_for_run in executed_passes
         }
 
-        pass_codes = [
-            result.return_code
-            for _name, result, _expected, _required_for_run in executed_passes
-            if result.return_code is not None
-        ]
         missing_required = any(
             bool(summary.get("missing_measurements"))
             for summary in merged.pass_status.values()
             if summary.get("required_for_run")
         )
-        if pass_codes:
-            merged.return_code = 0 if all(code == 0 for code in pass_codes) and not missing_required else 1
-
-        executed_ok = all(
-            bool(result.success) and result.return_code == 0
-            for _name, result, _expected, _required_for_run in executed_passes
+        expected_measurements_ok = all(
+            bool(summary.get("validation_success", False))
+            for summary in merged.pass_status.values()
+            if summary.get("expected_measurements")
         )
-        merged.success = bool(merged.measurements) and executed_ok and not missing_required
+        merged.success = bool(merged.measurements) and expected_measurements_ok and not missing_required
+        merged.return_code = 0 if merged.success else 1
 
         return merged
 
@@ -153,7 +147,9 @@ class NgspiceSimulator:
             "elapsed_sec": round(float(result.elapsed_sec or 0.0), 6),
             "measurement_count": len(measurements),
             "measurements": sorted(measurements),
+            "expected_measurements": sorted(expected_measurements),
             "missing_measurements": missing,
+            "validation_success": not missing,
             "required_for_run": bool(required_for_run),
         }
         if result.raw_stderr:

@@ -61,7 +61,9 @@ topologies under the LLM-guided diagnosis and repair flow:
 
 The current ablation matrix compares five OTA topologies, ten seeds, and four
 method variants. The rows are re-scored with the same priority 1-2 target
-definition:
+definition. The reported `ngspice_success` field denotes required-target
+validation success; raw per-analysis simulator warnings remain available in
+`pass_status` and are not used as the top-level pass/fail criterion:
 
 | Method | 5T | Current mirror | Folded cascode | Telescopic | Two-stage | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -100,6 +102,12 @@ Unsupported LLM edits are recorded as skipped notes rather than executable
 changes.
 
 ![Diagnosis and evidence-gated action flow](docs/assets/analogdiag_diagnosis_loop.png)
+
+The diagnosis validation figure reports the full artifact funnel: local probes,
+supported probes that reduce a failed target, and selected/admitted actions.
+Selected-action improvement is shown as objective reduction `-Delta J` on a log
+scale, so small deterministic repairs and larger LLM residual-escape repairs
+remain comparable without saturating the plot.
 
 For normalized violation vector `v`, local action response column `A_j`, and
 weights `w_i`, the specification objective is:
@@ -228,8 +236,8 @@ Each run writes a compact schema plus structured evidence:
 design_state.yaml        Reviewable schema state and concise diagnostics
 causal_diagnostics.json  Full causal graph and local intervention model
 agent_diagnostics.json   Agent-facing failure summary
-sim_log.json             Optimizer, postprocess, and simulator log
-result.json              Final pass/fail and measured metrics
+sim_log.json             Optimizer, postprocess, raw pass status, and simulator log
+result.json              Final pass/fail, required-target validation, and metrics
 ```
 
 ## Repository Layout

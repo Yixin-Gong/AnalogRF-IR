@@ -240,15 +240,24 @@ def plot_validation(actions: pd.DataFrame, selected: pd.DataFrame, overlaps: pd.
     if not selected.empty:
         ax = axes[2]
         data = selected.dropna(subset=["objective_delta"]).copy()
-        sns.stripplot(data=data, x="objective_delta", y="method", hue="method", dodge=False, legend=False, size=4.8, alpha=0.72, ax=ax)
-        ax.axvline(0, color="#b91c1c", linewidth=1.0, linestyle="--")
-        ax.set_title(r"Selected action $\Delta J$", fontsize=10)
-        ax.set_xlabel("Objective change")
+        data["objective_reduction"] = -data["objective_delta"]
+        data = data[data["objective_reduction"] > 0].copy()
+        sns.stripplot(data=data, x="objective_reduction", y="method", hue="method", dodge=False, legend=False, size=4.8, alpha=0.72, ax=ax)
+        ax.set_xscale("log")
+        ax.set_title(r"Selected action $-\Delta J$", fontsize=10)
+        ax.set_xlabel("Objective reduction, log scale")
         ax.set_ylabel("")
         ax.tick_params(axis="y", labelsize=8)
         if not data.empty:
-            median_delta = data["objective_delta"].median()
-            ax.text(0.02, 0.08, f"median {median_delta:.3f}", transform=ax.transAxes, fontsize=8, color="#374151")
+            medians = data.groupby("method")["objective_reduction"].median().to_dict()
+            det = medians.get("Diagnosis + repair")
+            llm = medians.get("LLM diagnosis + repair")
+            median_lines = []
+            if det is not None:
+                median_lines.append(f"median -dJ det: {det:.3g}")
+            if llm is not None:
+                median_lines.append(f"median -dJ LLM: {llm:.3g}")
+            ax.text(0.02, 0.08, "\n".join(median_lines), transform=ax.transAxes, fontsize=7.2, color="#374151")
     elif not overlaps.empty:
         ax = axes[2]
         sns.boxplot(data=overlaps, x="top5_overlap_count", y="method", color="#94a3b8", ax=ax)

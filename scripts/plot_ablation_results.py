@@ -127,6 +127,7 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
         measurements = result.get("measurements", {}) or {}
         status = result.get("status", {}) or {}
         target_status = _evaluate_targets(measurements, schema.get("targets", {}) or {}, max_priority=2)
+        required_targets_verified = _required_targets_verified(result)
         llm = _llm_usage(runs_dir)
         postprocess_events = _postprocess_events(runs_dir)
         record = {
@@ -144,8 +145,9 @@ def collect_run_records(manifest_path: Path) -> pd.DataFrame:
             "runs_dir": str(runs_dir),
             "spec_pass": target_status["spec_pass"],
             "artifact_spec_pass": bool(status.get("spec_pass", False)),
-            "ngspice_success": bool(status.get("ngspice_success", False)),
-            "required_targets_verified": _required_targets_verified(result),
+            "ngspice_success": required_targets_verified,
+            "artifact_ngspice_success": bool(status.get("ngspice_success", False)),
+            "required_targets_verified": required_targets_verified,
             "best_loss": _to_float(status.get("best_loss")),
             "failed_targets": "|".join(target_status["failed_targets"]),
             "artifact_failed_targets": "|".join(str(item) for item in status.get("failed_targets", []) or []),
@@ -256,7 +258,6 @@ def summarize_runs(runs: pd.DataFrame, specs: pd.DataFrame) -> pd.DataFrame:
         .agg(
             n_runs=("job", "count"),
             success_rate=("spec_pass", "mean"),
-            ngspice_success_rate=("ngspice_success", "mean"),
             required_verified_rate=("required_targets_verified", "mean"),
             median_best_loss=("best_loss", "median"),
             llm_used_rate=("llm_used", "mean"),

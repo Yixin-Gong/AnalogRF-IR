@@ -3445,6 +3445,57 @@ def test_ngspice_run_marks_missing_required_transient_as_failed(monkeypatch):
     assert "Timeout after 30s" in result.pass_status["tran"]["stderr_tail"]
 
 
+def test_ngspice_top_level_success_uses_required_measurements(monkeypatch):
+    sim = NgspiceSimulator(timeout_sec=30)
+
+    monkeypatch.setattr(
+        sim,
+        "_run_ac_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=False,
+            return_code=0,
+            raw_stderr="Warning: benign parser warning",
+            measurements={"dc_gain_db": 40.0, "unity_gain_bandwidth": 2.0e7, "phase_margin": 65.0},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_dc_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=False,
+            return_code=0,
+            raw_stderr="Warning: ignored vector",
+            measurements={"total_power": 1.0e-4, "output_swing": 0.8, "saturation_margin": 0.05},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_icmr_pass",
+        lambda _netlist, _work_dir: SimulationResult(success=False, return_code=-1, measurements={}),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_tran_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=True,
+            return_code=0,
+            measurements={"slew_rate": 1.2e7},
+        ),
+    )
+
+    result = sim.run("* ota\n.end", include_transient=True)
+
+    assert result.success is True
+    assert result.return_code == 0
+    assert result.pass_status["ac"]["success"] is False
+    assert result.pass_status["ac"]["validation_success"] is True
+    assert result.pass_status["dc"]["success"] is False
+    assert result.pass_status["dc"]["validation_success"] is True
+    assert result.pass_status["icmr"]["success"] is False
+    assert result.pass_status["icmr"]["validation_success"] is True
+    assert result.pass_status["tran"]["validation_success"] is True
+
+
 def test_ngspice_default_exec_has_no_python_timeout(monkeypatch, tmp_path):
     captured = []
 
