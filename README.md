@@ -36,28 +36,31 @@ optimizer-side or local SPICE evidence.
 
 ## Results At A Glance
 
-The maintained IHP SG13G2 OTA regressions use high-impedance
-`C_L ~= 1 pF` targets. They are schematic-level TT ngspice experiments, not
-pad, cable, low-resistance, extracted-layout, or 50 ohm load signoff.
+The maintained IHP SG13G2 OTA regressions now report the frontier-stress
+target set derived from the best measured frontier. The experiments use
+high-impedance `C_L ~= 1 pF` schematic-level TT ngspice runs; they are not pad,
+cable, low-resistance, extracted-layout, or 50 ohm load signoff. Power is kept
+as a recorded budget, but the pass predicate and action objective use the
+priority 1-2 non-power targets.
 
 | Topology | Gain | UGBW | PM | SR | Swing | Power |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | 25 dB | 25 MHz | 60 deg | 15 V/us | 0.65 V | 200 uW |
-| Current-mirror OTA | 28 dB | 30 MHz | 60 deg | 25 V/us | 0.60 V | 300 uW |
-| Folded-cascode OTA | 45 dB | 20 MHz | 60 deg | 12 V/us | 0.60 V | 600 uW |
-| Telescopic OTA | 48 dB | 7 MHz | 60 deg | 6 V/us | 0.55 V | 300 uW |
-| Two-stage Miller OTA | 57 dB | 20 MHz | 60 deg | 10 V/us | 0.49 V | 1000 uW |
+| 5T OTA | 27.01 dB | 77.53 MHz | 60 deg | 69.33 V/us | 0.8736 V | 200 uW |
+| Current-mirror OTA | 28.90 dB | 35.32 MHz | 60 deg | 37.52 V/us | 0.8318 V | 300 uW |
+| Folded-cascode OTA | 45.80 dB | 32.65 MHz | 60 deg | 16.00 V/us | 0.9403 V | 600 uW |
+| Telescopic OTA | 48.35 dB | 12.39 MHz | 60 deg | 5.70 V/us | 0.9386 V | 300 uW |
+| Two-stage Miller OTA | 56.50 dB | 35.00 MHz | 60 deg | 29.00 V/us | 0.7600 V | 1000 uW |
 
 Ten-seed ngspice runs pass the priority 1-2 targets for all five maintained OTA
 topologies under the LLM-guided diagnosis and repair flow:
 
 | Topology | Status | Iter | Gain | UGBW | PM | SR | Swing | Power |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 5T OTA | 10/10 | 3 | 27.0 dB | 59.56 MHz | 84.1 deg | 49.26 V/us | 0.860 V | 61.8 uW |
-| Current-mirror OTA | 10/10 | 3 | 29.0 dB | 33.48 MHz | 69.1 deg | 37.41 V/us | 0.845 V | 53.4 uW |
-| Folded-cascode OTA | 10/10 | 1 | 45.8 dB | 33.32 MHz | 81.1 deg | 18.38 V/us | 0.959 V | 20.7 uW |
-| Telescopic OTA | 10/10 | 1 | 48.4 dB | 12.64 MHz | 83.3 deg | 6.26 V/us | 0.958 V | 16.5 uW |
-| Two-stage Miller OTA | 10/10 | 3 | 57.0 dB | 36.71 MHz | 71.7 deg | 30.09 V/us | 0.787 V | 372.4 uW |
+| 5T OTA | 10/10 | 2 | 27.2 dB | 104.64 MHz | 74.6 deg | 82.26 V/us | 0.905 V | 93.6 uW |
+| Current-mirror OTA | 10/10 | 3 | 29.2 dB | 36.54 MHz | 65.3 deg | 41.02 V/us | 0.881 V | 57.8 uW |
+| Folded-cascode OTA | 10/10 | 1 | 45.8 dB | 33.32 MHz | 81.1 deg | 16.15 V/us | 0.959 V | 20.7 uW |
+| Telescopic OTA | 10/10 | 1 | 48.4 dB | 12.64 MHz | 83.3 deg | 5.78 V/us | 0.958 V | 16.5 uW |
+| Two-stage Miller OTA | 10/10 | 2 | 57.0 dB | 36.71 MHz | 71.7 deg | 29.89 V/us | 0.787 V | 372.4 uW |
 
 The current ablation matrix compares five OTA topologies, ten seeds, and four
 method variants. The rows are re-scored with the same priority 1-2 target
@@ -67,14 +70,15 @@ validation success; raw per-analysis simulator warnings remain available in
 
 | Method | 5T | Current mirror | Folded cascode | Telescopic | Two-stage | Total |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Optimizer | 3/10 | 0/10 | 0/10 | 0/10 | 0/10 | 3/50 |
-| Optimizer + repair | 5/10 | 1/10 | 1/10 | 3/10 | 1/10 | 11/50 |
-| Diagnosis + repair | 10/10 | 7/10 | 5/10 | 10/10 | 9/10 | 41/50 |
+| Optimizer | 0/10 | 0/10 | 1/10 | 0/10 | 0/10 | 1/50 |
+| Optimizer + repair | 4/10 | 0/10 | 0/10 | 10/10 | 4/10 | 18/50 |
+| Diagnosis + repair | 7/10 | 4/10 | 1/10 | 10/10 | 10/10 | 32/50 |
 | LLM diagnosis + repair | 10/10 | 10/10 | 10/10 | 10/10 | 10/10 | 50/50 |
 
 The published project figures are regenerated from a unified 200-cell manifest
-that combines the 150 non-LLM control cells and the 50 LLM full-flow cells.
-The extracted data tables are written under `docs/assets/`.
+that combines the 150 frontier-stress non-LLM control cells and the 50
+frontier-stress LLM full-flow cells. The extracted data tables are written
+under `docs/assets/`.
 
 | Target achievement | Measured metrics |
 | --- | --- |
@@ -200,34 +204,37 @@ python -m pytest -q
 Dry-run the controlled ablation matrix:
 
 ```bash
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota_frontier_stress.yaml
 ```
 
 Run the matrix and keep going after individual failures:
 
 ```bash
 python scripts/run_ablation.py \
-  --config configs/ablation_ihp130_ota.yaml \
+  --config configs/ablation_ihp130_ota_frontier_stress.yaml \
   --local-config configs/local/llm.yaml \
   --run --keep-going
 ```
 
-Regenerate README figures from the controlled 200-cell data set:
+Regenerate README figures from the frontier-stress 200-cell data set:
 
 ```bash
-python scripts/build_200cell_manifest.py
+python scripts/build_200cell_manifest.py \
+  --nonllm-manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_other150_20260613/manifest.json \
+  --llm-manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_llm_full_50cell_20260614/manifest.json \
+  --out-dir runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614
 
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
   --out-dir docs/assets --format png
 
 python scripts/plot_full_flow_results.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
-  --out-dir docs/assets --format png
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
+  --out-dir docs/assets --format png --write-csv
 
 python scripts/plot_diagnosis_validation.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
-  --out-dir docs/assets --format png
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
+  --out-dir docs/assets --format png --write-csv
 ```
 
 Each run writes a compact schema plus structured evidence:

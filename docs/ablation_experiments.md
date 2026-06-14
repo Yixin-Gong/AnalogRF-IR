@@ -20,9 +20,12 @@ Record these for every case, schema, and seed:
 
 ## Control Matrix
 
-The current IHP 130 nm OTA topology-family matrix lives in
-`configs/ablation_ihp130_ota.yaml`. It is intentionally small enough for rapid
-iteration while still separating topology effects from method effects.
+The current release-report matrix uses the frontier-stress IHP 130 nm OTA
+schemas in `inputs/ota_stress/frontier/`. The non-LLM controls are materialized
+by `configs/ablation_ihp130_ota_frontier_stress.yaml`; the LLM full-flow cells
+use the same config with the LLM case filter. This keeps the matrix small
+enough for rapid iteration while separating topology effects from method
+effects.
 
 | Case | Purpose | Postprocess | Diagnosis | Intervention | LLM |
 | --- | --- | --- | --- | --- | --- |
@@ -34,15 +37,14 @@ iteration while still separating topology effects from method effects.
 ## Recommended Reporting
 
 Use at least three random seeds for the development matrix and increase the
-seed count when locking down a release benchmark. The current IHP 130 nm
-topology set is:
+seed count when locking down a release benchmark. The current frontier-stress
+IHP 130 nm topology set is:
 
-- `inputs/ota/two_stage_miller/two_stage_miller_ota.yaml`
-- `inputs/ota/five_transistor/five_transistor_ota.yaml`
-- `inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml`
-- `inputs/ota/telescopic/telescopic_ota_ihp130.yaml`
-- `inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml`
-- `inputs/ota/source_follower_boosted/source_follower_boosted_ota.yaml`
+- `inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml`
+- `inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml`
+- `inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml`
+- `inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml`
+- `inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml`
 
 For project reporting, compare the complete method against the optimizer-only,
 optimizer-plus-postprocess, and deterministic-diagnosis controls. The intended
@@ -55,51 +57,57 @@ planner layers.
 Dry-run the full matrix and generate per-job configs:
 
 ```bash
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota_frontier_stress.yaml
 ```
 
 Run one smoke case:
 
 ```bash
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --case optimizer_only --seed 1 --limit 1 --run
+python scripts/run_ablation.py --config configs/ablation_ihp130_ota_frontier_stress.yaml --case optimizer_only --seed 1 --limit 1 --run
 ```
 
-Run the non-LLM control matrix:
-
-```bash
-python scripts/run_ablation.py --config configs/ablation_ihp130_ota.yaml --run --keep-going
-```
-
-Run the LLM full-flow matrix:
+Run the non-LLM frontier-stress control matrix:
 
 ```bash
 python scripts/run_ablation.py \
-  --config configs/ablation_ihp130_ota_llm_full_residual_escape_seed1_10.yaml \
+  --config configs/ablation_ihp130_ota_frontier_stress.yaml \
+  --run --keep-going
+```
+
+Run the LLM full-flow frontier-stress matrix:
+
+```bash
+python scripts/run_ablation.py \
+  --config configs/ablation_ihp130_ota_frontier_stress.yaml \
+  --case llm_full_residual_escape_postprocess_fallback \
   --run --keep-going --jobs 1 --skip-existing
 ```
 
 Build the unified 200-cell manifest and generate comparison tables and plots:
 
 ```bash
-python scripts/build_200cell_manifest.py
+python scripts/build_200cell_manifest.py \
+  --nonllm-manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_other150_20260613/manifest.json \
+  --llm-manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_llm_full_50cell_20260614/manifest.json \
+  --out-dir runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614
 
 python scripts/plot_ablation_results.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
   --out-dir docs/assets --format png
 
 python scripts/plot_full_flow_results.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
   --out-dir docs/assets --format png --write-csv
 
 python scripts/plot_diagnosis_validation.py \
-  --manifest runs/ablations_ihp130_ota_200cell_seed1_10_20260610/manifest.json \
+  --manifest runs/ablations_ihp130_ota_frontier_stress_relaxed_200cell_20260614/manifest.json \
   --out-dir docs/assets --format png --write-csv
 ```
 
 After a design passes its baseline targets, run a progressive target ladder to
-find the measured frontier. Each level tightens gain, bandwidth, slew rate,
-output swing, and power; the script stops a ladder after repeated failures and
-writes the non-dominated passing points:
+find the measured frontier. Each level tightens gain, bandwidth, slew rate, and
+output swing while recording power as a budget; the script stops a ladder after
+repeated failures and writes the non-dominated passing points:
 
 ```bash
 python scripts/run_progressive_pareto.py \
