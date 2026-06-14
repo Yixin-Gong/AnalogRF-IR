@@ -47,6 +47,7 @@ from postprocess.registry import PostprocessConfig, PostprocessContext, Postproc
 from postprocess.source_follower import _candidate_points
 from postprocess.two_stage import set_symmetric_width, tune_two_stage_compensation
 from pygmid.adapter import create_pygmid_adapter
+from schemas.design_state import DesignState
 from simulator.ngspice import NgspiceSimulator, SimulationResult
 from specs.models import SpecRegistry
 from scripts.run_ablation import _execute_job, _latest_result_summary, build_jobs
@@ -765,6 +766,18 @@ def test_priority_target_without_ngspice_measurement_is_unverified():
     assert diagnostic["status"] == "fail"
     assert diagnostic["counts_for_pass"] is True
     assert diagnostic["requires_ngspice"] is True
+
+
+def test_design_state_simulation_roundtrip_preserves_bias_and_defaults():
+    state = DesignState()
+    state.simulation.bias_voltage = 0.72
+    state.simulation.analyses = ["op", "ac", "dc", "tran"]
+
+    restored = DesignState.from_dict(state.to_dict())
+
+    assert restored.simulation.bias_voltage == 0.72
+    assert restored.simulation.analyses == ["op", "ac", "dc", "tran"]
+    assert DesignState.from_dict({}).simulation.analyses == ["op", "ac", "dc"]
 
 
 def test_compact_telescopic_stack_balance_action_remains_executable():
@@ -2181,6 +2194,9 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
             }
         ],
     )
+    compact_state_path = tmp_path / "compact_design_state.yaml"
+    state.to_yaml(compact_state_path, include_runtime_context=False)
+    persisted_command = load_yaml_mapping(compact_state_path)["diagnostics"]["agent_tool_commands"][0]
     application = execute_tuning_tool_commands(state, round_index=1)
     m3_l = next(dv for dv in state.design_variables if dv.device == "M3" and dv.variable == "L")
     m4_l = next(dv for dv in state.design_variables if dv.device == "M4" and dv.variable == "L")
@@ -2194,6 +2210,13 @@ def test_llm_schema_command_can_select_and_override_fine_grained_tuning_action(t
     assert command["llm_editable_fields"]["decision_values"] == ["apply", "skip"]
     assert "custom_actions" in command["llm_editable_fields"]
     assert command["write_policy"]["action_admissibility"]["schema_version"] == "analogrf_ir.formal_action_admissibility.v0_1"
+    assert "write_policy" not in persisted_command
+    assert "schema_context" not in persisted_command
+    assert "llm_editable_fields" not in persisted_command
+    assert "available_actions" not in persisted_command["args"]
+    assert persisted_command["args"]["available_action_count"] > 0
+    assert persisted_command["args"]["selected_actions"][0]["action_id"] == load_l_action["action_id"]
+    assert persisted_command["args"]["custom_actions"][0]["action_id"] == "manual_M5_gm_id_set"
     assert application["command_id"] == command["id"]
     assert len(application["applied_actions"]) == 1
     assert m3_l.initial == 6.0e-7
@@ -3494,6 +3517,47 @@ def test_ngspice_top_level_success_uses_required_measurements(monkeypatch):
     assert result.pass_status["icmr"]["success"] is False
     assert result.pass_status["icmr"]["validation_success"] is True
     assert result.pass_status["tran"]["validation_success"] is True
+
+
+def test_ngspice_top_level_success_rejects_nonzero_expected_pass(monkeypatch):
+    sim = NgspiceSimulator(timeout_sec=30)
+
+    monkeypatch.setattr(
+        sim,
+        "_run_ac_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=False,
+            return_code=1,
+            raw_stderr="ngspice aborted after writing partial measurements",
+            measurements={"dc_gain_db": 40.0, "unity_gain_bandwidth": 2.0e7, "phase_margin": 65.0},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_dc_pass",
+        lambda _netlist, _work_dir: SimulationResult(
+            success=True,
+            return_code=0,
+            measurements={"total_power": 1.0e-4, "output_swing": 0.8, "saturation_margin": 0.05},
+        ),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_icmr_pass",
+        lambda _netlist, _work_dir: SimulationResult(success=False, return_code=-1, measurements={}),
+    )
+    monkeypatch.setattr(
+        sim,
+        "_run_tran_pass",
+        lambda _netlist, _work_dir: SimulationResult(success=True, return_code=0, measurements={"slew_rate": 1.2e7}),
+    )
+
+    result = sim.run("* ota\n.end", include_transient=True)
+
+    assert result.success is False
+    assert result.return_code == 1
+    assert result.pass_status["ac"]["validation_success"] is True
+    assert result.pass_status["ac"]["execution_success"] is False
 
 
 def test_ngspice_default_exec_has_no_python_timeout(monkeypatch, tmp_path):

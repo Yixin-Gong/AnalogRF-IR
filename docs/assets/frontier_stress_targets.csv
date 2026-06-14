@@ -1,0 +1,31 @@
+source_schema,stress_schema,target,direction,nominal,frontier_percentile,stress_target,formula
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,dc_gain,min,28.0,28.949058615,28.9,"max(nominal, p35.0-abs_guard)"
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,unity_gain_bandwidth,min,30000000.0,36043027.4851388,35320000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,slew_rate,min,25000000.0,38286279.26127924,37520000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,output_swing,min,0.6,0.8487331849999998,0.8318,"max(nominal, p35.0*scale_guard)"
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,saturation_margin,min,0.01,0.02557777,0.0243,"max(nominal, p35.0*scale_guard)"
+inputs/ota/current_mirror/current_mirror_ota_ihp130.yaml,inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml,phase_margin,min,60.0,60.0,60.0,fixed_60_deg
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,dc_gain,min,25.0,27.063323680000003,27.01,"max(nominal, p35.0-abs_guard)"
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,unity_gain_bandwidth,min,25000000.0,79113174.52403352,77530000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,slew_rate,min,15000000.0,70745726.6535222,69330000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,output_swing,min,0.65,0.8914021099999999,0.8736,"max(nominal, p35.0*scale_guard)"
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,saturation_margin,min,0.01,0.08486107499999998,0.08062,"max(nominal, p35.0*scale_guard)"
+inputs/ota/five_transistor/five_transistor_ota.yaml,inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml,phase_margin,min,60.0,60.0,60.0,fixed_60_deg
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,dc_gain,min,45.0,45.847445300000004,45.8,"max(nominal, p35.0-abs_guard)"
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,unity_gain_bandwidth,min,20000000.0,33319354.183798745,32650000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,slew_rate,min,12000000.0,18383780.11259513,16000000.0,manual_relax_to_measured_llm_full_frontier
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,output_swing,min,0.6,0.9594758000000001,0.9403,"max(nominal, p35.0*scale_guard)"
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,saturation_margin,min,0.01,0.025806599999999985,0.02452,"max(nominal, p35.0*scale_guard)"
+inputs/ota/folded_cascode/folded_cascode_ota_ihp130.yaml,inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml,phase_margin,min,60.0,60.0,60.0,fixed_60_deg
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,dc_gain,min,48.0,48.4017404,48.35,"max(nominal, p35.0-abs_guard)"
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,unity_gain_bandwidth,min,7000000.0,12641133.296512159,12390000.0,"max(nominal, p35.0*scale_guard)"
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,slew_rate,min,6000000.0,6262332.636658772,5700000.0,manual_relax_to_measured_llm_full_frontier
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,output_swing,min,0.55,0.9577692,0.9386,"max(nominal, p35.0*scale_guard)"
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,saturation_margin,min,0.005,0.00779790000000001,0.007408,"max(nominal, p35.0*scale_guard)"
+inputs/ota/telescopic/telescopic_ota_ihp130.yaml,inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml,phase_margin,min,60.0,60.0,60.0,fixed_60_deg
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,dc_gain,min,57.0,57.0398012,56.5,manual_small_relax_after_llm_full_seed8_outlier
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,unity_gain_bandwidth,min,20000000.0,36709863.86543687,35000000.0,manual_small_relax_after_llm_full_seed8_outlier
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,slew_rate,min,10000000.0,30092144.342144564,29000000.0,manual_small_relax_after_llm_full_seed8_outlier
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,output_swing,min,0.49,0.7873066,0.76,manual_small_relax_after_llm_full_seed8_outlier
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,saturation_margin,min,0.01,0.10669399999999998,0.095,manual_small_relax_after_llm_full_seed8_outlier
+inputs/ota/two_stage_miller/two_stage_miller_ota.yaml,inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml,phase_margin,min,60.0,60.0,60.0,fixed_60_deg

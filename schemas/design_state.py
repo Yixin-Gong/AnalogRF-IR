@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import yaml
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union, Tuple
 from pathlib import Path
 
@@ -300,6 +300,7 @@ class DesignState:
 
     def to_dict(self, *, include_runtime_context: bool = True) -> dict:
         data = _dataclass_to_dict(self)
+        _compact_serialized_runtime_state(data)
         if not include_runtime_context:
             data.pop("process", None)
             data.pop("simulation", None)
@@ -310,11 +311,12 @@ class DesignState:
         return _dict_to_design_state(d)
 
     def to_yaml(self, path: Union[str, Path], *, include_runtime_context: bool = True) -> None:
-        self._ensure_wl_on_grid()
+        state = self.clone()
+        state._ensure_wl_on_grid()
         path = Path(path)
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(
-                self.to_dict(include_runtime_context=include_runtime_context),
+                state.to_dict(include_runtime_context=include_runtime_context),
                 f,
                 default_flow_style=False,
                 allow_unicode=True,
@@ -452,6 +454,307 @@ def _dataclass_to_dict(obj: Any) -> Any:
         return obj
 
 
+def _compact_serialized_runtime_state(data: dict[str, Any]) -> None:
+    diagnostics = data.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return
+    causal = diagnostics.get("causal_diagnostics")
+    if isinstance(causal, dict):
+        diagnostics["causal_diagnostics"] = _compact_serialized_causal_diagnostics(causal)
+    commands = diagnostics.get("agent_tool_commands")
+    if isinstance(commands, list):
+        diagnostics["agent_tool_commands"] = [
+            _compact_serialized_agent_command(command)
+            for command in commands
+            if isinstance(command, dict)
+        ]
+
+
+def _compact_serialized_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
+    out = dict(causal)
+    if isinstance(out.get("root_cause_attribution"), list):
+        out["root_cause_attribution"] = [
+            _compact_serialized_root_cause(item)
+            for item in out["root_cause_attribution"][:5]
+            if isinstance(item, dict)
+        ]
+    if isinstance(out.get("constrained_action_optimizer"), dict):
+        out["constrained_action_optimizer"] = _compact_serialized_action_optimizer(out["constrained_action_optimizer"])
+    if isinstance(out.get("attribution_guided_tuning"), dict):
+        out["attribution_guided_tuning"] = _compact_serialized_attribution_tuning(out["attribution_guided_tuning"])
+    for heavy_key in ("dependency_graph", "agent_failure_attribution", "counterfactual_predictions", "suggested_validation_experiments"):
+        out.pop(heavy_key, None)
+    return out
+
+
+def _compact_serialized_root_cause(item: dict[str, Any]) -> dict[str, Any]:
+    keep = ("node", "score", "metrics", "component", "score_components", "propagation_path")
+    return {key: item[key] for key in keep if key in item}
+
+
+def _compact_serialized_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
+    keep = ("schema_version", "status", "model_source", "objective_before", "objective_after", "objective_improvement")
+    out = {key: optimizer[key] for key in keep if key in optimizer}
+    if isinstance(optimizer.get("strategy"), dict):
+        out["strategy"] = _compact_serialized_strategy(optimizer["strategy"])
+    if isinstance(optimizer.get("selected_actions"), list):
+        out["selected_actions"] = [
+            _compact_serialized_tuning_action(item)
+            for item in optimizer["selected_actions"][:5]
+            if isinstance(item, dict)
+        ]
+    return out
+
+
+def _compact_serialized_attribution_tuning(tuning: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        "author": tuning.get("author", ""),
+        "planning_mode": tuning.get("planning_mode", ""),
+    }
+    if isinstance(tuning.get("decision_model"), dict):
+        out["decision_model"] = _compact_serialized_decision_model(tuning["decision_model"])
+    if isinstance(tuning.get("hard_physical_gate"), dict):
+        out["hard_physical_gate"] = {
+            "executor": tuning["hard_physical_gate"].get("executor", ""),
+        }
+    if isinstance(tuning.get("by_failure"), list):
+        out["by_failure"] = [
+            _compact_serialized_tuning_failure(item)
+            for item in tuning["by_failure"]
+            if isinstance(item, dict)
+        ]
+    return out
+
+
+def _compact_serialized_decision_model(model: dict[str, Any]) -> dict[str, Any]:
+    keep = ("type", "optimizer_status", "selected_action_ids", "objective_before", "objective_after", "model_source")
+    out = {key: model[key] for key in keep if key in model}
+    if isinstance(model.get("strategy"), dict):
+        out["strategy"] = _compact_serialized_strategy(model["strategy"])
+    return out
+
+
+def _compact_serialized_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
+    keep = ("name", "planning_mode")
+    return {key: strategy[key] for key in keep if key in strategy}
+
+
+def _compact_serialized_tuning_failure(item: dict[str, Any]) -> dict[str, Any]:
+    actions = item.get("actions", []) if isinstance(item.get("actions"), list) else []
+    compact_actions = [
+        _compact_serialized_tuning_action(action)
+        for action in _select_serialized_tuning_actions(actions)
+        if isinstance(action, dict)
+    ]
+    out = {
+        "metric": item.get("metric"),
+        "observed_direction": item.get("observed_direction"),
+        "target_gap": item.get("target_gap", {}),
+        "action_count": item.get("action_count", len(actions)),
+        "omitted_action_count": max(0, len(actions) - len(compact_actions)),
+        "actions": compact_actions,
+    }
+    strategy = str(item.get("strategy", "") or "")
+    if strategy:
+        out["strategy"] = strategy if len(strategy) <= 160 else strategy[:159].rstrip() + "..."
+    return out
+
+
+def _select_serialized_tuning_actions(actions: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    selected = [action for action in actions if isinstance(action, dict) and action.get("optimizer_selected")]
+    out = selected[:limit]
+    base_limit = min(limit, max(3, len(out)))
+    for action in actions:
+        if len(out) >= base_limit:
+            break
+        if action not in out:
+            out.append(action)
+    for action in actions:
+        if len(out) >= limit:
+            break
+        if not isinstance(action, dict) or action in out:
+            continue
+        knob = str(action.get("knob", ""))
+        action_class = str(action.get("action_class", ""))
+        if knob.startswith("global.vbias") or action_class in {"operating_point_headroom", "telescopic_stack_balance"}:
+            out.append(action)
+    for action in actions:
+        if len(out) >= limit:
+            break
+        if isinstance(action, dict) and action not in out:
+            out.append(action)
+    return out
+
+
+def _compact_serialized_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "action_id",
+        "metric",
+        "priority",
+        "action_class",
+        "knob",
+        "apply_to",
+        "direction",
+        "current_value",
+        "suggested_next_value",
+        "suggested_unclipped_value",
+        "target_value",
+        "target_formula",
+        "per_knob_values",
+        "agent_step_fraction",
+        "tuning_mode",
+        "min_step_fraction",
+        "max_step_fraction",
+        "range",
+        "range_update",
+        "multi_objective_guardrail",
+        "gain_only_ro_policy",
+        "optimizer_selected",
+        "objective_delta",
+        "local_model_source",
+    )
+    out = {key: action[key] for key in keep if key in action}
+    admissibility = action.get("action_admissibility") or (action.get("optimizer", {}) or {}).get("action_admissibility")
+    if isinstance(admissibility, dict):
+        out["action_admissibility"] = _compact_serialized_action_admissibility(admissibility)
+    evidence_gate = action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate")
+    if isinstance(evidence_gate, dict):
+        out["evidence_gate"] = _compact_serialized_evidence_gate(evidence_gate)
+    optimizer = action.get("optimizer")
+    if isinstance(optimizer, dict):
+        out["optimizer"] = _compact_serialized_action_optimizer_trace(optimizer)
+    return out
+
+
+def _compact_serialized_action_optimizer_trace(optimizer: dict[str, Any]) -> dict[str, Any]:
+    keep = ("optimizer_selected", "objective_delta", "local_model_source", "predicted_violation_delta", "uncertainty", "constraint_penalty")
+    out = {key: optimizer[key] for key in keep if key in optimizer}
+    if isinstance(optimizer.get("action_admissibility"), dict):
+        out["action_admissibility"] = _compact_serialized_action_admissibility(optimizer["action_admissibility"])
+    if isinstance(optimizer.get("evidence_gate"), dict):
+        out["evidence_gate"] = _compact_serialized_evidence_gate(optimizer["evidence_gate"])
+    return out
+
+
+def _compact_serialized_action_admissibility(gate: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        key: gate[key]
+        for key in ("schema_version", "passed", "objective_delta")
+        if key in gate
+    }
+    if gate.get("reasons"):
+        out["reasons"] = list(gate.get("reasons", []) or [])[:2]
+    return out
+
+
+def _compact_serialized_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "schema_version",
+        "required",
+        "passed",
+        "source",
+        "objective_improvement",
+        "relative_improvement",
+        "weighted_tradeoff_worsening",
+        "tradeoff_to_improvement_ratio",
+        "max_component_worsening",
+        "uncertainty",
+        "improved_failed_metrics",
+    )
+    out = {key: gate[key] for key in keep if key in gate}
+    if gate.get("reasons"):
+        out["reasons"] = list(gate.get("reasons", []) or [])[:2]
+    return out
+
+
+def _compact_serialized_agent_command(command: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "schema_version",
+        "id",
+        "author",
+        "tool",
+        "status",
+        "round_index",
+        "state_source",
+        "llm_notes",
+        "llm_rationale",
+        "llm_planner",
+        "llm_increment",
+    )
+    out = {key: command[key] for key in keep if key in command}
+    args = command.get("args", {}) if isinstance(command.get("args"), dict) else {}
+    if args:
+        compact_args = {
+            key: args[key]
+            for key in ("max_primary_actions_per_failure", "allowed_priorities")
+            if key in args
+        }
+        selected = args.get("selected_actions")
+        if isinstance(selected, list):
+            compact_args["selected_actions"] = [
+                _compact_serialized_action_selection(item)
+                for item in selected
+                if isinstance(item, dict)
+            ]
+        custom = args.get("custom_actions")
+        if isinstance(custom, list):
+            compact_args["custom_actions"] = [
+                _compact_serialized_custom_action(item)
+                for item in custom
+                if isinstance(item, dict)
+            ]
+        available = args.get("available_actions")
+        if isinstance(available, list):
+            compact_args["available_action_count"] = len(available)
+        out["args"] = compact_args
+    application = command.get("application")
+    if isinstance(application, dict):
+        out["application"] = _compact_serialized_application(application)
+    return out
+
+
+def _compact_serialized_action_selection(item: dict[str, Any]) -> dict[str, Any]:
+    keep = ("action_id", "decision", "reason", "overrides")
+    return {key: item[key] for key in keep if key in item}
+
+
+def _compact_serialized_custom_action(item: dict[str, Any]) -> dict[str, Any]:
+    keep = (
+        "action_id",
+        "decision",
+        "knob",
+        "apply_to",
+        "metric",
+        "direction",
+        "suggested_next_value",
+        "suggested_unclipped_value",
+        "per_knob_values",
+        "range_update",
+        "priority",
+        "action_class",
+        "reason",
+    )
+    return {key: item[key] for key in keep if key in item}
+
+
+def _compact_serialized_application(application: dict[str, Any]) -> dict[str, Any]:
+    applied = application.get("applied_actions", []) or []
+    skipped = application.get("skipped_actions", []) or []
+    return {
+        "round_index": application.get("round_index"),
+        "command_id": application.get("command_id", ""),
+        "applied_action_count": len(applied),
+        "skipped_action_count": len(skipped),
+        "applied_actions": [_compact_serialized_application_action(item) for item in applied[:5] if isinstance(item, dict)],
+        "skipped_actions": [_compact_serialized_application_action(item) for item in skipped[:5] if isinstance(item, dict)],
+    }
+
+
+def _compact_serialized_application_action(item: dict[str, Any]) -> dict[str, Any]:
+    keep = ("action_id", "knob", "apply_to", "applied_knobs", "applied", "reason")
+    return {key: item[key] for key in keep if key in item}
+
+
 def _parse_range(v: dict) -> Range:
     min_raw = v.get("min", 0)
     max_raw = v.get("max", 0)
@@ -571,9 +874,10 @@ def _dict_to_design_state(d: dict) -> DesignState:
     sim_d = d.get("simulation", {})
     simulation = SimulationConfig(
         temperature=sim_d.get("temperature", 27.0), supply=sim_d.get("supply", {}),
-        model_lib=sim_d.get("model_lib", ""), analyses=sim_d.get("analyses", ["op", "ac"]),
+        model_lib=sim_d.get("model_lib", ""), analyses=sim_d.get("analyses", ["op", "ac", "dc"]),
         ac_start=sim_d.get("ac_start", 1.0), ac_stop=sim_d.get("ac_stop", 1e9),
-        ac_points=sim_d.get("ac_points", 50), cload=sim_d.get("cload", 1e-12)
+        ac_points=sim_d.get("ac_points", 50), cload=sim_d.get("cload", 1e-12),
+        bias_voltage=sim_d.get("bias_voltage", 0.6),
     )
 
     # process

@@ -1,0 +1,89 @@
+schema_version: analogrf_ir.ablation_config.v0_1
+description: IHP SG13G2 130 nm OTA frontier-stress ablation matrix derived from the measured LLM-full frontier; PM is fixed at 60 deg and power is excluded from the stress objective.
+
+base_config: configs/default.yaml
+output_dir: runs/ablations_ihp130_ota_frontier_stress_seed1_10
+schemas:
+  - inputs/ota_stress/frontier/five_transistor_ota_frontier_stress.yaml
+  - inputs/ota_stress/frontier/current_mirror_ota_ihp130_frontier_stress.yaml
+  - inputs/ota_stress/frontier/folded_cascode_ota_ihp130_frontier_stress.yaml
+  - inputs/ota_stress/frontier/telescopic_ota_ihp130_frontier_stress.yaml
+  - inputs/ota_stress/frontier/two_stage_miller_ota_frontier_stress.yaml
+seeds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+base_overrides:
+  input:
+    env: environment_ihp_sg13g2.yaml
+    topology: yaml
+  optimizer:
+    generations: 30
+    pop_size: 80
+  reoptimization:
+    generations: 8
+    pop_size: 64
+  llm:
+    model: deepseek-v4-pro
+    thinking: enabled
+    timeout: 180
+    max_tokens: 12000
+    reasoning_effort: max
+    temperature: 0.0
+  intervention:
+    max_actions: 8
+  actions:
+    strategy: combo_coarse_fine
+  runtime:
+    profile: ablation_fast
+
+cases:
+  - name: optimizer_only
+    family: baseline
+    description: Frontier-stress IHP130 optimizer only; no diagnosis, intervention model, LLM planning, or postprocess repair.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'off'
+
+  - name: optimizer_postprocess_fallback
+    family: postprocess_control
+    description: Frontier-stress IHP130 optimizer plus topology-specific fallback postprocess when near-feasible or stagnated.
+    overrides:
+      agent:
+        rounds: 1
+      intervention:
+        enable: false
+      postprocess:
+        policy: 'fallback'
+
+  - name: diagnosis_spice_postprocess_fallback
+    family: diagnosis_control
+    description: Frontier-stress deterministic diagnosis-guided rounds with constrained local intervention evidence and fallback postprocess, but without LLM planning.
+    overrides:
+      agent:
+        rounds: 30
+      llm:
+        provider: deterministic
+      intervention:
+        enable: true
+        max_actions: 8
+      postprocess:
+        policy: 'fallback'
+
+  - name: llm_full_residual_escape_postprocess_fallback
+    family: llm_full
+    description: Frontier-stress full diagnosis flow with LLM residual-escape patches accepted only by measured SPICE objective improvement.
+    overrides:
+      agent:
+        rounds: 30
+        llm_policy: residual_escape
+      llm:
+        provider: deepseek
+      intervention:
+        enable: true
+        max_actions: 8
+        transient_policy: targeted
+      postprocess:
+        policy: 'fallback'

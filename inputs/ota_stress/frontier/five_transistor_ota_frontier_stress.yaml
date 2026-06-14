@@ -1,0 +1,275 @@
+schema_version: '0.1'
+design_name: five_transistor_ota_frontier_stress
+topology:
+  name: five_transistor_ota
+  class: ota
+  architecture: single-stage
+  global_nets:
+  - name: vdd
+    type: supply
+  - name: gnd
+    type: ground
+  ports:
+  - id: vinp
+    direction: input
+  - id: vinn
+    direction: input
+  - id: vout
+    direction: output
+  - id: vbias
+    direction: bias
+  devices:
+  - id: M1
+    role: input_pair
+    stage: input
+    type: nmos
+    model: nmos
+    connections:
+      drain: net1
+      gate: vinn
+      source: tail
+      body: gnd
+  - id: M2
+    role: input_pair
+    stage: input
+    type: nmos
+    model: nmos
+    connections:
+      drain: vout
+      gate: vinp
+      source: tail
+      body: gnd
+  - id: M3
+    role: current_mirror_load
+    stage: load
+    type: pmos
+    model: pmos
+    connections:
+      drain: net1
+      gate: net1
+      source: vdd
+      body: vdd
+  - id: M4
+    role: current_mirror_load
+    stage: load
+    type: pmos
+    model: pmos
+    connections:
+      drain: vout
+      gate: net1
+      source: vdd
+      body: vdd
+  - id: M5
+    role: tail_current_source
+    stage: bias
+    type: nmos
+    model: nmos
+    connections:
+      drain: tail
+      gate: vbias
+      source: gnd
+      body: gnd
+targets:
+  dc_gain:
+    min: 27.01
+    unit: dB
+    priority: 1
+  unity_gain_bandwidth:
+    min: 77530000.0
+    unit: Hz
+    priority: 1
+  phase_margin:
+    min: 60.0
+    unit: deg
+    priority: 1
+  slew_rate:
+    min: 69330000.0
+    unit: V/s
+    priority: 2
+  output_swing:
+    min: 0.8736
+    unit: V
+    priority: 1
+  saturation_margin:
+    min: 0.08062
+    unit: V
+    priority: 3
+  power:
+    max: 0.0002
+    unit: W
+    priority: 9
+design_variables:
+- device: M1
+  variable: gm_id
+  range:
+    min: 12
+    max: 25
+  initial: 15
+  symmetry_label: sym_M1_M2
+- device: M1
+  variable: L
+  range:
+    min: 1.3e-07
+    max: 1.5e-06
+  initial: 2e-07
+  symmetry_label: sym_M1_M2
+- device: M2
+  variable: gm_id
+  range:
+    min: 12
+    max: 25
+  initial: 15
+  symmetry_label: sym_M1_M2
+- device: M2
+  variable: L
+  range:
+    min: 1.3e-07
+    max: 1.5e-06
+  initial: 2e-07
+  symmetry_label: sym_M1_M2
+- device: M3
+  variable: gm_id
+  range:
+    min: 5
+    max: 12
+  initial: 8
+  symmetry_label: sym_load_M3_M4
+- device: M3
+  variable: L
+  range:
+    min: 1.3e-07
+    max: 5.0e-07
+  initial: 5e-07
+  symmetry_label: sym_load_M3_M4
+- device: M4
+  variable: gm_id
+  range:
+    min: 5
+    max: 12
+  initial: 8
+  symmetry_label: sym_load_M3_M4
+- device: M4
+  variable: L
+  range:
+    min: 1.3e-07
+    max: 5.0e-07
+  initial: 5e-07
+  symmetry_label: sym_load_M3_M4
+- device: M5
+  variable: gm_id
+  range:
+    min: 5
+    max: 9
+  initial: 8
+- device: M5
+  variable: L
+  range:
+    min: 1.3e-07
+    max: 5.0e-07
+  initial: 2e-07
+- device: ''
+  variable: I_tail
+  range:
+    min: 1.0e-06
+    max: 0.00025
+  initial: 5.0e-05
+  unit: A
+  description: tail current
+corrections:
+  gm_factor: 0.78
+  gds_factor: 0.85
+  c_factor: 1.0
+  description: gm_factor=0.78 for bandwidth calibration; gds_factor=0.85 for gain
+    calibration
+constraints:
+  gm_id:
+    min: 5
+    max: 25
+  L:
+    min: 1.3e-07
+    max: 1.5e-06
+  devices:
+    M1:
+      gm_id:
+        min: 12
+        max: 25
+    M2:
+      gm_id:
+        min: 12
+        max: 25
+    M3:
+      gm_id:
+        min: 5
+        max: 12
+    M4:
+      gm_id:
+        min: 5
+        max: 12
+    M5:
+      gm_id:
+        min: 5
+        max: 9
+loss_terms:
+- id: gain_deficit
+  formula: relu(targets.dc_gain.min - realized.dc_gain)/max(targets.dc_gain.min, 1)
+  weight: 4.0
+  description: DC gain shortfall
+- id: bw_deficit
+  formula: relu(targets.unity_gain_bandwidth.min - realized.unity_gain_bandwidth)/max(targets.unity_gain_bandwidth.min,
+    1)
+  weight: 2.0
+  description: BW shortfall
+- id: pm_window
+  formula: pm_window_penalty(realized.phase_margin, targets.phase_margin.min)
+  weight: 0.8
+  description: 'PM window penalty: hard below 55 deg, best around 60-65 deg, no reward
+    above 75 deg'
+- id: sr_deficit
+  formula: relu(targets.slew_rate.min - realized.slew_rate)/max(targets.slew_rate.min,
+    1)
+  weight: 0.8
+  description: Slew-rate shortfall
+- id: swing_deficit
+  formula: relu(targets.output_swing.min - realized.output_swing)/max(targets.output_swing.min,
+    1)
+  weight: 1.0
+  description: Output-swing shortfall
+- id: saturation_margin_deficit
+  formula: relu(targets.saturation_margin.min - realized.saturation_margin)/max(targets.saturation_margin.min,
+    1e-3)
+  weight: 40.0
+  description: VDS-VDSAT saturation margin shortfall
+evaluations:
+- name: dc_gain
+  type: ac_gain
+  probe: vout
+  target_ref: dc_gain
+- name: unity_gain_bandwidth
+  type: ugbw
+  probe: vout
+  target_ref: unity_gain_bandwidth
+- name: phase_margin
+  type: phase_margin
+  probe: vout
+  target_ref: phase_margin
+- name: slew_rate
+  type: slew_rate
+  probe: vout
+  target_ref: slew_rate
+- name: output_swing
+  type: output_swing
+  probe: vout
+  target_ref: output_swing
+- name: saturation_margin
+  type: operating_point_margin
+  target_ref: saturation_margin
+- name: total_power
+  type: dc_power
+  target_ref: power
+metadata:
+  stress_profile:
+    name: frontier_stress
+    source_manifest: runs/ablations_ihp130_ota_llm_full_residual_escape_compact_reverse_20260611/manifest.json
+    source_case: llm_full_residual_escape_postprocess_fallback
+    rule: PM fixed at 60 deg; gain/UGB/SR/swing/saturation use non-power Pareto p35
+      with guard bands; power is excluded from the stress objective

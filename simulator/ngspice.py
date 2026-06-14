@@ -127,7 +127,12 @@ class NgspiceSimulator:
             for summary in merged.pass_status.values()
             if summary.get("expected_measurements")
         )
-        merged.success = bool(merged.measurements) and expected_measurements_ok and not missing_required
+        expected_executions_ok = all(
+            summary.get("return_code") == 0
+            for summary in merged.pass_status.values()
+            if summary.get("expected_measurements")
+        )
+        merged.success = bool(merged.measurements) and expected_measurements_ok and expected_executions_ok and not missing_required
         merged.return_code = 0 if merged.success else 1
 
         return merged
@@ -150,6 +155,7 @@ class NgspiceSimulator:
             "expected_measurements": sorted(expected_measurements),
             "missing_measurements": missing,
             "validation_success": not missing,
+            "execution_success": result.return_code == 0,
             "required_for_run": bool(required_for_run),
         }
         if result.raw_stderr:

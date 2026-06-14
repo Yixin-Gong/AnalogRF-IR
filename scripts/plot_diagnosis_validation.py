@@ -242,13 +242,18 @@ def plot_validation(actions: pd.DataFrame, selected: pd.DataFrame, overlaps: pd.
         data = selected.dropna(subset=["objective_delta"]).copy()
         data["objective_reduction"] = -data["objective_delta"]
         data = data[data["objective_reduction"] > 0].copy()
-        sns.stripplot(data=data, x="objective_reduction", y="method", hue="method", dodge=False, legend=False, size=4.8, alpha=0.72, ax=ax)
-        ax.set_xscale("log")
         ax.set_title(r"Selected action $-\Delta J$", fontsize=10)
-        ax.set_xlabel("Objective reduction, log scale")
         ax.set_ylabel("")
         ax.tick_params(axis="y", labelsize=8)
-        if not data.empty:
+        if data.empty:
+            ax.text(0.5, 0.5, "No improving selected actions", ha="center", va="center", fontsize=8, color="#64748b")
+            ax.set_xlabel("Objective reduction")
+            ax.set_xticks([])
+            ax.set_yticks([])
+        else:
+            sns.stripplot(data=data, x="objective_reduction", y="method", hue="method", dodge=False, legend=False, size=4.8, alpha=0.72, ax=ax)
+            ax.set_xscale("log")
+            ax.set_xlabel("Objective reduction, log scale")
             medians = data.groupby("method")["objective_reduction"].median().to_dict()
             det = medians.get("Diagnosis + repair")
             llm = medians.get("LLM diagnosis + repair")

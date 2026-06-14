@@ -245,9 +245,9 @@ def _compact_causal_diagnostics(causal: dict[str, Any]) -> dict[str, Any]:
         "constrained_action_optimizer": _compact_action_optimizer(causal.get("constrained_action_optimizer", {}) or {}),
         "attribution_guided_tuning": {
             "author": tuning.get("author", ""),
-            "decision_model": tuning.get("decision_model", {}),
+            "decision_model": _compact_tuning_decision_model(tuning.get("decision_model", {}) or {}),
             "planning_mode": tuning.get("planning_mode", ""),
-            "hard_physical_gate": tuning.get("hard_physical_gate", {}),
+            "hard_physical_gate": _compact_hard_physical_gate(tuning.get("hard_physical_gate", {}) or {}),
             "by_failure": _compact_tuning_failures(tuning.get("by_failure", []) or []),
         },
     }
@@ -261,9 +261,7 @@ def _compact_root_causes(root_causes: list[dict[str, Any]]) -> list[dict[str, An
             "metrics": item.get("metrics", []),
             "component": item.get("component"),
             "score_components": item.get("score_components", {}),
-            "structural_reason": item.get("structural_reason", ""),
             "propagation_path": item.get("propagation_path", []),
-            "spec_impact": item.get("spec_impact", ""),
         }
         for item in root_causes[:5]
     ]
@@ -281,23 +279,81 @@ def _compact_sensitivity_comparison(comparison: dict[str, Any]) -> dict[str, Any
 
 
 def _compact_tuning_failures(failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
+    out = []
+    for item in failures:
+        actions = item.get("actions", []) or []
+        compact_actions = [_compact_tuning_action(action) for action in _select_compact_tuning_actions(actions)]
+        compact = {
             "metric": item.get("metric"),
             "observed_direction": item.get("observed_direction"),
             "target_gap": item.get("target_gap", {}),
-            "strategy": item.get("strategy", ""),
-            "actions": [_compact_tuning_action(action) for action in item.get("actions", [])],
+            "strategy": _short_text(item.get("strategy", "")),
+            "action_count": len(actions),
+            "omitted_action_count": max(0, len(actions) - len(compact_actions)),
+            "actions": compact_actions,
         }
-        for item in failures
-    ]
+        out.append(compact)
+    return out
+
+
+def _select_compact_tuning_actions(actions: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    selected = [action for action in actions if action.get("optimizer_selected")]
+    remainder = [action for action in actions if action not in selected]
+    out = selected[:limit]
+    base_limit = min(limit, max(3, len(out)))
+    for action in remainder:
+        if len(out) >= base_limit:
+            break
+        out.append(action)
+    for action in actions:
+        if len(out) >= limit:
+            break
+        if action in out:
+            continue
+        knob = str(action.get("knob", ""))
+        action_class = str(action.get("action_class", ""))
+        if knob.startswith("global.vbias") or action_class in {"operating_point_headroom", "telescopic_stack_balance"}:
+            out.append(action)
+    for action in actions:
+        if len(out) >= limit:
+            break
+        if action not in out:
+            out.append(action)
+    return out
+
+
+def _compact_tuning_decision_model(model: dict[str, Any]) -> dict[str, Any]:
+    if not model:
+        return {}
+    return {
+        "type": model.get("type"),
+        "optimizer_status": model.get("optimizer_status"),
+        "selected_action_ids": model.get("selected_action_ids", []),
+        "objective_before": model.get("objective_before"),
+        "objective_after": model.get("objective_after"),
+        "model_source": model.get("model_source"),
+        "strategy": _compact_strategy(model.get("strategy", {}) or {}),
+    }
+
+
+def _compact_strategy(strategy: dict[str, Any]) -> dict[str, Any]:
+    keep = ("name", "planning_mode")
+    return {key: strategy[key] for key in keep if key in strategy}
+
+
+def _compact_hard_physical_gate(gate: dict[str, Any]) -> dict[str, Any]:
+    if not gate:
+        return {}
+    return {
+        "principle": _short_text(gate.get("principle", "")),
+        "executor": gate.get("executor", ""),
+    }
 
 
 def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
     keep = (
         "action_id",
         "metric",
-        "cause_node",
         "priority",
         "action_class",
         "knob",
@@ -317,14 +373,12 @@ def _compact_tuning_action(action: dict[str, Any]) -> dict[str, Any]:
         "range_update",
         "multi_objective_guardrail",
         "gain_only_ro_policy",
-        "hard_physical_gate",
         "optimizer_selected",
-        "action_admissibility",
-        "expected_effect",
-        "tradeoffs",
-        "rationale",
     )
     out = {key: action[key] for key in keep if key in action}
+    admissibility = action.get("action_admissibility") or (action.get("optimizer", {}) or {}).get("action_admissibility")
+    if admissibility:
+        out["action_admissibility"] = _compact_action_admissibility(admissibility)
     gate = action.get("evidence_gate") or (action.get("optimizer", {}) or {}).get("evidence_gate")
     if gate:
         out["evidence_gate"] = _compact_evidence_gate(gate)
@@ -357,31 +411,20 @@ def _compact_action_optimizer(optimizer: dict[str, Any]) -> dict[str, Any]:
         "objective_before": optimizer.get("objective_before"),
         "objective_after": optimizer.get("objective_after"),
         "objective_improvement": optimizer.get("objective_improvement"),
-        "strategy": optimizer.get("strategy", {}),
+        "strategy": _compact_strategy(optimizer.get("strategy", {}) or {}),
         "selected_actions": [
-            {
-                "action_id": item.get("action_id"),
-                "metric": item.get("metric"),
-                "priority": item.get("priority"),
-                "action_class": item.get("action_class"),
-                "knob": item.get("knob"),
-                "apply_to": item.get("apply_to", []),
-                "direction": item.get("direction"),
-                "current_value": item.get("current_value"),
-                "suggested_next_value": item.get("suggested_next_value"),
-                "suggested_unclipped_value": item.get("suggested_unclipped_value"),
-                "target_value": item.get("target_value"),
-                "per_knob_values": item.get("per_knob_values", {}),
-                "range_update": item.get("range_update"),
-                "objective_delta": item.get("objective_delta"),
-                "local_model_source": item.get("local_model_source"),
-                "evidence_gate": _compact_evidence_gate(item.get("evidence_gate", {}) or {}),
-                "action_admissibility": _compact_action_admissibility(item.get("action_admissibility", {}) or {}),
-                "selection_reason": item.get("selection_reason", ""),
-            }
+            _compact_selected_optimizer_action(item)
             for item in (optimizer.get("selected_actions", []) or [])[:5]
         ],
     }
+
+
+def _compact_selected_optimizer_action(item: dict[str, Any]) -> dict[str, Any]:
+    out = _compact_tuning_action(item)
+    for key in ("objective_delta", "local_model_source"):
+        if key in item:
+            out[key] = item[key]
+    return out
 
 
 def _compact_action_trace(trace: dict[str, Any]) -> dict[str, Any]:
@@ -393,9 +436,11 @@ def _compact_action_trace(trace: dict[str, Any]) -> dict[str, Any]:
         "constraint_penalty",
         "optimizer_selected",
         "action_admissibility",
-        "selection_reason",
     )
-    return {key: trace[key] for key in keep if key in trace}
+    out = {key: trace[key] for key in keep if key in trace and key != "action_admissibility"}
+    if trace.get("action_admissibility"):
+        out["action_admissibility"] = _compact_action_admissibility(trace["action_admissibility"])
+    return out
 
 
 def _compact_action_admissibility(gate: dict[str, Any]) -> dict[str, Any]:
@@ -403,13 +448,14 @@ def _compact_action_admissibility(gate: dict[str, Any]) -> dict[str, Any]:
         return {}
     keep = (
         "schema_version",
-        "formal_rule",
         "passed",
-        "conditions",
         "objective_delta",
         "reasons",
     )
-    return {key: gate[key] for key in keep if key in gate}
+    out = {key: gate[key] for key in keep if key in gate and key != "reasons"}
+    if gate.get("reasons"):
+        out["reasons"] = list(gate.get("reasons", []) or [])[:2]
+    return out
 
 
 def _compact_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:
@@ -429,7 +475,15 @@ def _compact_evidence_gate(gate: dict[str, Any]) -> dict[str, Any]:
         "improved_failed_metrics",
         "reasons",
     )
-    return {key: gate[key] for key in keep if key in gate}
+    out = {key: gate[key] for key in keep if key in gate and key != "reasons"}
+    if gate.get("reasons"):
+        out["reasons"] = list(gate.get("reasons", []) or [])[:2]
+    return out
+
+
+def _short_text(value: Any, *, limit: int = 160) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "..."
 
 
 def _build_data_alignment_audit(
